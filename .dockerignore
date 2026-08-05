@@ -1,0 +1,10 @@
+.git/
+__pycache__/
+*.pyc
+*.pyo
+.env
+plans/
+logs/
+config/
+*.md
+!Dockerfile

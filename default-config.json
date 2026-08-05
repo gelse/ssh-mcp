@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "ssh_targets": {
+    "example-server-1": {
+      "host": "server1.example.com",
+      "port": 22,
+      "username": "admin",
+      "private_key": "/app/ssh_key"
+    },
+    "example-server-2": {
+      "host": "192.168.1.100",
+      "port": 22,
+      "username": "root",
+      "password": "CHANGE_ME"
+    }
+  },
+  "block_patterns": [
+    "\\brm\\s+-rf\\b",
+    "\\bdd\\s+if=",
+    "\\b>:.*/(dev|proc|sys)/",
+    "\\bmkfs\\.",
+    "\\bwipefs\\b",
+    "\\bshutdown\\b",
+    "\\breboot\\b",
+    "\\bpoweroff\\b",
+    "\\binit\\s+[06]",
+    "\\bhalt\\b"
+  ],
+  "allowed_commands": {
+    "default": [
+      {
+        "targets": ["*"],
+        "commands": [
+          "hostname", "uptime", "free", "df", "du",
+          "docker", "docker-compose", "systemctl", "journalctl",
+          "kubectl", "ps", "top", "htop",
+          "ls", "cat", "head", "tail", "grep", "find", "wc",
+          "ss", "netstat", "ip", "ping",
+          "curl", "wget",
+          "echo", "date", "who", "id",
+          "lsof", "mount", "smartctl", "lsblk"
+        ]
+      }
+    ],
+    "api_keys": [],
+    "networks": []
+  },
+  "settings": {
+    "max_output_length": 50000,
+    "command_timeout_max": 120
+  }
+}

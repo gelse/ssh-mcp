@@ -1,0 +1,33 @@
+services:
+  mcp-ssh:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mcp-ssh:local
+    container_name: mcp-ssh
+    restart: unless-stopped
+    user: "${UID:-1000}:${GID:-1000}"
+    volumes:
+      - ./config:/config
+      - ./logs:/logs
+      - ./ssh_key:/app/ssh_key:ro
+      - ./ssh_key.pub:/app/ssh_key.pub:ro
+    environment:
+      - CONFIG_DIR=/config
+      - LOG_DIR=/logs
+    networks:
+      - traefik
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.mcp-ssh.entrypoints: "https"
+      traefik.http.routers.mcp-ssh.tls: "true"
+      traefik.http.routers.mcp-ssh.rule: "Host(`ssh-mcp.example.com`)"
+      traefik.http.routers.mcp-ssh.service: "mcp-ssh"
+      traefik.http.routers.mcp-ssh.middlewares: "mcp-ssh-headers"
+      traefik.http.middlewares.mcp-ssh-headers.headers.customrequestheaders.X-Forwarded-For: ""
+      traefik.http.services.mcp-ssh.loadbalancer.server.port: "8080"
+      traefik.docker.network: "traefik"
+
+networks:
+  traefik:
+    external: true
