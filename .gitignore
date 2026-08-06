@@ -1,0 +1,8 @@
+ssh_key.pub
+ssh_key
+**/__pycache__/
+*.pyc
+*.pyo
+.env
+logs/
+config/
