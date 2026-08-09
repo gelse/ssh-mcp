@@ -1,0 +1,269 @@
+- title: "Create lib/sanitize.py with command, server name, and log string sanitizers"
+  description: |
+    Create a dedicated sanitization module implementing the input sanitization pipeline
+    for commands, server names, and log strings.
+
+    **Context**: Topic 13, Improvement #4 "Command Input Sanitization Pipeline" and
+    #8 "Log Injection Prevention". Subtask 13a, Implementation Step 1.
+    See [`plans/13-data-validation-input-sanitization.md`](plans/13-data-validation-input-sanitization.md:42)
+    and [`plans/13a-input-validation-sanitization-pipeline.md`](plans/13a-input-validation-sanitization-pipeline.md:9).
+
+    **Current state**: Commands are received raw before the authorization check in
+    [`lib/auth.py`](lib/auth.py:1) / [`server.py`](server.py:1): null bytes, control
+    characters (e.g. ANSI escapes), homoglyph Unicode, and inconsistent whitespace are
+    not normalized.
+
+    **Tasks**:
+    - Create `lib/sanitize.py` with:
+      - `sanitize_command(raw: str) -> str`: strip null bytes → strip control chars
+        (except `\t`, `\n`, `\r`) → NFKC unicode normalization → strip leading/trailing
+        whitespace
+      - `sanitize_server_name(raw: str) -> str`: validate `[a-zA-Z0-9._-]{1,128}`
+      - `sanitize_log_string(raw: str) -> str`: strip newlines from single-line fields
+    - Use `MAX_SERVER_NAME_LENGTH` / `MAX_API_KEY_LENGTH` constants (see Topic 14) where relevant
+
+    **Acceptance criteria** (from subtask 13a):
+    - Command input goes through the sanitization pipeline before auth
+    - Newlines stripped from log string fields
+  labels:
+    - "area/validation"
+    - "area/security"
+    - "priority/high"
+  assignees: []
+
+- title: "Integrate command sanitization into tool handlers before auth check"
+  description: |
+    Wire `sanitize_command()` into all MCP tool handlers that receive commands so every
+    command is normalized before the authorization check runs.
+
+    **Context**: Topic 13, Issue #4 "Command String Sanitization". Subtask 13a,
+    Implementation Step 2.
+    See [`plans/13-data-validation-input-sanitization.md`](plans/13-data-validation-input-sanitization.md:42)
+    and [`plans/13a-input-validation-sanitization-pipeline.md`](plans/13a-input-validation-sanitization-pipeline.md:13).
+
+    **Current state**: `ssh_execute_command()` in [`server.py`](server.py:1) passes the
+    raw command string to `auth_manager.check_command()` without normalization.
+
+    **Tasks**:
+    - Call `sanitize_command()` at the entry of `ssh_execute_command()` before the auth check
+    - Ensure sudo detection (`_is_command_sudo()`) operates on the sanitized command
+    - Add tests verifying null bytes, ANSI escapes, and homoglyphs are stripped before auth
+    - Integration tests for the sanitization pipeline (step 8 of subtask 13a)
+
+    **Acceptance criteria** (from subtask 13a):
+    - Command input goes through sanitization pipeline before auth
+  labels:
+    - "area/validation"
+    - "area/security"
+    - "priority/high"
+  assignees: []
+
+- title: "Harden API key validation and use timing-safe comparison"
+  description: |
+    Validate API keys strictly (length, character set, stored hash format) and replace
+    `==` comparison with `secrets.compare_digest()`.
+
+    **Context**: Topic 13, Issue #1 "API Key Validation — Insufficient". Subtask 13a,
+    Implementation Step 4.
+    See [`plans/13-data-validation-input-sanitization.md`](plans/13-data-validation-input-sanitization.md:22)
+    and [`plans/13a-input-validation-sanitization-pipeline.md`](plans/13a-input-validation-sanitization-pipeline.md:16).
+
+    **Current state**: [`server.py:88`](server.py:88) hashes the key and only checks
+    `len(key) > 0`. Comparison uses `==`, leaking timing information; no max length or
+    character validation exists.
+
+    **Tasks**:
+    - Enforce max key length of 1024 characters (`MAX_API_KEY_LENGTH`)
+    - Validate the submitted key contains only printable ASCII
+    - Reject non-hex characters in stored hashes
+    - Use `secrets.compare_digest()` for hash comparison in `AuthorizationManager`
+    - Add tests for over-long keys, non-ASCII keys, malformed stored hashes, and timing-safe comparison
+
+    **Acceptance criteria** (from topic plan):
+    - API key comparison uses `secrets.compare_digest()`
+    - API keys validated: max 1024 chars, printable ASCII only
+  labels:
+    - "area/validation"
+    - "area/security"
+    - "priority/high"
+  assignees: []
+
+- title: "Harden client IP extraction with ipaddress validation"
+  description: |
+    Validate extracted client IPs with the `ipaddress` module, handle IPv4-mapped IPv6,
+    and add a configurable trusted proxy model.
+
+    **Context**: Topic 13, Issue #2 "IP Address Extraction — No Validation". Subtask 13a,
+    Implementation Step 3.
+    See [`plans/13-data-validation-input-sanitization.md`](plans/13-data-validation-input-sanitization.md:28)
+    and [`plans/13a-input-validation-sanitization-pipeline.md`](plans/13a-input-validation-sanitization-pipeline.md:15).
+
+    **Current state**: `_extract_client_ip()` in [`server.py:93`](server.py:93) splits
+    X-Forwarded-For on commas, strips whitespace, and returns the first entry without
+    verifying it is a valid IP. The header can be spoofed without a trusted proxy.
+
+    **Tasks**:
+    - Validate the extracted IP with `ipaddress.ip_address()` before use
+    - Normalize IPv4-mapped IPv6 (`::ffff:192.168.1.1`) to IPv4
+    - Reject obviously invalid IPs and malformed X-Forwarded-For values
+    - Add a configurable trusted proxy list (only trust X-Forwarded-For when the direct
+      peer is in the trusted list)
+    - Add tests for IPv4, IPv6, IPv4-mapped IPv6, malformed headers, and spoofed headers
+
+    **Acceptance criteria** (from topic plan):
+    - IP addresses validated with the `ipaddress` module
+    - IPv4-mapped IPv6 handled correctly
+    - Trusted proxy configuration supported
+  labels:
+    - "area/validation"
+    - "area/security"
+    - "priority/high"
+  assignees: []
+
+- title: "Enforce server name constraints and sanitize before logging"
+  description: |
+    Restrict target/server names to `[a-zA-Z0-9._-]{1,128}` and sanitize them before
+    they are used in log messages and error responses.
+
+    **Context**: Topic 13, Issue #3 "Server Name Validation — No Constraints" and
+    #8 "Log Injection Prevention". Subtask 13a, Implementation Steps 1 and 7.
+    See [`plans/13-data-validation-input-sanitization.md`](plans/13-data-validation-input-sanitization.md:35)
+    and [`plans/13a-input-validation-sanitization-pipeline.md`](plans/13a-input-validation-sanitization-pipeline.md:22).
+
+    **Current state**: Target names from config have no length or character validation
+    and are used in logs/errors unsanitized — a name containing newlines enables log
+    injection.
+
+    **Tasks**:
+    - Add `sanitize_server_name()` validation to the config loader for `ssh_targets[].name`
+    - Apply `sanitize_log_string()` to all user-provided values before logging
+    - Strip newlines from fields that shouldn't contain them
+    - Reject names violating `[a-zA-Z0-9._-]{1,128}` with a clear `ConfigValidationError`
+    - Add tests for invalid characters, over-length names, and log-injection payloads
+
+    **Acceptance criteria** (from topic plan):
+    - Server names restricted to `[a-zA-Z0-9._-]{1,128}`
+    - All user-provided values sanitized before logging
+  labels:
+    - "area/validation"
+    - "area/security"
+    - "priority/normal"
+  assignees: []
+
+- title: "Add config resource limits to validation"
+  description: |
+    Enforce resource limits in config validation: max targets, max block patterns, max
+    name length, and max regex pattern length.
+
+    **Context**: Topic 13, Issue #6 "Config Field Length Validation". Subtask 13a,
+    Implementation Step 5.
+    See [`plans/13-data-validation-input-sanitization.md`](plans/13-data-validation-input-sanitization.md:57)
+    and [`plans/13a-input-validation-sanitization-pipeline.md`](plans/13a-input-validation-sanitization-pipeline.md:17).
+
+    **Current state**: [`lib/config.py`](lib/config.py:1) validates types and required
+    fields but places no bounds on counts or lengths.
+
+    **Tasks**:
+    - Max 1000 targets (`MAX_TARGETS`)
+    - Max 500 block patterns (`MAX_BLOCK_PATTERNS`)
+    - Max 128 characters per target name (`MAX_SERVER_NAME_LENGTH`)
+    - Max 10000 characters per regex pattern (`MAX_REGEX_PATTERN_LENGTH`)
+    - Reference constants from `lib/constants.py` (see Topic 14)
+    - Raise `ConfigValidationError` with a clear message referencing the offending field
+    - Add tests for each limit boundary
+
+    **Acceptance criteria** (from topic plan):
+    - Config resource limits enforced
+  labels:
+    - "area/validation"
+    - "area/config"
+    - "priority/normal"
+  assignees: []
+
+- title: "Add ReDoS protection for block pattern regex"
+  description: |
+    Detect and reject dangerous regex patterns at config load time to prevent
+    catastrophic backtracking (ReDoS) attacks.
+
+    **Context**: Topic 13, Issue #7 "Regex Injection in Block Patterns". Subtask 13a,
+    Implementation Step 6.
+    See [`plans/13-data-validation-input-sanitization.md`](plans/13-data-validation-input-sanitization.md:64)
+    and [`plans/13a-input-validation-sanitization-pipeline.md`](plans/13a-input-validation-sanitization-pipeline.md:20).
+
+    **Current state**: Block patterns are user-provided regex compiled and matched
+    without any complexity guard; a pattern like `(a+)+b` against crafted input causes
+    exponential backtracking.
+
+    **Tasks**:
+    - Test patterns on init with a timeout (e.g. `signal.alarm` or a threading timer)
+    - Flag patterns matching known dangerous constructs: `(a+)+`, `(a|a)+`, `(.*a){n}`
+    - Prefer `re.compile(pattern, re.LIMITED_TIME)` where the Python version supports it,
+      or add a timeout wrapper around regex matching
+    - Reject unsafe patterns at config load with a clear error
+    - Add tests with known ReDoS patterns verifying rejection and safe behavior
+
+    **Acceptance criteria** (from subtask 13a):
+    - Dangerous regex patterns flagged at config load
+    - Regex matching bounded by a timeout wrapper
+  labels:
+    - "area/validation"
+    - "area/security"
+    - "priority/high"
+  assignees: []
+
+- title: "Harden SFTP path validation with realpath and sandbox checks"
+  description: |
+    Strengthen SFTP path validation: reject null bytes, normalize with `normpath()`,
+    resolve symlinks with `realpath()`, enforce a sandbox root, and limit path length.
+
+    **Context**: Topic 13, Issue #5 "Path Validation — Incomplete". Improvement #5
+    "Path Validation Hardening". See
+    [`plans/13-data-validation-input-sanitization.md`](plans/13-data-validation-input-sanitization.md:49)
+    and the pipeline at [`plans/13-data-validation-input-sanitization.md`](plans/13-data-validation-input-sanitization.md:102).
+
+    **Current state**: SFTP path checks in [`server.py:252`](server.py:252) and
+    [`server.py:298`](server.py:298) use `os.path.isabs()` and `os.pardir` only — they
+    miss null bytes, symlink traversal, path length, and have no sandbox root.
+
+    **Tasks**:
+    - Reject paths containing null bytes (`\x00`)
+    - Normalize with `os.path.normpath()` and reject `..` traversal
+    - Resolve symlinks with `os.path.realpath()` and check the result stays within the
+      configured sandbox root
+    - Limit path length
+    - Document the strategy (see Topic 15b: realpath cannot be used pre-connection for
+      uploads where the file may not exist yet)
+    - Add tests for traversal, symlink escape, null bytes, and over-long paths
+
+    **Acceptance criteria** (from topic plan):
+    - SFTP paths validated with `realpath()` and sandbox check
+  labels:
+    - "area/validation"
+    - "area/security"
+    - "priority/high"
+  assignees: []
+
+- title: "Sanitize log file path validation in lib/loggers.py"
+  description: |
+    Add validation for log file paths so `lib/loggers.py` does not accept arbitrary
+    unvalidated strings.
+
+    **Context**: Topic 13, Current State table row "Log file paths — None — accepts any
+    string". See [`plans/13-data-validation-input-sanitization.md`](plans/13-data-validation-input-sanitization.md:17).
+
+    **Current state**: [`lib/loggers.py`](lib/loggers.py:1) accepts any string as the log
+    file path with no validation.
+
+    **Tasks**:
+    - Validate the log file path at logger initialization
+    - Reject absolute-path escapes and paths that would write outside the configured log dir
+    - Ensure the path is a plain filename or a path within `log_dir`
+    - Add tests for invalid log paths
+
+    **Acceptance criteria** (from topic plan):
+    - Log file paths validated at initialization
+  labels:
+    - "area/validation"
+    - "area/logging"
+    - "priority/low"
+  assignees: []

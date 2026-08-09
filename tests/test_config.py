@@ -468,3 +468,209 @@ class TestWatcher:
 
             mgr.stop_watcher()
             assert len(errors) == 0
+
+
+# ---------------------------------------------------------------------------
+# Tests: watcher health (last_reload_timestamp / last_error / healthy)
+# ---------------------------------------------------------------------------
+
+
+class TestWatcherHealth:
+    """Health state exposed by ConfigManager for the background watcher."""
+
+    def test_healthy_after_initial_load(self):
+        """A successful load leaves healthy=True and a reload timestamp."""
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            mgr = ConfigManager(td)
+            assert mgr.healthy is True
+            assert mgr.last_error is None
+            assert mgr.last_reload_timestamp is not None
+            assert "T" in mgr.last_reload_timestamp  # ISO-8601 with date/time
+
+    def test_failed_reload_sets_last_error_and_unhealthy(self):
+        """A failed reload records the error and flips healthy to False."""
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            mgr = ConfigManager(td)
+            assert mgr.healthy is True
+
+            broken = _minimal_valid_config()
+            del broken["version"]
+            _write_config(td, broken)
+
+            assert mgr.reload() is False
+            assert mgr.healthy is False
+            assert mgr.last_error is not None
+            assert "Config validation failed" in mgr.last_error
+
+    def test_failed_read_sets_last_error(self):
+        """A read failure (invalid JSON) also records the error."""
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            mgr = ConfigManager(td)
+
+            # Corrupt the file so JSON decoding fails on reload.
+            Path(mgr.config_path).write_text("{ not json", encoding="utf-8")
+
+            assert mgr.reload() is False
+            assert mgr.healthy is False
+            assert mgr.last_error is not None
+            assert "Failed to read config" in mgr.last_error
+
+    def test_successful_reload_clears_error_and_updates_timestamp(self):
+        """A later successful reload restores health and refreshes the timestamp."""
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            mgr = ConfigManager(td)
+            first_ts = mgr.last_reload_timestamp
+
+            broken = _minimal_valid_config()
+            del broken["version"]
+            _write_config(td, broken)
+            assert mgr.reload() is False
+            assert mgr.healthy is False
+
+            _write_config(td, _minimal_valid_config())
+            assert mgr.reload() is True
+            assert mgr.healthy is True
+            assert mgr.last_error is None
+            assert mgr.last_reload_timestamp is not None
+            assert first_ts is not None
+            assert mgr.last_reload_timestamp >= first_ts
+
+    def test_watcher_updates_health_after_invalid_change(self):
+        """The watcher marks the manager unhealthy after noticing bad config."""
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            mgr = ConfigManager(td)
+            mgr.start_watcher(polling_interval=0.05)
+            assert mgr.healthy is True
+
+            broken = _minimal_valid_config()
+            broken["settings"]["retry_max_attempts"] = 0  # invalid
+            _write_config(td, broken)
+
+            import time
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                if not mgr.healthy:
+                    break
+                time.sleep(0.05)
+            else:
+                mgr.stop_watcher()
+                pytest.fail("Watcher did not record the invalid config")
+
+            assert mgr.last_error is not None
+            assert "retry_max_attempts" in mgr.last_error
+            mgr.stop_watcher()
+
+
+# ---------------------------------------------------------------------------
+# Tests: resilience settings validation
+# ---------------------------------------------------------------------------
+
+
+class TestResilienceSettings:
+    """Validation of retry / circuit-breaker settings keys."""
+
+    def test_validated_settings_contain_all_twelve_keys(self):
+        """The validated settings dict always exposes all twelve settings."""
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            mgr = ConfigManager(td)
+            settings = mgr.data["settings"]
+            assert set(settings) == {
+                "max_output_length",
+                "command_timeout_max",
+                "retry_max_attempts",
+                "retry_backoff_base_seconds",
+                "circuit_breaker_failure_threshold",
+                "circuit_breaker_timeout_seconds",
+                "log_level",
+                "max_log_output",
+                "compress_rotated",
+                "pool_max_connections_per_target",
+                "pool_idle_timeout_seconds",
+                "pool_cleanup_interval_seconds",
+            }
+
+    def test_defaults_applied_when_keys_missing(self):
+        """Missing resilience keys fall back to the bundled defaults."""
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            mgr = ConfigManager(td)
+            settings = mgr.data["settings"]
+            assert settings["retry_max_attempts"] == 3
+            assert settings["retry_backoff_base_seconds"] == 1.0
+            assert settings["circuit_breaker_failure_threshold"] == 5
+            assert settings["circuit_breaker_timeout_seconds"] == 60.0
+            assert settings["max_log_output"] == 4096
+            assert settings["compress_rotated"] is True
+
+    def test_valid_values_accepted(self):
+        """Positive int/float values for the resilience settings load fine."""
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _minimal_valid_config()
+            cfg["settings"].update(
+                {
+                    "retry_max_attempts": 7,
+                    "retry_backoff_base_seconds": 0.5,
+                    "circuit_breaker_failure_threshold": 10,
+                    "circuit_breaker_timeout_seconds": 120.0,
+                    "log_level": "debug",
+                    "pool_max_connections_per_target": 10,
+                    "pool_idle_timeout_seconds": 600.0,
+                    "pool_cleanup_interval_seconds": 30.0,
+                }
+            )
+            _write_config(td, cfg)
+            mgr = ConfigManager(td)
+            settings = mgr.data["settings"]
+            assert settings["retry_max_attempts"] == 7
+            assert settings["retry_backoff_base_seconds"] == 0.5
+            assert settings["circuit_breaker_failure_threshold"] == 10
+            assert settings["circuit_breaker_timeout_seconds"] == 120.0
+            assert settings["log_level"] == "DEBUG"
+            assert settings["pool_max_connections_per_target"] == 10
+            assert settings["pool_idle_timeout_seconds"] == 600.0
+            assert settings["pool_cleanup_interval_seconds"] == 30.0
+
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            ("retry_max_attempts", 0),
+            ("retry_max_attempts", "3"),
+            ("circuit_breaker_failure_threshold", 0),
+            ("circuit_breaker_failure_threshold", 2.5),
+            ("retry_backoff_base_seconds", 0),
+            ("retry_backoff_base_seconds", -1.0),
+            ("retry_backoff_base_seconds", True),
+            ("circuit_breaker_timeout_seconds", 0),
+            ("circuit_breaker_timeout_seconds", "60"),
+            ("circuit_breaker_timeout_seconds", False),
+            ("log_level", "VERBOSE"),
+            ("log_level", 10),
+            ("max_log_output", 0),
+            ("max_log_output", "4096"),
+            ("max_log_output", -5),
+            ("compress_rotated", "yes"),
+            ("compress_rotated", 1),
+            ("pool_max_connections_per_target", 0),
+            ("pool_max_connections_per_target", "5"),
+            ("pool_idle_timeout_seconds", 0),
+            ("pool_idle_timeout_seconds", -1.0),
+            ("pool_idle_timeout_seconds", True),
+            ("pool_cleanup_interval_seconds", 0),
+            ("pool_cleanup_interval_seconds", "60"),
+            ("pool_cleanup_interval_seconds", False),
+        ],
+    )
+    def test_invalid_values_rejected(self, key, value):
+        """Non-positive or wrongly-typed resilience settings are rejected."""
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _minimal_valid_config()
+            cfg["settings"][key] = value
+            _write_config(td, cfg)
+            with pytest.raises(ConfigValidationError):
+                ConfigManager(td)

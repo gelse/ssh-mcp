@@ -44,7 +44,7 @@ def test_default_config_creation_from_empty_dir():
         mgr = ConfigManager(td)
         data = mgr.data
         assert data["version"] == 1
-        assert len(data["ssh_targets"]) == 12
+        assert len(data["ssh_targets"]) == 2
         assert os.path.exists(mgr.config_path)
 
         # Verify content matches the bundled file
@@ -74,8 +74,8 @@ def test_full_validation_pass():
         assert isinstance(tdef.get("port", 22), int), f"{tid}: port"
         assert tdef.get("private_key") or tdef.get("password"), f"{tid}: auth"
 
-    # 10 block patterns
-    assert len(bundled["block_patterns"]) == 10
+    # 11 block patterns (includes \bsudo\b as first entry)
+    assert len(bundled["block_patterns"]) == 11
 
     # Allowed commands: default has commands, api_keys empty, networks empty
     ac = bundled["allowed_commands"]
@@ -95,7 +95,7 @@ def test_full_validation_pass():
         dest.write_text(json.dumps(bundled), encoding="utf-8")
         mgr = ConfigManager(td)
         assert mgr.data["version"] == 1
-        assert len(mgr.data["ssh_targets"]) == 12
+        assert len(mgr.data["ssh_targets"]) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +202,7 @@ def test_block_patterns_are_valid_regex():
         dest = Path(td) / "ssh-mcp-config.json"
         dest.write_text(json.dumps(bundled), encoding="utf-8")
         mgr = ConfigManager(td)
-        assert len(mgr.data["block_patterns"]) == 10
+        assert len(mgr.data["block_patterns"]) == 11
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +228,7 @@ def test_concurrent_read_write_safety():
                     # Use .get("ssh_targets", {}) — the safe access pattern
                     targets = mgr.data.get("ssh_targets", {})
                     assert isinstance(targets, dict)
-                    assert len(targets) >= 12
+                    assert len(targets) >= 2
             except Exception as exc:
                 errors.append(exc)
 

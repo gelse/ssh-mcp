@@ -1,0 +1,293 @@
+- title: "Rename internal helpers in server.py to use underscore prefix"
+  description: |
+    Make module-internal helpers private by adding the `_` prefix.
+
+    **Context**: Topic 14, Issue #1 "Inconsistent Private/Public Boundary". Subtask 14a,
+    Implementation Step 1.
+    See [`plans/14-naming-conventions-readability.md`](plans/14-naming-conventions-readability.md:65)
+    and [`plans/14a-rename-internals-constants-docstrings.md`](plans/14a-rename-internals-constants-docstrings.md:16).
+
+    **Current state**: `get_ssh_client()`, `get_api_key()`, and `ensure_directories()` in
+    [`server.py`](server.py:1) are module-internal helpers but lack the `_` prefix,
+    implying they are public API when they are not.
+
+    **Tasks**:
+    - `get_ssh_client()` → `_get_ssh_client()`
+    - `get_api_key()` → `_get_api_key()`
+    - `ensure_directories()` → `_ensure_directories()`
+    - Update all call sites within `server.py`
+    - Rename `_check_block_patterns()` in `server.py` → `_build_block_pattern_error()` to
+      differentiate it from `AuthorizationManager._check_block_patterns()`
+    - Update all test references to the renamed functions
+
+    **Acceptance criteria** (from subtask 14a):
+    - All internal helpers in `server.py` have the `_` prefix
+    - All existing tests pass with renamed symbols
+  labels:
+    - "area/readability"
+    - "priority/normal"
+  assignees: []
+
+- title: "Standardize target identifier name to target_name"
+  description: |
+    Use `target_name` consistently in all internal code (function parameters, AuthResult
+    field, log events) while keeping `server_name` only in MCP tool signatures.
+
+    **Context**: Topic 14, Issue #4 "Variable Name Inconsistency". Subtask 14a,
+    Implementation Step 2.
+    See [`plans/14-naming-conventions-readability.md`](plans/14-naming-conventions-readability.md:76)
+    and [`plans/14a-rename-internals-constants-docstrings.md`](plans/14a-rename-internals-constants-docstrings.md:23).
+
+    **Current state**: `server_name` (tool signatures), `target_name` (config), and
+    `name` (AuthResult dataclass) all refer to the same concept (SSH target identifier).
+
+    **Tasks**:
+    - All internal code uses `target_name` (function parameters, `AuthResult` field, log events)
+    - Keep `server_name` only in MCP tool function signatures (API contract for external clients)
+    - In tool bodies, immediately assign `target_name = server_name`
+    - Update `AuthResult` dataclass: `name` → `target_name`
+    - Update all references in [`lib/auth.py`](lib/auth.py:1), [`lib/config.py`](lib/config.py:1),
+      log events, and error messages
+    - Standardize test fixtures from `server_name` → `target_name`
+
+    **Acceptance criteria** (from subtask 14a):
+    - `target_name` used consistently in all internal code
+    - `server_name` appears only in MCP tool signatures
+    - `AuthResult.name` renamed to `AuthResult.target_name`
+  labels:
+    - "area/readability"
+    - "priority/normal"
+  assignees: []
+
+- title: "Create lib/constants.py with all magic values and defaults"
+  description: |
+    Create `lib/constants.py` defining every magic number and string scattered across the
+    codebase, and replace the raw values with imports.
+
+    **Context**: Topic 14, Issue #5 "Magic Number Naming" and Improvement #3 "Define All
+    Constants". Subtask 14a, Implementation Steps 3 and 4.
+    See [`plans/14-naming-conventions-readability.md`](plans/14-naming-conventions-readability.md:82)
+    and [`plans/14a-rename-internals-constants-docstrings.md`](plans/14a-rename-internals-constants-docstrings.md:30).
+
+    **Current state**: Magic numbers (`15` watcher interval, `50kb` max output, `10` max
+    log size MB, `5` backup count) and magic strings (`"mcp-ssh"`, `"sha256:"`, `"sudo"`,
+    `"127.0.0.1"`, `"ssh_key"`, `"config.json"`, `"/logs"`) are scattered across files.
+
+    **Tasks**:
+    - Create `lib/constants.py` with:
+      - App identity: `APP_NAME`, `APP_VERSION`
+      - Default paths: `DEFAULT_CONFIG_FILENAME`, `DEFAULT_LOG_DIR`, `DEFAULT_LOG_FILENAME`,
+        `DEFAULT_SSH_KEY_FILENAME`
+      - Auth constants: `API_KEY_HASH_PREFIX`, `SUDO_COMMAND_PREFIX`,
+        `SUDO_PASSWORD_PROMPT_FLAGS`, `SUDO_NO_PASSWORD_FLAG`, `FALLBACK_CLIENT_IP`
+      - Default settings: `DEFAULT_MAX_COMMAND_OUTPUT`, `DEFAULT_COMMAND_TIMEOUT_SECONDS`,
+        `DEFAULT_MAX_LOG_FILE_SIZE_MB`, `DEFAULT_MAX_LOG_BACKUP_COUNT`,
+        `DEFAULT_WATCHER_INTERVAL_SECONDS`
+      - Limits: `MAX_SERVER_NAME_LENGTH`, `MAX_API_KEY_LENGTH`, `MAX_REGEX_PATTERN_LENGTH`,
+        `MAX_TARGETS`, `MAX_BLOCK_PATTERNS`
+      - SSH defaults: `DEFAULT_SSH_PORT`, `DEFAULT_SSH_TIMEOUT_SECONDS`
+      - HTTP: `HTTP_TOO_MANY_REQUESTS`, `HTTP_SERVICE_UNAVAILABLE`
+    - Replace magic values in [`server.py`](server.py:1), [`lib/auth.py`](lib/auth.py:1),
+      [`lib/config.py`](lib/config.py:1) with imports
+    - Rename `_current_log_path` → `_log_path` in [`lib/loggers.py`](lib/loggers.py:1)
+
+    **Acceptance criteria** (from subtask 14a):
+    - `lib/constants.py` defines all magic values and is imported wherever they're used
+    - `_current_log_path` renamed to `_log_path`
+  labels:
+    - "area/readability"
+    - "priority/normal"
+  assignees: []
+
+- title: "Add module docstrings to every Python file"
+  description: |
+    Add one-line module docstrings to every `.py` file and re-export important symbols
+    from `lib/__init__.py`.
+
+    **Context**: Topic 14, Issue #8 "No Module Docstrings". Subtask 14a, Implementation
+    Step 5.
+    See [`plans/14-naming-conventions-readability.md`](plans/14-naming-conventions-readability.md:96)
+    and [`plans/14a-rename-internals-constants-docstrings.md`](plans/14a-rename-internals-constants-docstrings.md:80).
+
+    **Current state**: Several modules lack docstrings; `lib/__init__.py` has only a comment.
+
+    **Tasks**:
+    - Add one-line module docstrings per the table in subtask 14a to: `server.py`,
+      `lib/__init__.py`, `lib/auth.py`, `lib/config.py`, `lib/loggers.py`, `lib/health.py`,
+      `lib/request_context.py` (and the remaining modules under `lib/`)
+    - `lib/__init__.py` re-exports important symbols
+
+    **Acceptance criteria** (from subtask 14a):
+    - Every `.py` file has a module docstring
+  labels:
+    - "area/readability"
+    - "area/documentation"
+    - "priority/low"
+  assignees: []
+
+- title: "Simplify SSH key loading with a dispatch table"
+  description: |
+    Replace the nested `if/elif` PEM-header detection in `_get_ssh_client()` with a
+    dispatch table and a `_load_ssh_key()` helper.
+
+    **Context**: Topic 14, Readability Issue #1 "Dense Conditional Logic" and Improvement
+    #5 "Simplify Key Loading". Subtask 14b, Implementation Step 1.
+    See [`plans/14-naming-conventions-readability.md`](plans/14-naming-conventions-readability.md:101)
+    and [`plans/14b-simplify-key-loading-editorconfig-test-names.md`](plans/14b-simplify-key-loading-editorconfig-test-names.md:17).
+
+    **Current state**: Key type detection in [`server.py:152`](server.py:152) uses nested
+    `if/elif` checking PEM headers with string inspection.
+
+    **Tasks**:
+    - Introduce `_KEY_LOADERS` dispatch table mapping PEM headers to paramiko key loaders:
+      - `BEGIN OPENSSH PRIVATE KEY` → `Ed25519Key` (ssh-keygen -t ed25519)
+      - `BEGIN RSA PRIVATE KEY` → `RSAKey` (legacy PKCS#1)
+      - `BEGIN PRIVATE KEY` → `Ed25519Key` (generic PKCS#8)
+    - Add `_load_ssh_key(key_path)` helper raising `SSHError` on unsupported formats
+    - Add comments explaining each key format (see Topic 15b for full rationale)
+    - Works on the renamed `_get_ssh_client()` from subtask 14a
+
+    **Acceptance criteria** (from subtask 14b):
+    - Key loading uses dispatch table, not nested if/elif
+  labels:
+    - "area/readability"
+    - "area/ssh"
+    - "priority/normal"
+  assignees: []
+
+- title: "Add .editorconfig with line length and formatting rules"
+  description: |
+    Add a project-level `.editorconfig` enforcing consistent formatting and a 100-character
+    line limit, then fix any violating lines.
+
+    **Context**: Topic 14, Readability Improvement #8 "Line Length". Subtask 14b,
+    Implementation Steps 2 and 4.
+    See [`plans/14-naming-conventions-readability.md`](plans/14-naming-conventions-readability.md:151)
+    and [`plans/14b-simplify-key-loading-editorconfig-test-names.md`](plans/14b-simplify-key-loading-editorconfig-test-names.md:61).
+
+    **Current state**: No `.editorconfig` or `pyproject.toml` formatter configuration;
+    some lines may exceed 100 characters.
+
+    **Tasks**:
+    - Create `.editorconfig` per the plan: UTF-8, LF, final newline, trimmed trailing
+      whitespace; Python 4-space indent / max_line_length 100; Markdown 2-space; JSON/YAML
+      2-space; Dockerfile 4-space; Makefile tabs
+    - Verify no line exceeds 100 characters and fix violations (break long signatures,
+      use implicit string concatenation / parentheses for long literals)
+
+    **Acceptance criteria** (from subtask 14b):
+    - `.editorconfig` present with Python, Markdown, JSON, YAML, Dockerfile, Makefile rules
+    - No line exceeds 100 characters
+  labels:
+    - "area/readability"
+    - "area/tooling"
+    - "priority/low"
+  assignees: []
+
+- title: "Rename generic test classes and integration test file"
+  description: |
+    Improve test naming: rename generic test class names, add module docstrings to test
+    files, and rename the integration test file descriptively.
+
+    **Context**: Topic 14, Issue #7 "Test Naming". Subtask 14b, Implementation Step 3.
+    See [`plans/14-naming-conventions-readability.md`](plans/14-naming-conventions-readability.md:91)
+    and [`plans/14b-simplify-key-loading-editorconfig-test-names.md`](plans/14b-simplify-key-loading-editorconfig-test-names.md:93).
+
+    **Current state**: `TestHelperFunctions` doesn't say which helpers; the integration
+    test file `tests/integration/test_integration.py` is generically named; test files
+    lack module docstrings.
+
+    **Tasks**:
+    - Rename `TestHelperFunctions` → `TestRequestContextHelpers` (and any other generic
+      class names)
+    - Rename `tests/integration/test_integration.py` → `tests/integration/test_mcp_ssh_integration.py`
+    - Add module docstrings to `tests/test_server.py`, `tests/test_auth.py`,
+      `tests/test_loggers.py` per the plan
+    - Update any imports/references to the renamed file
+
+    **Acceptance criteria** (from subtask 14b):
+    - All test classes have descriptive names
+    - Integration test file renamed to `test_mcp_ssh_integration.py`
+  labels:
+    - "area/readability"
+    - "area/testing"
+    - "priority/low"
+  assignees: []
+
+- title: "Replace overly explicit boolean checks with idiomatic style"
+  description: |
+    Replace `len(x) > 0` style checks with implicit truthiness and clean up residual
+    commented-out code / debug prints.
+
+    **Context**: Topic 14, Readability Issue #3 "Implicit Boolean Checks" and Issue #4
+    "Commented-Out Code". Subtask 14b, Implementation Step 5.
+    See [`plans/14-naming-conventions-readability.md`](plans/14-naming-conventions-readability.md:115)
+    and [`plans/14b-simplify-key-loading-editorconfig-test-names.md`](plans/14b-simplify-key-loading-editorconfig-test-names.md:124).
+
+    **Current state**: Code uses overly explicit checks such as `if len(key) > 0:`,
+    `if len(patterns) == 0:`, and `if result is not None and len(result) > 0:`.
+
+    **Tasks**:
+    - `if len(key) > 0:` → `if key:`
+    - `if len(patterns) == 0:` → `if not patterns:`
+    - `if result is not None and len(result) > 0:` → `if result:`
+    - Audit for and remove any residual commented-out code or debug prints
+    - Add tests confirming behavior is unchanged after refactor
+
+    **Acceptance criteria** (from subtask 14b):
+    - No overly explicit boolean checks (e.g. `len(x) > 0`)
+  labels:
+    - "area/readability"
+    - "priority/low"
+  assignees: []
+
+- title: "Document the ssh_<verb>_<noun> MCP tool naming convention"
+  description: |
+    Document that MCP tool names use the `ssh_<verb>_<noun>` pattern instead of renaming
+    tools (which would break the MCP API contract).
+
+    **Context**: Topic 14, Issue #3 "Inconsistent Suffix Usage". Improvement #6
+    "Consistent Tool Naming Convention (Document, Don't Change)".
+    See [`plans/14-naming-conventions-readability.md`](plans/14-naming-conventions-readability.md:72)
+    and [`plans/14-naming-conventions-readability.md`](plans/14-naming-conventions-readability.md:143).
+
+    **Current state**: `ssh_` prefix is redundant across tools but removing it would break
+    the MCP API; the naming convention is undocumented.
+
+    **Tasks**:
+    - Document the `ssh_<verb>_<noun>` tool naming convention in developer documentation
+      (README/CONTRIBUTING — see Topic 15a)
+    - Note why the prefix is kept (API contract stability)
+
+    **Acceptance criteria** (from topic plan):
+    - Tool naming convention documented, tool names unchanged
+  labels:
+    - "area/readability"
+    - "area/documentation"
+    - "priority/low"
+  assignees: []
+
+- title: "Verify config key naming uses snake_case consistently"
+  description: |
+    Audit `default-config.json` and config handling to confirm every key follows
+    `snake_case` with no accidental `camelCase`.
+
+    **Context**: Topic 14, Issue #6 "Config Key Naming".
+    See [`plans/14-naming-conventions-readability.md`](plans/14-naming-conventions-readability.md:88).
+
+    **Current state**: [`default-config.json`](default-config.json:1) uses `snake_case`
+    keys; no automated check guarantees consistency.
+
+    **Tasks**:
+    - Audit all config keys across `default-config.json`, examples, and validation in
+      [`lib/config.py`](lib/config.py:1)
+    - Fix any `camelCase` keys found
+    - Consider a validation check rejecting non-`snake_case` keys
+
+    **Acceptance criteria** (from topic plan):
+    - All config keys use `snake_case`
+  labels:
+    - "area/readability"
+    - "area/config"
+    - "priority/low"
+  assignees: []

@@ -1,0 +1,235 @@
+- title: "Refactor AuthorizationManager to atomically swap immutable RulesSnapshot"
+  description: |
+    Make `AuthorizationManager` accept complete config snapshots atomically instead of
+    updating individual attributes one at a time.
+
+    **Context**: Topic 12, Issues #1 "Auth Manager Receives Partial Updates" and
+    #2 "No Atomic Config Swap in Auth Manager". Subtask 12a, Implementation Step 1.
+    See [`plans/12-concurrency-thread-safety.md`](plans/12-concurrency-thread-safety.md:43)
+    and [`plans/12a-atomic-auth-updates-graceful-shutdown.md`](plans/12a-atomic-auth-updates-graceful-shutdown.md:9).
+
+    **Current state**: [`lib/auth.py`](lib/auth.py:1) `update_rules()` sets
+    `block_patterns`, `default_allowed`, `api_keys`, and `networks` one attribute at a
+    time. During a concurrent `check_command()`, a reader can observe mixed state
+    (e.g. old block patterns + new allowed commands).
+
+    **Tasks**:
+    - Refactor `update_rules()` to accept a complete config snapshot
+    - Build all internal state (block patterns, compiled regex, api keys, network rules)
+      in a single method
+    - Store state as an immutable object `_rules: RulesSnapshot` (frozen dataclass)
+    - Swap `self._rules = new_rules` in a single atomic assignment
+    - All read methods (`check_command()`, `list_allowed_commands()`) read from
+      `self._rules` only (single reference read)
+    - Rename `AuthResult.name` → `AuthResult.target_name` if not yet done (see Topic 14)
+
+    **Acceptance criteria** (from subtask 12a):
+    - Auth rules swapped atomically, no partial state visible to concurrent readers
+    - `RulesSnapshot` is a frozen dataclass with all compiled regex pre-built
+  labels:
+    - "area/concurrency"
+    - "priority/high"
+  assignees: []
+
+- title: "Add config change notification system to ConfigManager"
+  description: |
+    Add a callback/subscriber system so consumers (AuthManager, connection pool) are
+    notified after config reloads complete atomically.
+
+    **Context**: Topic 12, Thread Safety Improvement #2 "Config Change Notification
+    System". Subtask 12a, Implementation Step 2.
+    See [`plans/12-concurrency-thread-safety.md`](plans/12-concurrency-thread-safety.md:94)
+    and [`plans/12a-atomic-auth-updates-graceful-shutdown.md`](plans/12a-atomic-auth-updates-graceful-shutdown.md:14).
+
+    **Current state**: [`lib/config.py`](lib/config.py:1) `reload()` directly calls
+    `auth_manager.update_rules()` after a lock-protected swap; there is no generic
+    notification mechanism for other subscribers.
+
+    **Tasks**:
+    - Add `ConfigManager.on_change(callback)` registration API maintaining a list of callbacks
+    - On reload: prepare and validate new state, atomically swap, then call all callbacks
+      with the new config snapshot
+    - Register `AuthorizationManager` as one subscriber (uses the atomic `update_rules` swap)
+    - Register the SSH connection pool as another subscriber where relevant
+    - Document callback execution order and guarantee that callbacks fire only after the
+      atomic update
+
+    **Acceptance criteria** (from subtask 12a):
+    - Config change callbacks fire after atomic update, never before
+    - Multiple subscribers can register independently
+  labels:
+    - "area/concurrency"
+    - "area/config"
+    - "priority/normal"
+  assignees: []
+
+- title: "Implement graceful shutdown with resource cleanup"
+  description: |
+    Add a `shutdown()` method to the application that stops background threads, closes
+    SSH connections, closes log files, and waits for pending requests.
+
+    **Context**: Topic 12, Issues #4 "Config Watcher Thread Not a Daemon" and
+    #5 "No Shutdown Synchronization". Subtask 12a, Implementation Step 3.
+    See [`plans/12-concurrency-thread-safety.md`](plans/12-concurrency-thread-safety.md:63)
+    and [`plans/12a-atomic-auth-updates-graceful-shutdown.md`](plans/12a-atomic-auth-updates-graceful-shutdown.md:17).
+
+    **Current state**: On SIGTERM, the config watcher thread is not signaled to stop and
+    active SSH connections may leak. There is no `shutdown()` method on the app.
+
+    **Tasks**:
+    - Add `create_app().shutdown()` method
+    - Signal the config watcher thread to stop via a `threading.Event`
+    - Close all SSH connections in the pool
+    - Close the log file
+    - Wait for pending requests with a timeout (default 30s)
+    - Wire `shutdown()` into SIGTERM/SIGINT handling
+
+    **Acceptance criteria** (from subtask 12a):
+    - Graceful shutdown releases all resources (SSH pool, log file, watcher thread)
+    - Pending requests are drained with a bounded timeout
+  labels:
+    - "area/concurrency"
+    - "area/operations"
+    - "priority/high"
+  assignees: []
+
+- title: "Add concurrency limit for SSH connections with 503 response"
+  description: |
+    Bound simultaneous SSH connections so the server cannot exhaust file descriptors or
+    overwhelm target servers.
+
+    **Context**: Topic 12, Issue #7 "No Limitation on Concurrent SSH Connections".
+    Subtask 12a, Implementation Step 4.
+    See [`plans/12-concurrency-thread-safety.md`](plans/12-concurrency-thread-safety.md:77)
+    and [`plans/12a-atomic-auth-updates-graceful-shutdown.md`](plans/12a-atomic-auth-updates-graceful-shutdown.md:23).
+
+    **Current state**: The server creates as many simultaneous SSH connections as there
+    are concurrent requests — no upper bound, no queue, no rejection path.
+
+    **Tasks**:
+    - Add `max_concurrent_ssh_connections` setting (default: 20) to config validation
+    - Add a `threading.Semaphore` in `SSHConnectionPool` to gate acquisitions
+    - When the limit is reached, reject the request with HTTP 503 Service Unavailable
+      (use `HTTP_SERVICE_UNAVAILABLE` constant, see Topic 14)
+    - Document the setting in config schema/docs
+    - Add tests for limit enforcement and the 503 path
+
+    **Acceptance criteria** (from subtask 12a):
+    - Concurrent SSH connections limited with a clear error
+    - Configurable via `max_concurrent_ssh_connections`
+  labels:
+    - "area/concurrency"
+    - "area/ssh"
+    - "priority/normal"
+  assignees: []
+
+- title: "Ensure config watcher thread runs as daemon"
+  description: |
+    Verify and fix that the config watcher thread is a daemon thread so it does not
+    prevent clean process shutdown.
+
+    **Context**: Topic 12, Issue #4 "Config Watcher Thread Not a Daemon".
+    Subtask 12a, Implementation Step 5.
+    See [`plans/12-concurrency-thread-safety.md`](plans/12-concurrency-thread-safety.md:63)
+    and [`plans/12a-atomic-auth-updates-graceful-shutdown.md`](plans/12a-atomic-auth-updates-graceful-shutdown.md:27).
+
+    **Current state**: The watcher thread in [`lib/config.py`](lib/config.py:1) /
+    [`lib/config_watcher.py`](lib/config_watcher.py:1) is started without an explicit
+    daemon flag; a non-daemon thread blocks interpreter exit.
+
+    **Tasks**:
+    - Verify the watcher thread is created with `daemon=True`
+    - If not, set it explicitly
+    - Confirm the thread still honors the stop `threading.Event` from the shutdown ticket
+    - Add a test asserting the thread is a daemon
+
+    **Acceptance criteria** (from subtask 12a):
+    - Watcher thread is `daemon=True`
+  labels:
+    - "area/concurrency"
+    - "priority/normal"
+  assignees: []
+
+- title: "Document thread-safety guarantees in docstrings and immutable snapshots"
+  description: |
+    Make thread-safety guarantees explicit across the codebase: immutable frozen
+    config snapshots, documented `threading.Lock` usage, and docstring notes.
+
+    **Context**: Topic 12, Thread Safety Improvement #5 "Document Thread Safety
+    Guarantees". See [`plans/12-concurrency-thread-safety.md`](plans/12-concurrency-thread-safety.md:111).
+
+    **Current state**: [`lib/config.py`](lib/config.py:1) uses a `threading.Lock` for
+    writes and atomic reference swaps for reads, and [`lib/loggers.py`](lib/loggers.py:1)
+    serializes writes under a lock, but none of this is documented in docstrings.
+
+    **Tasks**:
+    - Use `@dataclass(frozen=True)` for immutable config snapshots where applicable
+    - Add explicit thread-safety notes to `ConfigManager`, `AuthorizationManager`,
+      `FileLogger`, and `SSHConnectionPool` docstrings
+    - Document what each `threading.Lock` protects and which operations are lock-free reads
+    - Document the single-reference-read pattern (`self._config`, `self._rules`)
+
+    **Acceptance criteria** (from topic plan):
+    - Thread-safety guarantees documented in docstrings
+    - Lock usage is documented with what it protects
+  labels:
+    - "area/concurrency"
+    - "area/documentation"
+    - "priority/low"
+  assignees: []
+
+- title: "Add concurrent stress tests for reload, rotation, and SSH connections"
+  description: |
+    Add stress tests exercising concurrent scenarios to prove the thread-safety
+    improvements hold under load.
+
+    **Context**: Topic 12, Thread Safety Improvement #6 "Test Concurrent Scenarios".
+    Subtask 12a, Implementation Step 6.
+    See [`plans/12-concurrency-thread-safety.md`](plans/12-concurrency-thread-safety.md:116)
+    and [`plans/12a-atomic-auth-updates-graceful-shutdown.md`](plans/12a-atomic-auth-updates-graceful-shutdown.md:29).
+
+    **Current state**: No tests exercise concurrent config reloads, log rotation under
+    load, or concurrent SSH connection attempts.
+
+    **Tasks**:
+    - 50 concurrent auth checks during a config reload — assert no partial/mixed state
+    - 50 concurrent log writes during rotation — assert no lost/corrupted lines
+    - Rapid config changes during active SSH connections
+    - Stress test with many concurrent requests hitting the SSH connection limit
+    - Assert the semaphore limit returns 503 and never exceeds `max_concurrent_ssh_connections`
+
+    **Acceptance criteria** (from subtask 12a):
+    - Concurrent stress tests pass without data races
+  labels:
+    - "area/concurrency"
+    - "area/testing"
+    - "priority/normal"
+  assignees: []
+
+- title: "Standardize handling of None from request context across callers"
+  description: |
+    Make `get_current_request()` None handling consistent so request-scoped reads never
+    crash or misbehave outside a request context.
+
+    **Context**: Topic 12, Issue #6 "ContextVar Usage is Correct but Unclear".
+    See [`plans/12-concurrency-thread-safety.md`](plans/12-concurrency-thread-safety.md:74).
+
+    **Current state**: [`lib/request_context.py`](lib/request_context.py:1) uses
+    `ContextVar` correctly per-request, but `get_current_request()` can return `None`
+    and callers (e.g. `get_api_key()`, `_extract_client_ip()` in
+    [`server.py`](server.py:1)) don't consistently handle the None case.
+
+    **Tasks**:
+    - Audit all callers of `get_current_request()` for None handling
+    - Define and document the fallback behavior (e.g. `None` API key, `127.0.0.1` IP)
+    - Make fallback handling consistent and explicit in each caller
+    - Add tests for calls made outside an active request context
+
+    **Acceptance criteria** (from topic plan):
+    - Callers consistently handle `None` from `get_current_request()`
+    - Fallback behavior is documented and tested
+  labels:
+    - "area/concurrency"
+    - "area/request-context"
+    - "priority/low"
+  assignees: []

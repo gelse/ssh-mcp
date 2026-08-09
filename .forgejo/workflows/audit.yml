@@ -1,0 +1,41 @@
+name: dependency-audit
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  pip-audit:
+    name: pip-audit (fail on vulnerabilities)
+    runs-on: docker
+    container:
+      image: python:3.13-alpine@sha256:399babc8b49529dabfd9c922f2b5eea81d611e4512e3ed250d75bd2e7683f4b0
+    steps:
+      # actions/checkout is a JavaScript action and requires the `node`
+      # runtime in the job container; python:alpine does not ship Node.js.
+      # Git is also required — without it checkout falls back to a REST
+      # archive download, which fails against the self-signed local Forgejo.
+      - name: Install Node.js and Git (required by checkout action)
+        run: apk add --no-cache nodejs git
+
+      # The local Forgejo instance terminates TLS with a self-signed
+      # certificate; the CA is not present inside the python:alpine container,
+      # so SSL verification must be disabled for the git clone to succeed.
+      - uses: https://code.forgejo.org/actions/checkout@v4
+        with:
+          sslVerify: false
+
+      - name: Install build tooling (hash-pinned)
+        run: pip install --no-cache-dir --require-hashes -r requirements-build.txt
+
+      - name: Install runtime dependencies (hash-pinned)
+        run: pip install --no-cache-dir --require-hashes -r requirements.txt
+
+      # pip-audit exits 0 when no vulnerabilities are found and 1 when any are
+      # found (including criticals), so a plain run already fails the build.
+      # NOTE: pip-audit has no --fail-on flag (verified on 2.10.1); fail-on-any
+      # is a stricter superset of the "fail on critical" requirement.
+      - name: Audit dependencies
+        run: pip-audit -r requirements.txt
