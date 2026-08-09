@@ -1,0 +1,313 @@
+- title: "Create README.md with project overview, quick start, config, and security"
+  description: |
+    Create the top-level `README.md` covering what the project does, how to run it, the
+    configuration format, security considerations, and an API reference table.
+
+    **Context**: Topic 15, Issue #1 "No README.md". Subtask 15a, Implementation Step 1.
+    See [`plans/15-documentation-inline-comments.md`](plans/15-documentation-inline-comments.md:26)
+    and [`plans/15a-readme-architecture-security-contributing.md`](plans/15a-readme-architecture-security-contributing.md:10).
+
+    **Current state**: The repository has no README; visitors have no information about
+    the project, setup, configuration, security, or API.
+
+    **Tasks**:
+    - Create `README.md` following the structure in subtask 15a:
+      - Overview: FastMCP-based SSH server with 5 MCP tools
+      - Features: layered authorization, JSONL logging, hot-reload config, Docker/Traefik,
+        SFTP file transfer, sudo support
+      - Quick Start: prerequisites (Docker, SSH access, key pair), setup steps, `docker compose up -d`
+      - Configuration: reference to `default-config.json`, key sections (version,
+        ssh_targets, block_patterns, allowed_commands, api_keys, settings)
+      - Security: TLS requirement, least-privilege API keys, block_patterns, link to SECURITY.md
+      - API Reference: table of the 5 MCP tools with descriptions
+      - License: MIT reference
+
+    **Acceptance criteria** (from subtask 15a):
+    - `README.md` with project overview, quick start, config guide, security note, API reference table
+  labels:
+    - "area/documentation"
+    - "priority/normal"
+  assignees: []
+
+- title: "Create ARCHITECTURE.md with diagrams, data flow, and design rationale"
+  description: |
+    Create `ARCHITECTURE.md` documenting high-level architecture, component relationships,
+    data flow, authorization decision tree, config hot-reload, and thread safety.
+
+    **Context**: Topic 15, Issue #3 "No Architecture Documentation". Subtask 15a,
+    Implementation Step 2.
+    See [`plans/15-documentation-inline-comments.md`](plans/15-documentation-inline-comments.md:44)
+    and [`plans/15a-readme-architecture-security-contributing.md`](plans/15a-readme-architecture-security-contributing.md:87).
+
+    **Current state**: No document explains the architecture, data flow from MCP request
+    to SSH execution, the authorization chain, config hot-reload, or Docker deployment.
+
+    **Tasks**:
+    - Component diagram (Mermaid) showing Client → Traefik → FastMCP → RequestContext →
+      tools → AuthorizationManager / SSHClientManager / FileTransferService → targets,
+      plus ConfigManager and FileLogger
+    - Authorization decision tree (Mermaid flowchart): sanitize → block patterns → default
+      allowlist → API key rules → network rules → deny
+    - Data flow: MCP JSON-RPC request → middleware extracts IP/API key → tool handler →
+      auth check → SSH connection → execution → response
+    - Config hot-reload mechanism: watcher polls mtime → validates → atomic swap →
+      notifies auth manager
+    - Thread safety design: `threading.Lock` for writes, atomic reference swap for reads,
+      FileLogger serialization
+    - File organization rationale for the `lib/` modules
+
+    **Acceptance criteria** (from subtask 15a):
+    - `ARCHITECTURE.md` with Mermaid component diagram, authorization flowchart, data flow,
+      thread safety explanation
+  labels:
+    - "area/documentation"
+    - "priority/normal"
+  assignees: []
+
+- title: "Create SECURITY.md with security model and TLS requirements"
+  description: |
+    Create `SECURITY.md` documenting the security model, trust boundaries, TLS
+    requirement, API key and SSH key management, vulnerability reporting, and
+    security-relevant configuration.
+
+    **Context**: Topic 15, Documentation Plan #5 "Create SECURITY.md". Subtask 15a,
+    Implementation Step 3.
+    See [`plans/15-documentation-inline-comments.md`](plans/15-documentation-inline-comments.md:132)
+    and [`plans/15a-readme-architecture-security-contributing.md`](plans/15a-readme-architecture-security-contributing.md:141).
+
+    **Current state**: A `docs/SECURITY.md` exists but the plan calls for a top-level
+    security policy; the security model, TLS requirement, and reporting process are not
+    documented at the repository root.
+
+    **Tasks**:
+    - Security model: bridge between MCP clients and SSH servers behind a TLS-terminating
+      reverse proxy (Traefik by default)
+    - Trust boundaries: external → MCP server (API key), MCP server → SSH target (key/password),
+      config file (mode 0600)
+    - TLS requirement: MUST be deployed behind TLS; never expose FastMCP directly
+    - API key management: SHA-256 hashes (`sha256:` prefix), ≥128-bit entropy, rotation,
+      per-client least-privilege keys
+    - SSH key security: Ed25519 preferred, mode 0600, agent forwarding option, dedicated keys
+    - Vulnerability reporting process (email/issue policy/PGP placeholder)
+    - Security-relevant config options: `block_patterns`, `max_command_output`,
+      `command_timeout_seconds`, `sudo_allowed`
+
+    **Acceptance criteria** (from subtask 15a):
+    - `SECURITY.md` with trust boundaries, TLS requirement, API key guidance, vulnerability reporting
+  labels:
+    - "area/documentation"
+    - "area/security"
+    - "priority/normal"
+  assignees: []
+
+- title: "Create CONTRIBUTING.md with development and contribution guide"
+  description: |
+    Create `CONTRIBUTING.md` covering development setup, running tests, code style,
+    pull request process, and a guide for adding new tools.
+
+    **Context**: Topic 15, Documentation Plan #6 "Create CONTRIBUTING.md". Subtask 15a,
+    Implementation Step 4.
+    See [`plans/15-documentation-inline-comments.md`](plans/15-documentation-inline-comments.md:139)
+    and [`plans/15a-readme-architecture-security-contributing.md`](plans/15a-readme-architecture-security-contributing.md:187).
+
+    **Current state**: No contributing guide exists.
+
+    **Tasks**:
+    - Development setup: clone, `python -m venv .venv`, `pip install -r requirements.txt`,
+      dev deps (`pytest`, `pytest-cov`)
+    - Running tests: `pytest tests/`, `pytest tests/integration/`, `pytest --cov=lib --cov=server`
+    - Code style: PEP 8 per `.editorconfig`, 100-char line limit, snake_case/PascalCase,
+      Google-style docstrings, type hints for public API
+    - Pull request process: feature branch, tests, all green, docs updated, PR description
+    - Adding new tools: define in `server.py`, add auth rules, unit + integration tests,
+      document in README API Reference, update ARCHITECTURE.md diagrams
+
+    **Acceptance criteria** (from subtask 15a):
+    - `CONTRIBUTING.md` with dev setup, test instructions, code style, PR process, new tool guide
+  labels:
+    - "area/documentation"
+    - "priority/low"
+  assignees: []
+
+- title: "Add Google-style docstrings to all undocumented functions"
+  description: |
+    Add Google-style docstrings to every public function/method (and brief docstrings for
+    private helpers) in `server.py` and `lib/`.
+
+    **Context**: Topic 15, Issue #2 "Inconsistent Docstrings" and Documentation Plan #3.
+    Subtask 15b, Implementation Step 1.
+    See [`plans/15-documentation-inline-comments.md`](plans/15-documentation-inline-comments.md:34)
+    and [`plans/15b-docstrings-inline-comments.md`](plans/15b-docstrings-inline-comments.md:19).
+
+    **Current state**: `_extract_client_ip()`, `_is_command_sudo()`, `_get_ssh_client()`,
+    `_ensure_directories()`, and `_get_api_key()` in [`server.py`](server.py:1) have no
+    docstrings; private methods in [`lib/auth.py`](lib/auth.py:1) lack them too.
+
+    **Tasks**:
+    - Add docstrings (description, args, returns, raises, examples where useful) to:
+      - `server.py` helpers: `_ensure_directories()`, `_get_api_key()`, `_extract_client_ip()`,
+        `_is_command_sudo()`, `_get_ssh_client()`
+      - `lib/auth.py` private methods: `_split_command_segments()`, `_check_block_patterns()`,
+        `_match_api_key()`, `_match_network()`
+      - `lib/config.py` private methods: `_validate_config()`, `_validate_ssh_targets()`,
+        `_validate_block_patterns()`, `_validate_allowed_commands()`
+      - `lib/loggers.py`: `_rotate_if_needed()`
+    - Apply to renamed functions from subtask 14a (`_get_ssh_client`, `_get_api_key`)
+
+    **Acceptance criteria** (from subtask 15b):
+    - Every function in `server.py` has a docstring (public + private)
+    - Every public method in `lib/auth.py`, `lib/config.py`, `lib/loggers.py` has a docstring
+    - Every private method in those modules has a brief docstring
+  labels:
+    - "area/documentation"
+    - "priority/normal"
+  assignees: []
+
+- title: "Add inline comments for complex logic (auth chain, segmentation, key loading)"
+  description: |
+    Add explanatory inline comments for the authorization chain, command segmentation
+    regex, key loading PEM headers, IP extraction trust model, sudo wrapping, and SFTP
+    path validation.
+
+    **Context**: Topic 15, Issue #4 "Complex Logic Without Comments". Subtask 15b,
+    Implementation Step 2.
+    See [`plans/15-documentation-inline-comments.md`](plans/15-documentation-inline-comments.md:52)
+    and [`plans/15b-docstrings-inline-comments.md`](plans/15b-docstrings-inline-comments.md:158).
+
+    **Current state**: PEM header inspection, the `|&;` segmentation regex, X-Forwarded-For
+    parsing, sudo flag wrapping, and SFTP path handling have no explanatory comments.
+
+    **Tasks**:
+    - Authorization chain in `lib/auth.py:check_command()`: comment each layer (block
+      patterns → default allowlist → API key rules → network rules → implicit deny)
+    - Command segmentation: comment `_SEGMENT_SPLIT_RE = re.compile(r'[|&;]')` explaining
+      it prevents `allowed_cmd | dangerous_cmd` from passing auth
+    - Key loading: comment PEM header meanings (OPENSSH = Ed25519, RSA PKCS#1, PKCS#8) and
+      why the header is checked instead of the file extension
+    - IP extraction: document X-Forwarded-For format, leftmost-IP rule, spoofing risk
+      without trusted proxy, X-Real-IP fallback
+    - Sudo wrapping: explain `sudo -S -p ''` (password from stdin, empty prompt) and
+      `sudo -n` (non-interactive), and the password vs NOPASSWD strategy
+    - SFTP path validation: document isabs, pardir, null-byte checks and why realpath is
+      not used pre-connection for uploads
+
+    **Acceptance criteria** (from subtask 15b):
+    - Authorization chain, segmentation regex, key dispatch table, IP trust model, sudo
+      flags, and SFTP path strategy all have explanatory comments
+  labels:
+    - "area/documentation"
+    - "priority/normal"
+  assignees: []
+
+- title: "Create examples/ directory with client configs and requests"
+  description: |
+    Create the `examples/` directory with sample configs, client configurations, curl
+    examples, and a Python MCP client example.
+
+    **Context**: Topic 15, Documentation Plan #7 "Add Examples Directory". Subtask 15c,
+    Implementation Steps 1-9.
+    See [`plans/15-documentation-inline-comments.md`](plans/15-documentation-inline-comments.md:146)
+    and [`plans/15c-examples-json-schema-license.md`](plans/15c-examples-json-schema-license.md:10).
+
+    **Current state**: No examples exist for MCP clients, curl requests, or sample configs.
+
+    **Tasks**:
+    - `examples/README.md` — overview of all examples + quick-test curl
+    - `examples/claude-desktop-config.json` — Claude Desktop MCP server config with X-API-Key header
+    - `examples/config-basic.json` — one target, key auth, default allowlist, standard settings
+    - `examples/config-multi-target.json` — key + password auth targets with API key rules
+    - `examples/config-sudo.json` — target with `sudo_allowed: true`
+    - `examples/config-network-auth.json` — per-network authorization rules
+    - `examples/curl-examples.sh` — direct MCP JSON-RPC calls for all 5 tools
+    - `examples/mcp-client-example.py` — Python client using the fastmcp library
+
+    **Acceptance criteria** (from subtask 15c):
+    - `examples/` directory exists with 6 example files + README
+    - `claude-desktop-config.json` ready to copy and modify
+    - `curl-examples.sh` demonstrates all 5 MCP tools
+    - `mcp-client-example.py` shows programmatic client usage
+    - Four example configs cover basic, multi-target, sudo, and network auth scenarios
+  labels:
+    - "area/documentation"
+    - "priority/normal"
+  assignees: []
+
+- title: "Create config-schema.json and reference $schema from default config"
+  description: |
+    Create a JSON Schema file for the configuration format and add a `$schema` reference
+    to `default-config.json` for IDE autocompletion and validation.
+
+    **Context**: Topic 15, Documentation Plan #8 "Document Config Schema". Subtask 15c,
+    Implementation Step 10.
+    See [`plans/15-documentation-inline-comments.md`](plans/15-documentation-inline-comments.md:153)
+    and [`plans/15c-examples-json-schema-license.md`](plans/15c-examples-json-schema-license.md:302).
+
+    **Current state**: Config validation lives only in Python ([`lib/config.py`](lib/config.py:1));
+    no JSON Schema exists and `default-config.json` has no `$schema` reference. Note the
+    schema should align with the config format from Topic 11 / subtask 11a.
+
+    **Tasks**:
+    - Create `config-schema.json` (draft 2020-12) covering: `version`, `ssh_targets`
+      (name pattern `^[a-zA-Z0-9._-]{1,128}$`, host, username, port 1-65535, auth oneOf
+      key/password, sudo_allowed), `block_patterns`, `allowed_commands` (default + api_keys +
+      networks), `api_keys` (`^sha256:[a-f0-9]{64}$`), and `settings` (output size pattern,
+      timeouts, log settings, watcher interval)
+    - Add `"$schema"` reference to `default-config.json`
+    - Document all fields, types, and validation rules
+
+    **Acceptance criteria** (from subtask 15c):
+    - `config-schema.json` validates the configuration format
+    - `default-config.json` references `$schema` for IDE autocompletion
+  labels:
+    - "area/documentation"
+    - "area/config"
+    - "priority/normal"
+  assignees: []
+
+- title: "Add MIT LICENSE file"
+  description: |
+    Add an MIT `LICENSE` file to the repository.
+
+    **Context**: Topic 15, Documentation Plan #10 "Add License". Subtask 15c,
+    Implementation Step 11.
+    See [`plans/15-documentation-inline-comments.md`](plans/15-documentation-inline-comments.md:163)
+    and [`plans/15c-examples-json-schema-license.md`](plans/15c-examples-json-schema-license.md:467).
+
+    **Current state**: No `LICENSE` file exists.
+
+    **Tasks**:
+    - Add `LICENSE` with the MIT license text (recommended in the plan)
+    - Fill in the copyright holder/year placeholder
+    - Reference the license from README.md (MIT — see LICENSE)
+
+    **Acceptance criteria** (from subtask 15c):
+    - `LICENSE` file present (MIT)
+  labels:
+    - "area/documentation"
+    - "priority/low"
+  assignees: []
+
+- title: "Add API changelog / migration notes for MCP tool signature changes"
+  description: |
+    Document how MCP tool signatures may change and provide a migration guide for clients.
+
+    **Context**: Topic 15, Issue #8 "No API Changelog".
+    See [`plans/15-documentation-inline-comments.md`](plans/15-documentation-inline-comments.md:78).
+
+    **Current state**: If MCP tool signatures change (parameters, return format), there is
+    no migration guide for clients.
+
+    **Tasks**:
+    - Add a CHANGELOG or API migration section documenting tool signature/return changes
+    - Note the current 5 tools and their stable parameter/return contracts
+    - Add a troubleshooting/FAQ section covering config validation errors, SSH auth
+      troubleshooting, SSH key permission issues, and Docker networking issues (per
+      Documentation Plan #6)
+
+    **Acceptance criteria** (from topic plan):
+    - API changes and migration guidance documented
+    - Troubleshooting guide for common issues present
+  labels:
+    - "area/documentation"
+    - "priority/low"
+  assignees: []

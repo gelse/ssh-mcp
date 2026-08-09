@@ -1,0 +1,17 @@
+# Direct runtime dependencies of the mcp-ssh server.
+#
+# Transitive dependencies are resolved and hash-locked into
+# requirements.txt by pip-compile. Regenerate with:
+#
+#   pip-compile --generate-hashes --no-reuse-hashes requirements.in
+#
+# NOTE: run inside the python:3.13-alpine base image so the generated
+# hashes match the wheels used at runtime. --no-reuse-hashes is required
+# so hashes are collected for ALL platforms (including the sdist), not
+# just the wheel selected on the regeneration host.
+
+fastmcp==3.4.6
+paramiko==5.0.0
+starlette==1.4.1
+prometheus-client==0.26.0
+watchdog==6.0.0

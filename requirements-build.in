@@ -1,0 +1,16 @@
+# Build/CI tooling for the mcp-ssh project (SBOM generation + lock regeneration).
+#
+# Transitive dependencies are hash-locked into requirements-build.txt by
+# pip-compile. Regenerate with:
+#
+#   pip-compile --generate-hashes --no-reuse-hashes \
+#     --output-file requirements-build.txt requirements-build.in
+#
+# NOTE: run inside the python:3.13-alpine base image so the generated
+# hashes match the wheels used by the Docker SBOM stage. --no-reuse-hashes
+# collects hashes for ALL platforms (wheels + sdists), not just the wheel
+# selected on the regeneration host.
+
+cyclonedx-bom==7.3.1
+pip-audit==2.10.1
+pip-tools

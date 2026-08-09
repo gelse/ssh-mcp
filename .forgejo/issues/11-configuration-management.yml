@@ -1,0 +1,273 @@
+- title: "Create lib/secrets.py with SecretsManager to separate secrets from main config"
+  description: |
+    Separate secrets (API keys, SSH passwords) from the main configuration file.
+
+    **Context**: Topic 11 - Configuration Management, Issue #1 "Passwords in Config" and
+    Issue #2 "API Keys in Same Config File". Subtask 11a, Implementation Step 1.
+    See [`plans/11-configuration-management.md`](plans/11-configuration-management.md:56) and
+    [`plans/11a-separate-secrets-env-overrides-migration.md`](plans/11a-separate-secrets-env-overrides-migration.md:9).
+
+    **Current state**: [`lib/config.py`](lib/config.py:1) loads a single JSON file that holds
+    `auth.password` for SSH targets and `api_keys` hashes in plaintext
+    ([`default-config.json`](default-config.json:1)). This risks accidental version-control
+    commits, world-readable files, and secret leakage in logs.
+
+    **Tasks**:
+    - Create `lib/secrets.py` implementing a `SecretsManager`:
+      - Load `secrets.json` if it exists
+      - Load secrets from environment variables prefixed `MCP_SSH_SECRET_*`
+      - Merge secrets into config during load (precedence: env vars > `secrets.json` > config file)
+    - Move `api_keys` and SSH target `auth.password` out of the main config into `secrets.json`
+    - Enforce `0o600` permissions on `secrets.json` (warn or fix on load)
+    - Update `default-config.json` schema accordingly
+
+    **Acceptance criteria** (from subtask 11a):
+    - Secrets live in a separate `secrets.json` or env vars, not in the main config
+    - `SecretsManager` merges secrets into config during load with documented precedence
+  labels:
+    - "area/config"
+    - "priority/normal"
+  assignees: []
+
+- title: "Add environment variable override support to ConfigManager"
+  description: |
+    Support environment variable overrides for configuration settings.
+
+    **Context**: Topic 11, Issue #4 "No Environment Variable Overrides" and
+    Configuration Improvement #2. Subtask 11a, Implementation Step 2.
+    See [`plans/11-configuration-management.md`](plans/11-configuration-management.md:68) and
+    [`plans/11a-separate-secrets-env-overrides-migration.md`](plans/11a-separate-secrets-env-overrides-migration.md:13).
+
+    **Current state**: All configuration must come from the JSON file loaded by
+    [`lib/config.py`](lib/config.py:1). Docker Compose / Kubernetes operators cannot override
+    SSH key paths, log directory, or individual settings without editing the file.
+
+    **Tasks**:
+    - Add support for:
+      - `MCP_SSH_CONFIG_PATH` (config file location)
+      - `MCP_SSH_LOG_DIR` (log directory)
+      - `MCP_SSH_SSH_KEY` (SSH key path)
+      - `MCP_SSH_SETTING_*` (any setting, e.g. `MCP_SSH_SETTING_MAX_COMMAND_OUTPUT=100kb`)
+    - Implement documented precedence: **env vars > secrets.json > config.json > defaults**
+    - Update `ConfigManager` load path in [`lib/config.py`](lib/config.py:1) to apply overrides
+    - Add tests covering override precedence and `MCP_SSH_SETTING_*` mapping
+
+    **Acceptance criteria** (from subtask 11a):
+    - Environment variables can override any config setting
+    - Precedence order is enforced and documented
+  labels:
+    - "area/config"
+    - "priority/normal"
+  assignees: []
+
+- title: "Implement schema version migration system in lib/config_migration.py"
+  description: |
+    Add a schema version migration system so old configs upgrade cleanly instead of failing
+    with unhelpful validation errors.
+
+    **Context**: Topic 11, Issue #7 "No Config Schema Version Migration" and
+    Configuration Improvement #3. Subtask 11a, Implementation Step 3.
+    See [`plans/11-configuration-management.md`](plans/11-configuration-management.md:83) and
+    [`plans/11a-separate-secrets-env-overrides-migration.md`](plans/11a-separate-secrets-env-overrides-migration.md:16).
+
+    **Current state**: The `version: 1` field exists in the schema
+    ([`default-config.json`](default-config.json:1)) but no migration logic is present; a v2
+    config would fail validation with unclear errors.
+
+    **Tasks**:
+    - Create `lib/config_migration.py` with `MIGRATIONS: dict[int, Callable]` mapping each
+      version to a migration function
+    - On config load, detect the current `version` and apply migrations up to the latest
+    - Warn (or error) on unknown / newer-than-supported versions
+    - Write the migrated config back to disk with a `.bak` backup of the original
+    - Provide a v1→v2 migration example and tests covering migration + backup behavior
+
+    **Acceptance criteria** (from subtask 11a):
+    - Schema migration from v1→v2 works and writes a backup
+    - Old configs load successfully after migration
+  labels:
+    - "area/config"
+    - "priority/normal"
+  assignees: []
+
+- title: "Add duplicate detection to config validation"
+  description: |
+    Reject configurations containing duplicate target names, duplicate API key names, or
+    overlapping network CIDRs.
+
+    **Context**: Topic 11, Issue #5 "No Validation for Duplicate Target Names" and
+    Configuration Improvement #4. Subtask 11a, Implementation Step 4.
+    See [`plans/11-configuration-management.md`](plans/11-configuration-management.md:74) and
+    [`plans/11a-separate-secrets-env-overrides-migration.md`](plans/11a-separate-secrets-env-overrides-migration.md:20).
+
+    **Current state**: Two targets with the same `name` silently shadow each other (last wins);
+    no checks exist for duplicate API key names or overlapping network CIDRs in
+    `allowed_commands.networks`.
+
+    **Tasks**:
+    - In config validation ([`lib/config.py`](lib/config.py:1)), add checks for:
+      - Duplicate `ssh_targets[].name`
+      - Duplicate `allowed_commands.api_keys` names
+      - Overlapping `allowed_commands.networks` CIDRs
+    - Raise `ConfigValidationError` with a clear, field-referencing message
+    - Add tests for each duplicate/overlap case
+
+    **Acceptance criteria** (from subtask 11a):
+    - Duplicate targets / keys / overlapping CIDRs are rejected with clear errors
+  labels:
+    - "area/config"
+    - "priority/normal"
+  assignees: []
+
+- title: "Enforce config file permissions with --fix-permissions CLI flag"
+  description: |
+    Check and enforce restricted file permissions on config and secrets files.
+
+    **Context**: Topic 11, Issue #3 "Config File Permissions Not Enforced" and
+    Configuration Improvement #5. Subtask 11a, Implementation Step 5.
+    See [`plans/11-configuration-management.md`](plans/11-configuration-management.md:65) and
+    [`plans/11a-separate-secrets-env-overrides-migration.md`](plans/11a-separate-secrets-env-overrides-migration.md:24).
+
+    **Current state**: No check that config files have restricted permissions (e.g. `0o600`).
+    On systems with a lax umask the config could be world-readable.
+
+    **Tasks**:
+    - On config load, run `os.stat().st_mode` check against `0o600`
+    - Warn when the file is world- or group-readable
+    - Add a `--fix-permissions` CLI flag that auto-chmods config/secrets files to `0o600`
+    - Apply the same enforcement to `secrets.json` (see secrets ticket)
+    - Add tests for the permission warning and `--fix-permissions` behavior
+
+    **Acceptance criteria** (from subtask 11a):
+    - File permissions are checked on load with a warning when not `0o600`
+    - `--fix-permissions` auto-corrects permissions
+  labels:
+    - "area/config"
+    - "area/cli"
+    - "priority/normal"
+  assignees: []
+
+- title: "Expand size unit parsing to b/kb/mb/gb case-insensitively"
+  description: |
+    Generalize `max_command_output` size parsing beyond the single `kb` unit.
+
+    **Context**: Topic 11, Issue #6 "Size Unit Parsing" and Configuration Improvement #7.
+    Subtask 11a, Implementation Step 6.
+    See [`plans/11-configuration-management.md`](plans/11-configuration-management.md:77) and
+    [`plans/11a-separate-secrets-env-overrides-migration.md`](plans/11a-separate-secrets-env-overrides-migration.md:28).
+
+    **Current state**: `max_command_output: "50kb"` uses custom string parsing that only
+    supports `kb`, does not validate positivity, and has undocumented case sensitivity
+    (`50KB` vs `50kb` vs `50Kb`).
+
+    **Tasks**:
+    - Support units `b`, `kb`, `mb`, `gb` with case-insensitive parsing
+    - Validate the value is positive; raise a clear `ConfigValidationError` on invalid formats
+    - Document accepted formats (e.g. in schema docs and error messages)
+    - Add tests for each unit, case variants, and invalid/negative inputs
+
+    **Acceptance criteria** (from subtask 11a):
+    - Size units support b/kb/mb/gb case-insensitively
+    - Invalid or non-positive values produce clear errors
+  labels:
+    - "area/config"
+    - "priority/normal"
+  assignees: []
+
+- title: "Add debounce to config watcher to prevent rapid reloads"
+  description: |
+    Prevent multiple reloads when the config file is written in multiple chunks.
+
+    **Context**: Topic 11, Issue #8 "Watcher Debounce Missing" and Configuration
+    Improvement #6. See [`plans/11-configuration-management.md`](plans/11-configuration-management.md:86).
+
+    **Current state**: The background watcher in
+    [`lib/config_watcher.py`](lib/config_watcher.py:1) polls mtime every 15s, but a file
+    written in multiple chunks (e.g. `rsync`, editor save) can trigger multiple reloads with
+    no debounce or cooldown.
+
+    **Tasks**:
+    - Add a debounce/cooldown: ignore change events within N seconds of the last reload
+    - Ensure the debounce interval is configurable (e.g. via settings)
+    - Add tests simulating chunked writes and rapid successive changes
+
+    **Acceptance criteria** (from topic plan):
+    - Watcher has debounce preventing rapid consecutive reloads
+  labels:
+    - "area/config"
+    - "priority/normal"
+  assignees: []
+
+- title: "Add config reload notification callback for dependent components"
+  description: |
+    Notify dependent components when configuration is reloaded.
+
+    **Context**: Topic 11, Issue #9 "No Config Reload Notification" and Configuration
+    Improvement #6. See [`plans/11-configuration-management.md`](plans/11-configuration-management.md:89).
+
+    **Current state**: After a reload, tools continue using stale references until they call
+    `config_manager.get_target()` again; there is no event/callback mechanism to notify
+    dependent components of changes.
+
+    **Tasks**:
+    - Add an `on_config_change(callback)` registration API to the config manager
+    - Invoke registered callbacks after a successful hot-reload
+    - Handle callback exceptions so a failing consumer does not break the reload
+    - Add tests verifying callbacks fire on reload and that errors are isolated
+
+    **Acceptance criteria** (from topic plan):
+    - Config changes notify dependent components via registered callbacks
+  labels:
+    - "area/config"
+    - "priority/normal"
+  assignees: []
+
+- title: "Sanitize ConfigValidationError messages for API clients"
+  description: |
+    Ensure configuration validation error messages are safe to return to API clients.
+
+    **Context**: Topic 11, Issue #10 "Config Validation Error Messages".
+    See [`plans/11-configuration-management.md`](plans/11-configuration-management.md:92).
+
+    **Current state**: [`ConfigValidationError`](lib/config.py:1) tracks error fields, but
+    messages may expose file paths or internal structure.
+
+    **Tasks**:
+    - Review all `ConfigValidationError` messages generated in
+      [`lib/config.py`](lib/config.py:1)
+    - Redact file paths and internal structure from messages
+    - Keep field-level error context (the tracked error fields) for structured handling
+    - Add tests asserting error messages contain no absolute paths or internal details
+
+    **Acceptance criteria**:
+    - Validation error messages are safe to surface to API clients
+  labels:
+    - "area/config"
+    - "priority/normal"
+  assignees: []
+
+- title: "Add --print-default-config CLI flag and JSON Schema generation"
+  description: |
+    Generate configuration documentation and IDE autocompletion support.
+
+    **Context**: Topic 11, Configuration Improvement #8. Subtask 11a, Implementation Step 7.
+    See [`plans/11-configuration-management.md`](plans/11-configuration-management.md:134) and
+    [`plans/11a-separate-secrets-env-overrides-migration.md`](plans/11a-separate-secrets-env-overrides-migration.md:29).
+
+    **Current state**: No CLI way to dump the default config, no JSON Schema for IDE
+    autocompletion, and no comments in [`default-config.json`](default-config.json:1).
+
+    **Tasks**:
+    - Add a `--print-default-config` CLI flag that prints the generated default config
+    - Generate a JSON Schema for the config (for IDE autocompletion) and ship it alongside
+      the project
+    - Document settings/units (including expanded size units) in the schema or a schema doc
+
+    **Acceptance criteria** (from subtask 11a):
+    - `--print-default-config` CLI flag works
+    - JSON Schema available for IDE autocompletion
+  labels:
+    - "area/config"
+    - "area/cli"
+    - "priority/normal"
+  assignees: []

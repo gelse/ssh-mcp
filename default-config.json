@@ -15,6 +15,7 @@
     }
   },
   "block_patterns": [
+    "\\bsudo\\b",
     "\\brm\\s+-rf\\b",
     "\\bdd\\s+if=",
     "\\b>:.*/(dev|proc|sys)/",
@@ -47,6 +48,16 @@
   },
   "settings": {
     "max_output_length": 50000,
-    "command_timeout_max": 120
+    "command_timeout_max": 120,
+    "retry_max_attempts": 3,
+    "retry_backoff_base_seconds": 1.0,
+    "circuit_breaker_failure_threshold": 5,
+    "circuit_breaker_timeout_seconds": 60.0,
+    "log_level": "INFO",
+    "max_log_output": 4096,
+    "compress_rotated": true,
+    "pool_max_connections_per_target": 5,
+    "pool_idle_timeout_seconds": 300.0,
+    "pool_cleanup_interval_seconds": 60.0
   }
 }
