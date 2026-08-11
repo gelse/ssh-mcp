@@ -1,375 +1,449 @@
 # mcp-ssh
 
-MCP server that provides remote SSH command execution and file transfer capabilities. Deploy as a Docker container behind a reverse proxy to give AI agents (Claude Desktop, Continue, etc.) secure, audited access to your SSH infrastructure.
+**mcp-ssh** is a [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server that exposes SSH command execution and SFTP file transfer as MCP tools. It is designed to run as a small Docker service (behind a TLS reverse proxy such as Traefik) and give MCP clients — like Claude Desktop or custom agents — controlled, auditable access to your servers.
 
-## Features
+The server speaks **streamable HTTP** on port `8080` at the `/mcp` path and registers exactly five tools: `ssh_list_servers`, `ssh_list_allowed_commands`, `ssh_execute_command`, `ssh_download_file`, and `ssh_upload_file`.
 
-- **5 MCP tools** — list servers, list allowed commands, execute commands, download files, upload files
-- **Layered authorization** — block patterns → default allowlist → API key rules → network rules
-- **Connection pooling** — persistent SSH connections with configurable pool limits
-- **Rate limiting** — sliding-window rate limiter (60 req/min default)
-- **Circuit breaker** — automatic failure detection and graceful degradation
-- **Structured logging** — JSONL logs with rotation, correlation IDs, and truncation
-- **Prometheus metrics** — request counts, durations, errors, pool stats
-- **Hot-reload** — configuration changes picked up without restart
+> **Truth-first documentation:** every statement in this README reflects the current implementation. Planned work is explicitly marked as *planned* and is **not** implemented yet.
 
-## Prerequisites
+---
 
-- Docker and Docker Compose
-- An SSH keypair for authenticating to your remote hosts
-- A reverse proxy with TLS termination (Traefik configuration included)
+## Table of Contents
 
-## Quick Start
+- [1. Summary](#1-summary)
+- [2. Configuration](#2-configuration)
+- [3. Deployment](#3-deployment)
+- [4. User Guide](#4-user-guide)
+- [Additional Resources](#additional-resources)
 
-### 1. Prepare configuration directory
+---
 
-```bash
-mkdir -p config logs
-```
+## 1. Summary
 
-### 2. Create SSH key
+### What it does
 
-Place your SSH private key at `config/ssh_key`:
+| Capability | Description |
+|---|---|
+| **MCP tools** | 5 tools: list servers, list allowed commands, execute command, download file, upload file |
+| **Transport** | Streamable HTTP, listens on `0.0.0.0:8080`, MCP path `/mcp` |
+| **Command authorization** | Layered allow-list chain: `block_patterns` → dangerous patterns → command segmentation → `default` rules → API key rules → network rules → deny |
+| **API key authentication** | Keys are stored as **hashes** in the config file (PBKDF2-HMAC-SHA256 with per-key random salt; legacy `sha256:` hashes supported). Verified with constant-time comparison. Keys are sent via `X-API-Key` or `Authorization: Bearer` headers |
+| **SSH connection pooling** | Reuses connections per target (configurable max connections, idle timeout, cleanup interval) |
+| **Rate limiting** | Sliding-window limiter per client IP (defaults: 60 requests / 60 s window; `/health` is exempt). Returns HTTP 429 with `Retry-After` |
+| **Circuit breaker** | Per-target failure threshold + recovery timeout so a failing host does not stall the server |
+| **Retry with backoff** | Automatic retries for transient SSH failures (configurable attempts + base backoff) |
+| **Sudo support** | `sudo -S -p ''` when the target config provides a password, or `sudo -n` for passwordless sudo |
+| **SFTP security** | 7-layer path validation; uploads are only allowed under `/tmp/` or `/home/`; 10 MiB max file size |
+| **Structured logging** | JSONL logs with rotation (10 MB, 5 backups, optional gzip), output truncation, per-request correlation IDs |
+| **Config hot-reload** | `ssh-mcp-config.json` is re-read on change (15 s polling, 2 s debounce) — no restart required |
+| **Observability** | `GET /health` and `GET /metrics` (Prometheus) endpoints |
+| **Docker hardening** | Non-root `mcpssh` user, hash-pinned base image, CycloneDX SBOM build stage |
 
-```bash
-cp ~/.ssh/id_ed25519 config/ssh_key
-chmod 600 config/ssh_key
-```
+### Planned improvements (not yet implemented)
 
-### 3. Create configuration file
+The following items are tracked in the project plans (`plans/11a-separate-secrets-env-overrides-migration.md`) but are **not** part of the current code:
 
-Copy the default config and edit it for your targets:
+- Separate `secrets.json` file for sensitive values (today all secrets live in `ssh-mcp-config.json`)
+- Environment-variable setting overrides (`MCP_SSH_SETTING_*`)
+- Schema version migration support
+- Duplicate SSH-target detection
+- File-permission validation for config files
 
-```bash
-cp default-config.json config/ssh-mcp-config.json
-```
+---
 
-Edit `config/ssh-mcp-config.json` to define your SSH targets, allowed commands, and settings. See [Configuration](#configuration) below.
+## 2. Configuration
 
-### 4. Set API keys
+> **Target audience:** operators who set up the server.
 
-Create a `.env` file or export the variable directly:
+### 2.1 Config file location
 
-```bash
-export API_KEYS='{"my-client-key": "My Client"}'
-```
+The server reads its configuration from `<config_dir>/ssh-mcp-config.json`, where `config_dir` is the `--config` CLI flag or the `CONFIG_DIR` environment variable (default `/config`). See [§3 Deployment](#3-deployment) for how this maps to Docker.
 
-The key is the API key string clients will send; the value is a human-readable name used in logs and authorization rules.
+If the config file does not exist and the directory is writable, the server writes a bundled `default-config.json` so it can start. If the directory is not writable, it falls back to the bundled defaults in memory.
 
-### 5. Start the server
+### 2.2 Top-level structure
 
-```bash
-docker compose up -d
-```
-
-### 6. Verify
-
-```bash
-curl http://localhost:8080/health
-```
-
-Expected response: `{"status": "healthy"}`
-
-## Configuration
-
-The configuration file (`config/ssh-mcp-config.json`) has four sections:
-
-### `ssh_targets`
-
-A dictionary of named SSH targets. Each target supports:
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `host` | string | Yes | Hostname or IP address |
-| `port` | integer | Yes | SSH port (typically 22) |
-| `username` | string | Yes | SSH username |
-| `private_key` | string | No | Path to SSH private key for this target (overrides global key) |
-| `password` | string | No | SSH password (key-based auth preferred) |
-
-```json
+```jsonc
 {
-  "ssh_targets": {
-    "web-server": {
-      "host": "192.168.1.10",
-      "port": 22,
-      "username": "deploy",
-      "private_key": "/config/keys/web_server_key"
-    },
-    "db-server": {
-      "host": "db.internal",
-      "port": 2222,
-      "username": "admin"
-    }
-  }
-}
-```
-
-If no `private_key` is specified for a target, the global SSH key at `SSH_KEY_PATH` (default: `/config/ssh_key`) is used.
-
-### `block_patterns`
-
-An array of regex patterns. Any command matching a block pattern is rejected immediately, regardless of authorization rules.
-
-```json
-{
-  "block_patterns": [
-    "rm\\s+-rf\\s+/",
-    "mkfs\\..*",
-    "dd\\s+if=",
-    ">\\s*/dev/sd[a-z]",
-    "shutdown",
-    "reboot",
-    ":\\s*\\(\\)\\s*\\{",
-    "chmod\\s+777"
-  ]
-}
-```
-
-### `allowed_commands`
-
-Layered authorization controlling which commands can be executed on which targets. Three layers, evaluated in order:
-
-| Layer | Key | Description |
-|---|---|---|
-| Default | `default` | Baseline rules that apply to all callers |
-| API Key | `api_keys` | Per-API-key overrides (keyed by API key name) |
-| Network | `networks` | Per-CIDR overrides (keyed by network CIDR) |
-
-Each rule contains:
-
-| Field | Type | Description |
-|---|---|---|
-| `targets` | string[] | SSH target names this rule applies to |
-| `commands` | string[] | Allowed command patterns (supports `*` wildcard) |
-
-```json
-{
+  "version": 1,
+  "ssh_targets": { ... },
+  "block_patterns": [ ... ],
   "allowed_commands": {
-    "default": [
-      {
-        "targets": ["web-server"],
-        "commands": ["docker ps", "systemctl status *", "tail *", "df -h", "free -m"]
-      },
-      {
-        "targets": ["db-server"],
-        "commands": ["pg_lsclusters", "systemctl status postgresql*"]
-      }
-    ],
-    "api_keys": {
-      "Admin Key": [
-        {
-          "targets": ["*"],
-          "commands": ["*"]
-        }
-      ]
-    }
+    "default": [ ... ],
+    "api_keys": [ ... ],
+    "networks": [ ... ]
+  },
+  "settings": { ... }
+}
+```
+
+### 2.3 `ssh_targets`
+
+An object keyed by server identifier. Each target requires a `host`, `port`, and `username`, plus **at least one** of `private_key` or `password`.
+
+```jsonc
+"ssh_targets": {
+  "web-server": {
+    "host": "192.168.1.10",
+    "port": 22,
+    "username": "deploy",
+    "private_key": "/app/ssh_key"
+  },
+  "db-server": {
+    "host": "db.internal",
+    "port": 22,
+    "username": "root",
+    "password": "CHANGE_ME"
   }
 }
 ```
 
-### `settings`
+> **Note:** `private_key` is a *path on the server's filesystem* to the private key file (in Docker, mounted into the container), not an inline key.
+
+### 2.4 `block_patterns`
+
+A list of regex patterns. Any command matching a pattern is **denied**, regardless of other allow-list layers. The bundled defaults include:
+
+```jsonc
+"block_patterns": [
+  "\\bsudo\\b",
+  "\\brm\\s+-rf\\b",
+  "\\bdd\\s+if=",
+  "\\b>:.*/(dev|proc|sys)/",
+  "\\bmkfs\\.",
+  "\\bwipefs\\b",
+  "\\bshutdown\\b",
+  "\\breboot\\b",
+  "\\bpoweroff\\b",
+  "\\binit\\s+[06]",
+  "\\bhalt\\b"
+]
+```
+
+### 2.5 `allowed_commands`
+
+Three sub-objects control which commands each client may run.
+
+#### `default`
+
+Rules that apply to **all** clients (unless a more specific layer grants/denies first). Each rule is an object with a `targets` list (server ids, or `"*"` for all) and a `commands` list (base command names, or `"*"` for any command).
+
+```jsonc
+"default": [
+  {
+    "targets": ["*"],
+    "commands": ["hostname", "uptime", "free", "df", "du", "systemctl", "journalctl", "ps", "ls", "cat", "head", "tail", "grep"]
+  },
+  {
+    "targets": ["db-server"],
+    "commands": ["psql"]
+  }
+]
+```
+
+#### `api_keys`
+
+A **list** of objects, each with `name` (a label, e.g. the client name), `key_hash` (the hashed API key), and `rules` (same shape as `default` rules). Clients authenticate by sending their raw key; the server hashes it and matches it against `key_hash`.
+
+```jsonc
+"api_keys": [
+  {
+    "name": "ci-bot",
+    "key_hash": "pbkdf2:sha256:100000$<salt-hex>$<hash-hex>",
+    "rules": [
+      { "targets": ["web-server"], "commands": ["systemctl", "journalctl"] }
+    ]
+  }
+]
+```
+
+**How to generate `key_hash`:** the server hashes keys with PBKDF2-HMAC-SHA256 (100,000 iterations, random 32-byte salt). Generate the hash with the same parameters the server uses:
+
+```bash
+python3 - <<'EOF'
+import hashlib, os
+key = "my-secret-key"                       # the raw key your client will send
+salt = os.urandom(32)
+dk = hashlib.pbkdf2_hmac("sha256", key.encode(), salt, 100000)
+print(f"pbkdf2:sha256:100000${salt.hex()}${dk.hex()}")
+EOF
+```
+
+> **Important:** `key_hash` is the **only** thing stored in the config — never store raw API keys in `ssh-mcp-config.json`. Legacy `sha256:<64-hex>` hashes (unsalted) are also accepted for compatibility.
+
+#### `networks`
+
+A **list** of objects, each with `name`, `range` (CIDR), and `rules` (same shape as above). A client whose source IP falls inside the range gets the corresponding rules.
+
+```jsonc
+"networks": [
+  {
+    "name": "home-lan",
+    "range": "192.168.1.0/24",
+    "rules": [
+      { "targets": ["*"], "commands": ["*"] }
+    ]
+  }
+]
+```
+
+### 2.6 `settings`
+
+All settings are **flat keys** — there is no nesting (and no `rate_limit` key; see below). Unknown keys cause the config to be rejected at load time.
 
 | Setting | Default | Description |
 |---|---|---|
-| `max_output_length` | 50000 | Maximum bytes of command output returned |
-| `command_timeout_max` | 120 | Maximum seconds a command can run |
-| `retry_max_attempts` | 3 | Maximum retry attempts for transient failures |
-| `retry_backoff_base` | 2.0 | Exponential backoff multiplier |
-| `retry_backoff_max` | 30.0 | Maximum backoff seconds between retries |
-| `circuit_breaker.failure_threshold` | 5 | Consecutive failures before circuit opens |
-| `circuit_breaker.recovery_timeout` | 60 | Seconds before attempting recovery |
-| `circuit_breaker.half_open_max` | 3 | Max requests allowed in half-open state |
-| `pool.max_size` | 10 | Max SSH connections per target |
-| `pool.max_age` | 300 | Max connection lifetime in seconds |
-| `pool.idle_timeout` | 120 | Idle seconds before connection is closed |
-| `log_level` | "INFO" | Log level (DEBUG, INFO, WARNING, ERROR) |
-| `rate_limit.requests` | 60 | Max requests per window |
-| `rate_limit.window` | 60 | Sliding window size in seconds |
+| `max_output_length` | `50000` | Max bytes of command output returned to the client (bytes) |
+| `command_timeout_max` | `120` | Hard cap on command timeout (seconds) |
+| `retry_max_attempts` | `3` | Retry attempts for transient SSH failures |
+| `retry_backoff_base_seconds` | `1.0` | Base exponential backoff (seconds) |
+| `circuit_breaker_failure_threshold` | `5` | Failures before the circuit opens per target |
+| `circuit_breaker_timeout_seconds` | `60.0` | Recovery timeout for an open circuit (seconds) |
+| `log_level` | `"INFO"` | Log level (DEBUG, INFO, WARNING, ERROR) |
+| `max_log_output` | `4096` | Max chars of output stored in log entries |
+| `compress_rotated` | `true` | Gzip rotated log files |
+| `pool_max_connections_per_target` | `5` | Max pooled SSH connections per target |
+| `pool_idle_timeout_seconds` | `300.0` | Idle connection timeout (seconds) |
+| `pool_cleanup_interval_seconds` | `60.0` | Pool cleanup interval (seconds) |
 
-## Environment Variables
+> **Rate limiting note:** the sliding-window rate limiter currently uses **fixed defaults** (60 requests per minute per client IP, 60-second window, `/health` exempt). A `settings.rate_limit` key is **rejected** by config validation in this version — it is a planned configuration surface, not a working one.
 
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `API_KEYS` | Yes | — | JSON map of API key → display name |
-| `SSH_KEY_PATH` | No | `/config/ssh_key` | Path to default SSH private key |
-| `CONFIG_PATH` | No | `/config` | Directory containing `ssh-mcp-config.json` |
-| `SSH_TARGETS_FILE` | No | `ssh-mcp-config.json` | Config filename (within `CONFIG_PATH`) |
-| `LOG_DIR` | No | `/logs` | Directory for JSONL log files |
-| `SSL_CERT_PATH` | No | — | Path to TLS certificate (for direct TLS) |
-| `SSL_KEY_PATH` | No | — | Path to TLS private key (for direct TLS) |
-| `TRAEFIK_HOST` | No | — | Traefik routing hostname |
-| `TRAEFIK_PORT` | No | `8080` | Internal application port |
-| `TRAEFIK_ENTRYPOINTS` | No | `websecure` | Traefik entrypoint name |
+### 2.7 Environment variables and CLI flags
 
-## Traefik Integration
+Exactly **four** environment variables are read, each mapping 1:1 to a CLI flag:
 
-The included [`compose.yaml`](compose.yaml) configures Traefik labels for automatic routing and TLS:
+| Environment variable | CLI flag | Default |
+|---|---|---|
+| `CONFIG_DIR` | `--config` | `/config` |
+| `SSH_KEY_PATH` | `--ssh-key` | `ssh_key` |
+| `LOG_DIR` | `--log-dir` | `/logs` |
+| `MAX_OUTPUT_LENGTH` | `--max-output` | `50000` |
 
-```yaml
-labels:
-  - "traefik.enable=true"
-  - "traefik.http.routers.mcp-ssh.rule=Host(`${TRAEFIK_HOST}`)"
-  - "traefik.http.routers.mcp-ssh.entrypoints=${TRAEFIK_ENTRYPOINTS:-websecure}"
-  - "traefik.http.routers.mcp-ssh.tls=true"
-  - "traefik.http.services.mcp-ssh.loadbalancer.server.port=${TRAEFIK_PORT:-8080}"
+> **Not read by the server:** `API_KEYS`, `SSH_TARGETS_FILE`, `SSL_CERT_PATH`, `SSL_KEY_PATH`, `TRAEFIK_HOST`, `TRAEFIK_PORT`, `TRAEFIK_ENTRYPOINTS`, `CONFIG_PATH`. API keys belong in `ssh-mcp-config.json` (see §2.5), and Traefik settings are compose-level labels, not server config.
+
+---
+
+## 3. Deployment
+
+> **Target audience:** operators deploying the server, typically with Docker.
+
+### 3.1 Prerequisites
+
+- Docker with Docker Compose (the provided [`compose.yaml`](compose.yaml) targets the `traefik` network)
+- An SSH key pair (or per-target passwords) for the servers you want to reach
+- A directory layout like this (used by the compose file):
+
+```
+.
+├── compose.yaml
+├── config/
+│   └── ssh-mcp-config.json
+├── logs/
+├── ssh_key            # private key (mounted read-only)
+└── ssh_key.pub
 ```
 
-Ensure your Traefik instance is on the `traefik` network and that the `websecure` entrypoint has a TLS certificate resolver configured.
-
-## Usage
-
-Clients interact with the server via JSON-RPC over HTTP. The five available MCP tools are described below.
-
-All requests must include the `X-API-Key` header with a valid API key.
-
-### `ssh_list_servers`
-
-List all configured SSH target names.
-
-**Parameters:** None
+### 3.2 Build and run
 
 ```bash
-curl -s -X POST http://localhost:8080/mcp \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: my-client-key" \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "method": "tools/call",
-    "params": {
-      "name": "ssh_list_servers",
-      "arguments": {}
-    }
-  }'
+# 1. Prepare the config directory
+mkdir -p config logs
+
+# 2. Create the SSH key (or reuse an existing one)
+ssh-keygen -t ed25519 -f ssh_key -N ""
+
+# 3. Create config/ssh-mcp-config.json (see §2 Configuration)
+
+# 4. Start the server
+docker compose up -d --build
 ```
 
-### `ssh_list_allowed_commands`
+The `compose.yaml` mounts:
 
-List commands authorized for a specific SSH target.
+| Host path | Container path | Mode |
+|---|---|---|
+| `./config` | `/config` | rw |
+| `./logs` | `/logs` | rw |
+| `./ssh_key` | `/app/ssh_key` | ro |
+| `./ssh_key.pub` | `/app/ssh_key.pub` | ro |
 
-**Parameters:**
+and sets `CONFIG_DIR=/config`, `LOG_DIR=/logs`.
 
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `server_name` | string | Yes | Name of the SSH target |
+### 3.3 Traefik integration
 
-```bash
-curl -s -X POST http://localhost:8080/mcp \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: my-client-key" \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 2,
-    "method": "tools/call",
-    "params": {
-      "name": "ssh_list_allowed_commands",
-      "arguments": {"server_name": "web-server"}
-    }
-  }'
+The compose file ships with Traefik labels that route the external host `ssh-mcp.example.com` (change it to your domain) over HTTPS to the container:
+
+- Router rule `Host(`ssh-mcp.example.com`)`, entrypoint `https`, TLS enabled
+- Load balancer on container port `8080`
+- A headers middleware sets `X-Forwarded-For` so rate limiting sees the real client IP
+- The container joins the external `traefik` Docker network
+
+These labels are **compose-level configuration** — the server itself does not read any `TRAEFIK_*` environment variables.
+
+### 3.4 Health check
+
+The container's `HEALTHCHECK` runs `wget --spider http://localhost:8080/health`. The `GET /health` endpoint returns `{"status": "ok"}` (plus a `connection_pool` object when pool stats are available).
+
+### 3.5 Makefile
+
+| Command | Description |
+|---|---|
+| `make build` | Build the Docker image (`mcp-ssh:local`) |
+| `make up` | `docker compose up -d --build` |
+| `make down` | `docker compose down` |
+| `make test` | Run unit tests only |
+| `make integrationtest` | Build the test image and run integration tests |
+| `make clean-test` | Remove test artifacts and containers |
+
+---
+
+## 4. User Guide
+
+> **Target audience:** MCP clients (agents, Claude Desktop, custom code) that call the tools.
+
+### 4.1 Server endpoints
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/mcp` | POST | MCP streamable-HTTP endpoint (all tool calls) |
+| `/health` | GET | Liveness check → `{"status": "ok"}` |
+| `/metrics` | GET | Prometheus metrics |
+
+### 4.2 Authentication
+
+Send your API key on every request via either:
+
+- `X-API-Key: <your-raw-key>`, or
+- `Authorization: Bearer <your-raw-key>`
+
+The key is matched against the hashed `api_keys` entries in `ssh-mcp-config.json`. Unauthenticated requests fall through to the `default` rules; if no layer allows the command, it is denied.
+
+### 4.3 Tools
+
+All tool calls are JSON-RPC `tools/call` requests to `/mcp`. All tools return a **string** (JSON or plain text).
+
+#### `ssh_list_servers()`
+
+Lists configured SSH targets **without secrets**.
+
+- **Parameters:** none
+- **Returns:** JSON object `{ "<server_id>": { "host": ..., "port": ..., "username": ... } }`
+
+```python
+result = call_tool("ssh_list_servers", {})
+# {"web-server": {"host": "192.168.1.10", "port": 22, "username": "deploy"}}
 ```
 
-### `ssh_execute_command`
+#### `ssh_list_allowed_commands(server_name)`
 
-Execute a command on a remote host.
+Lists the commands the **current client** is allowed to run on the given server (union of `default`, API-key, and network rules for that target). Does **not** apply `block_patterns` — a listed command can still be denied at execution time.
 
-**Parameters:**
+- **Parameters:** `server_name` (str) — configured server id
+- **Returns:** JSON array of sorted, deduplicated base command names; `["*"]` if a wildcard applies
 
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `server_name` | string | Yes | Name of the SSH target |
-| `command` | string | Yes | Command to execute |
-| `sudo` | boolean | No | Execute with sudo (default: false) |
-| `sudo_password` | string | No | Sudo password (if required) |
-| `timeout` | integer | No | Command timeout in seconds (max: `command_timeout_max`) |
-
-```bash
-curl -s -X POST http://localhost:8080/mcp \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: my-client-key" \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 3,
-    "method": "tools/call",
-    "params": {
-      "name": "ssh_execute_command",
-      "arguments": {
-        "server_name": "web-server",
-        "command": "docker ps --format \"{{.Names}}\t{{.Status}}\""
-      }
-    }
-  }'
+```python
+result = call_tool("ssh_list_allowed_commands", {"server_name": "web-server"})
+# ["cat", "df", "du", "free", "grep", "head", "hostname", ...]
 ```
 
-### `ssh_download_file`
+#### `ssh_execute_command(server_name, command, timeout=30, sudo=False)`
 
-Download a file from a remote host via SFTP. The file content is returned as a base64-encoded string.
+Runs a command on the target over SSH.
 
-**Parameters:**
+- **Parameters:**
+  - `server_name` (str, required) — configured server id
+  - `command` (str, required) — the shell command to run
+  - `timeout` (int, default `30`) — per-command timeout in seconds; clamped to `command_timeout_max`
+  - `sudo` (bool, default `False`) — wrap with `sudo -S -p ''` (password taken from target config) or `sudo -n` (passwordless)
+- **Returns:** stdout; if stderr is non-empty it is appended as `[STDERR]\n<stderr>`; a non-zero exit code appends `[EXIT: <code>]`; output at the configured limit appends `[OUTPUT TRUNCATED]`
 
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `server_name` | string | Yes | Name of the SSH target |
-| `remote_path` | string | Yes | Absolute path to the file on the remote host |
-
-```bash
-curl -s -X POST http://localhost:8080/mcp \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: my-client-key" \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 4,
-    "method": "tools/call",
-    "params": {
-      "name": "ssh_download_file",
-      "arguments": {
-        "server_name": "web-server",
-        "remote_path": "/var/log/nginx/access.log"
-      }
-    }
-  }'
+```python
+result = call_tool("ssh_execute_command", {
+    "server_name": "web-server",
+    "command": "uptime",
+})
+# " 07:12:33 up 10 days,  2:15,  1 user,  load average: 0.08, 0.03, 0.01"
 ```
 
-### `ssh_upload_file`
+> There is **no** `sudo_password` parameter — if sudo requires a password, it comes from the target's `password` field in `ssh-mcp-config.json`.
 
-Upload content to a remote host via SFTP. Content is provided as a UTF-8 string and written to the specified path.
+#### `ssh_download_file(server_name, remote_path)`
 
-**Parameters:**
+Downloads a file from the target via SFTP.
 
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `server_name` | string | Yes | Name of the SSH target |
-| `remote_path` | string | Yes | Absolute destination path on the remote host |
-| `content` | string | Yes | File content to write |
-| `mode` | string | No | File permissions in octal (e.g., "0644") |
+- **Parameters:**
+  - `server_name` (str, required)
+  - `remote_path` (str, required) — absolute remote path
+- **Authorization:** equivalent to executing `cat <remote_path>`
+- **Returns:** the file content decoded as UTF-8 (invalid bytes replaced)
 
-```bash
-curl -s -X POST http://localhost:8080/mcp \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: my-client-key" \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 5,
-    "method": "tools/call",
-    "params": {
-      "name": "ssh_upload_file",
-      "arguments": {
-        "server_name": "web-server",
-        "remote_path": "/tmp/deploy.sh",
-        "content": "#!/bin/bash\necho deployed",
-        "mode": "0755"
-      }
-    }
-  }'
+```python
+result = call_tool("ssh_download_file", {
+    "server_name": "web-server",
+    "remote_path": "/etc/hostname",
+})
+# "web-server\n"
 ```
 
-### Python MCP Client
+#### `ssh_upload_file(server_name, remote_path, content, permissions="0644")`
+
+Uploads a file to the target via SFTP.
+
+- **Parameters:**
+  - `server_name` (str, required)
+  - `remote_path` (str, required) — absolute remote path, **must start with `/tmp/` or `/home/`**
+  - `content` (str, required) — file contents (encoded UTF-8)
+  - `permissions` (str, default `"0644"`) — octal permission string applied via `chmod`
+- **Authorization:** equivalent to executing `tee <remote_path>`
+- **Returns:** `OK: Uploaded <N> bytes to <path>`
+
+```python
+result = call_tool("ssh_upload_file", {
+    "server_name": "web-server",
+    "remote_path": "/tmp/backup.sql",
+    "content": "CREATE TABLE ...;\n",
+    "permissions": "0640",
+})
+# "OK: Uploaded 19 bytes to /tmp/backup.sql"
+```
+
+> **Upload restriction:** only paths under `/tmp/` or `/home/` are accepted. Anything else returns a `PathValidationError`.
+
+### 4.4 Error responses
+
+On failure a tool returns a JSON string with:
+
+```jsonc
+{
+  "error": true,
+  "error_type": "<ExceptionClassName>",
+  "message": "<human-readable message>",
+  "retryable": false,
+  "request_id": "<correlation id>"
+}
+```
+
+`retryable` is `true` for `SSHTimeoutError`. `error_type` is the concrete exception class name — e.g. `AuthorizationError`, `PathValidationError`, `FileTransferError` (e.g. content exceeding the 10 MiB upload limit), `SSHAuthenticationError`, `SSHTimeoutError`, or `MCPSSHError` for internal errors. Rate-limit violations do **not** return this shape — the middleware answers with HTTP `429` (see §4.5).
+
+### 4.5 Rate limiting
+
+Requests are rate-limited per client IP with a sliding window (fixed defaults: **60 requests / 60 s**, `/health` exempt). On violation the server returns HTTP `429` with a `Retry-After` header:
+
+```jsonc
+{
+  "error": "Rate limit exceeded",
+  "detail": "Too many requests from <ip>. Retry after <n> seconds."
+}
+```
+
+### 4.6 Python client example
 
 ```python
 import json
 import requests
 
-MCP_URL = "https://mcp-ssh.example.com/mcp"
-API_KEY = "my-client-key"
+MCP_URL = "https://ssh-mcp.example.com/mcp"   # or http://localhost:8080/mcp
+API_KEY = "my-secret-key"
 
 
 def call_tool(name: str, arguments: dict) -> dict:
@@ -390,81 +464,50 @@ def call_tool(name: str, arguments: dict) -> dict:
     return response.json()
 
 
-# List servers
 print(call_tool("ssh_list_servers", {}))
 
-# Execute a command
 print(call_tool("ssh_execute_command", {
     "server_name": "web-server",
     "command": "uptime",
 }))
 
-# Download a file
 print(call_tool("ssh_download_file", {
     "server_name": "web-server",
     "remote_path": "/etc/hostname",
 }))
 ```
 
-## Health & Monitoring
+> The example uses `requests` directly. For the official SDK, point the MCP client at the same URL; it will send the `X-API-Key` header through the transport.
 
-### Health Endpoint
+### 4.7 Metrics
 
-```
-GET /health
-```
+Prometheus metrics are exposed at `GET /metrics` (also reachable through the Traefik entrypoint). All names are prefixed `mcpssh_` and live on a dedicated registry:
 
-Returns `{"status": "healthy"}` with HTTP 200 when the server is running and able to accept connections.
+| Metric | Type | Labels |
+|---|---|---|
+| `mcpssh_requests_total` | Counter | `tool`, `status` (`success`/`error`/`denied`) |
+| `mcpssh_ssh_connections_total` | Counter | `target` |
+| `mcpssh_ssh_connection_duration_seconds` | Histogram | `target` |
+| `mcpssh_auth_denials_total` | Counter | `reason` |
+| `mcpssh_command_duration_seconds` | Histogram | `target` |
+| `mcpssh_pool_active_connections` | Gauge | `target` |
+| `mcpssh_pool_idle_connections` | Gauge | `target` |
+| `mcpssh_pool_created_total` | Counter | `target` |
 
-### Prometheus Metrics
+### 4.8 Logs
 
-Metrics are exposed at the Traefik entrypoint and include:
+Structured JSONL logs are written to `LOG_DIR` (default `/logs`). Each entry includes `timestamp` (ISO 8601 UTC), `log_level`, `log_format_version`, `event`, `request_id` (correlation ID from `X-Request-ID` or generated), `source_ip`, `api_key_name`, `server_name`, `command`, `allowed`, `reason`, `matched_via`, `execution_time_ms`, `exit_code`, and optionally `output` (truncated to `max_log_output` characters). Command-execution entries also carry `sudo`. Files rotate at 10 MB keeping 5 backups; rotated files are gzipped when `compress_rotated` is enabled.
 
-- Request counts by tool name and status
-- Request duration histograms
-- SSH connection pool statistics
-- Circuit breaker state per target
-- Rate limiter counters
+---
 
-### Logs
+## Additional Resources
 
-Structured JSONL logs are written to the `LOG_DIR` (default: `/logs`). Each log entry includes:
-
-- `timestamp` — ISO 8601 UTC
-- `level` — DEBUG, INFO, WARNING, ERROR
-- `correlation_id` — unique per-request identifier
-- `tool` — MCP tool name
-- `server_name` — SSH target
-- `api_key_name` — authenticated client identity
-- `client_ip` — originating IP address
-- `duration_ms` — request processing time
-
-Logs rotate at 10 MB with 5 backups retained.
-
-## Makefile Commands
-
-| Command | Description |
-|---|---|
-| `make build` | Build the Docker image |
-| `make up` | Start the container with Docker Compose |
-| `make down` | Stop and remove the container |
-| `make test` | Run unit tests (excludes integration) |
-| `make integrationtest` | Build test image and run integration tests |
-| `make clean-test` | Remove test artifacts and containers |
-
-## Security
-
-mcp-ssh implements multiple security layers:
-
-- **TLS** — All traffic encrypted via Traefik reverse proxy (required for production)
-- **API Key Authentication** — PBKDF2-SHA256 hashed keys with constant-time comparison
-- **Command Authorization** — Regex block patterns prevent dangerous commands; layered allowlists control per-target access
-- **SFTP Path Traversal Prevention** — 7-layer defense against path traversal attacks
-- **Rate Limiting** — Sliding-window rate limiter (60 req/min per client IP by default)
-- **Secure Defaults** — Non-root container user, pinned dependencies, SBOM generation
-
-For full details, see [`docs/SECURITY.md`](docs/SECURITY.md).
+- [`docs/SECURITY.md`](docs/SECURITY.md) — full security model (authorization chain, path validation, secrets, transport)
+- [`compose.yaml`](compose.yaml) — Docker Compose deployment with Traefik labels
+- [`Dockerfile`](Dockerfile) — multi-stage build, non-root runtime, SBOM stage
+- [`default-config.json`](default-config.json) — bundled default configuration
+- [`plans/`](plans/) — architecture, security, and feature plans (including planned improvements listed in §1)
 
 ## License
 
-MIT — see `LICENSE` file.
+MIT — see the `LICENSE` file.
