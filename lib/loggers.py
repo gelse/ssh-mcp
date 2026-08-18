@@ -81,8 +81,13 @@ class FileLogger(BaseLogger):
     (``.log`` → ``.log.1`` → ``.log.2`` → … up to *backup_count*) and a
     new empty file is started.
 
-    Thread-safe: all writes and rotations are serialised via
-    :class:`threading.Lock`.
+    Thread safety
+    -------------
+    All state is guarded by a single ``_lock``: log writes, rotation,
+    the ``consecutive_failures`` counter, and ``close()``.  Readers of the
+    counter and writers to the file may contend, but a line is never
+    interleaved and a rotation never observes a partially-written line.
+    ``_rotate_if_needed`` must be called while holding ``_lock``.
     """
 
     ACTIVE_NAME = "ssh-mcp.log"
@@ -187,8 +192,9 @@ class FileLogger(BaseLogger):
         ``settings.compress_rotated`` values take effect for subsequent
         entries and rotations.
         """
-        self._max_log_output = max_log_output
-        self._compress_rotated = compress_rotated
+        with self._lock:
+            self._max_log_output = max_log_output
+            self._compress_rotated = compress_rotated
 
     def close(self) -> None:
         """Flush and close the underlying file handle."""

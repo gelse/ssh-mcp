@@ -126,11 +126,11 @@ class SSHTarget(TypedDict, total=False):
     port: int
     """TCP port (defaults to 22 when omitted)."""
 
-    user: str
+    username: str
     """SSH username."""
 
     password: str
     """Optional plain-text password for password authentication."""
 
-    description: str
-    """Human-readable description."""
+    private_key: str
+    """Optional path to the private key for key-based authentication."""

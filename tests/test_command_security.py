@@ -19,6 +19,7 @@ from lib.command_security import (
     check_dangerous_patterns,
     segment_command,
     split_command_segments,
+    strip_redirects,
 )
 
 
@@ -324,6 +325,129 @@ class TestSplitCommandSegmentsDelegation:
 
     def test_empty(self):
         assert _split_command_segments("") == []
+
+
+# ---------------------------------------------------------------------------
+# Tests: strip_redirects
+# ---------------------------------------------------------------------------
+
+
+class TestStripRedirects:
+    """Tests for :func:`strip_redirects` — redirection stripping before segmentation.
+
+    Verifies that shell redirection operators and their targets (``2>&1``,
+    ``>file``, ``>>file``, ``2>/dev/null``, ``&>file``, fd-dup/fd-close forms)
+    are removed so they never become phantom ``&``-separated segments, while
+    chaining operators, quoted/escaped ``>``, and here-docs/here-strings are
+    left intact.
+    """
+
+    # --- Redirection removals (exact output) ---
+
+    def test_stderr_dup_stdout(self):
+        assert strip_redirects("cmd 2>&1") == "cmd"
+
+    def test_stdout_dup_stderr(self):
+        assert strip_redirects("cmd >&2") == "cmd"
+
+    def test_close_stderr(self):
+        assert strip_redirects("cmd 2>&-") == "cmd"
+
+    def test_dup_fd3_to_stdout(self):
+        assert strip_redirects("cmd 3>&1") == "cmd"
+
+    def test_overwrite_file(self):
+        assert strip_redirects("cmd >file") == "cmd"
+
+    def test_append_file(self):
+        assert strip_redirects("cmd >>file") == "cmd"
+
+    def test_stderr_to_dev_null(self):
+        assert strip_redirects("cmd 2>/dev/null") == "cmd"
+
+    def test_ampersand_redirect(self):
+        assert strip_redirects("cmd &>/tmp/x") == "cmd"
+
+    def test_fd1_redirect(self):
+        assert strip_redirects("cmd 1>out") == "cmd"
+
+    def test_fd2_append(self):
+        assert strip_redirects("cmd 2>>log") == "cmd"
+
+    def test_stderr_to_pipe(self):
+        assert strip_redirects("cmd 2>&1 | grep x") == "cmd | grep x"
+
+    def test_docker_logs_stderr_to_pipe(self):
+        assert (
+            strip_redirects("docker logs traefik --tail 200 2>&1 | grep -i certificate")
+            == "docker logs traefik --tail 200 | grep -i certificate"
+        )
+
+    # --- Chaining operators preserved ---
+
+    def test_preserve_single_ampersand_chain(self):
+        assert strip_redirects("cmd1 & cmd2") == "cmd1 & cmd2"
+
+    def test_preserve_double_ampersand_chain(self):
+        assert strip_redirects("cmd1 && cmd2") == "cmd1 && cmd2"
+
+    def test_preserve_double_pipe_chain(self):
+        assert strip_redirects("cmd1 || cmd2") == "cmd1 || cmd2"
+
+    def test_preserve_semicolon_chain(self):
+        assert strip_redirects("cmd1; cmd2") == "cmd1; cmd2"
+
+    # --- Quoted/escaped '>' preserved (not treated as a redirector) ---
+
+    def test_preserve_double_quoted_greater(self):
+        """shlex re-joins tokens and drops the quotes, but the '>' survives as
+        part of the argument — it is NOT consumed as a redirect operator."""
+        result = strip_redirects('echo "a>b"')
+        assert ">" in result
+        assert result.startswith("echo")
+
+    def test_preserve_single_quoted_greater(self):
+        result = strip_redirects("echo 'a>b'")
+        assert ">" in result
+        assert result.startswith("echo")
+
+    def test_preserve_escaped_greater(self):
+        result = strip_redirects(r"echo a\>b")
+        assert ">" in result
+        assert result.startswith("echo")
+
+    def test_preserve_awk_comparison(self):
+        """An unquoted '>' comparison inside a quoted awk program is preserved
+        (shlex keeps it as part of the quoted token)."""
+        result = strip_redirects("awk '$1 > 5'")
+        assert ">" in result
+        assert result.startswith("awk")
+
+    # --- Edge cases ---
+
+    def test_trailing_redirect_no_target(self):
+        assert strip_redirects("cmd >") == "cmd"
+
+    def test_here_doc_unchanged(self):
+        assert strip_redirects("cat << EOF") == "cat << EOF"
+
+    def test_here_string_preserved(self):
+        """Here-strings are out of scope — the '<<<' operator survives (only
+        quotes are normalised by shlex re-joining)."""
+        assert strip_redirects('cmd <<< "str"') == "cmd <<< str"
+
+    def test_lone_redirect_becomes_empty(self):
+        assert strip_redirects(">") == ""
+
+    def test_empty_string_returned_unchanged(self):
+        assert strip_redirects("") == ""
+
+    # --- Robustness ---
+
+    def test_unbalanced_quote_returns_original(self):
+        """An unbalanced quote must not raise; the original is returned safe."""
+        command = 'cmd "unclosed'
+        assert strip_redirects(command) == command
 
 
 # ---------------------------------------------------------------------------

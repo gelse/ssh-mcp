@@ -4,6 +4,8 @@ All magic strings, numbers, and default values are defined here to
 eliminate duplication and improve maintainability.
 """
 
+import re
+
 # =============================================================================
 # Application Identity
 # =============================================================================
@@ -21,14 +23,63 @@ APP_VERSION: str = "1.0.0"
 DEFAULT_CONFIG_DIR: str = "/config"
 """Default directory for the JSON configuration file."""
 
-DEFAULT_CONFIG_FILENAME: str = "config.json"
+DEFAULT_CONFIG_FILENAME: str = "ssh-mcp-config.json"
 """Default configuration file name inside ``DEFAULT_CONFIG_DIR``."""
+
+DEFAULT_SECRETS_FILENAME: str = "secrets.json"
+"""Default secrets file name inside ``DEFAULT_CONFIG_DIR``.
+
+Holds sensitive values (SSH target ``password`` and API-key ``key_hash``)
+separately from the main config so they can be guarded with stricter
+permissions and excluded from VCS.
+"""
 
 DEFAULT_LOG_DIR: str = "/logs"
 """Default directory for JSONL log output."""
 
 DEFAULT_SSH_KEY_FILENAME: str = "ssh_key"
 """Default filename for the private SSH key inside ``DEFAULT_CONFIG_DIR``."""
+
+MCP_SSH_SECRET_PREFIX: str = "MCP_SSH_SECRET_"
+"""Prefix for environment variables that supply secrets.
+
+Env vars are mapped as ``MCP_SSH_SECRET_PASSWORD_<TARGET_ID>`` for SSH
+target passwords and ``MCP_SSH_SECRET_API_KEY_<KEY_NAME>`` for API-key
+hashes.  Identifiers are upper-cased with ``-`` replaced by ``_``.
+"""
+
+MCP_SSH_SETTING_PREFIX: str = "MCP_SSH_SETTING_"
+"""Prefix for environment variables that override non-secret settings.
+
+Env vars are mapped as ``MCP_SSH_SETTING_<SETTING_KEY>`` where the key is
+upper-cased with ``-`` replaced by ``_``, and coerced to the type declared
+in :data:`SETTING_KEY_TYPES`.  Precedence is env var > secrets.json >
+config.json > defaults.
+"""
+
+MCP_SSH_CONFIG_PATH: str = "MCP_SSH_CONFIG_PATH"
+"""Environment variable that overrides the path to ``ssh-mcp-config.json``."""
+
+MCP_SSH_LOG_DIR: str = "MCP_SSH_LOG_DIR"
+"""Environment variable that overrides the log output directory."""
+
+MCP_SSH_SSH_KEY: str = "MCP_SSH_SSH_KEY"
+"""Environment variable that overrides the private SSH key path."""
+
+RESTRICTED_FILE_MODE: int = 0o600
+"""Permission mode enforced for config and secrets files.
+
+Group/world read or write bits trigger a ``permissions_insecure`` warning
+event, and are corrected by the ``--fix-permissions`` CLI flag.
+"""
+
+SECRETS_FILE_MODE: int = RESTRICTED_FILE_MODE  # backward-compatible alias
+"""Required permission bits for ``secrets.json`` (alias of
+``RESTRICTED_FILE_MODE``).
+
+Group/world read or write bits on the secrets file trigger a
+``secrets.permissions_insecure`` warning event at load time.
+"""
 
 # =============================================================================
 # Auth / Crypto Constants
@@ -54,6 +105,16 @@ PBKDF2_ITERATIONS: int = 100_000
 PBKDF2_SALT_BYTES: int = 16
 """Length of the random per-key salt in bytes."""
 
+MAX_SERVER_NAME_LENGTH: int = 128
+"""Maximum length (characters) of an SSH-target server name."""
+
+MAX_API_KEY_LENGTH: int = 1024
+"""Maximum length (characters) of a raw API key before hashing."""
+
+SERVER_NAME_PATTERN: re.Pattern[str] = re.compile(r"[a-zA-Z0-9._-]+")
+"""Regex matching a single valid server-name run (see MAX_SERVER_NAME_LENGTH
+for the upper bound; ``sanitize_server_name`` combines both)."""
+
 # =============================================================================
 # PEM Header Strings
 # =============================================================================
@@ -75,7 +136,11 @@ DEFAULT_WATCHER_INTERVAL_SECONDS: float = 15.0
 """Default polling interval (seconds) for the config-file watcher."""
 
 DEFAULT_WATCHER_DEBOUNCE_SECONDS: float = 2.0
-"""Minimum delay (seconds) between config reloads triggered by file changes."""
+"""Minimum delay (seconds) between config reloads triggered by file changes.
+
+A value of ``0`` disables debouncing entirely, so every file change
+triggers an immediate reload.
+"""
 
 DEFAULT_SSH_PORT: int = 22
 """Fallback TCP port when an SSH target does not specify one."""
@@ -110,15 +175,125 @@ DEFAULT_POOL_IDLE_TIMEOUT_SECONDS: float = 300.0
 DEFAULT_POOL_CLEANUP_INTERVAL_SECONDS: float = 60.0
 """Default interval (seconds) between idle-cleanup sweeps of the pool."""
 
+DEFAULT_MAX_CONCURRENT_SSH_CONNECTIONS: int = 20
+"""Default global cap on concurrent SSH connections across all targets."""
+
+HTTP_SERVICE_UNAVAILABLE: int = 503
+"""HTTP status for Service Unavailable (concurrency-limit rejection)."""
+
 DEFAULT_SSH_EXECUTOR_MAX_WORKERS: int = 8
 """Default maximum worker threads for the SSH operation thread pool."""
+
+DEFAULT_SHUTDOWN_TIMEOUT_SECONDS: int = 30
+"""Default time (seconds) to wait for pending SSH work during a graceful shutdown.
+
+On shutdown the server drains in-flight requests for at most this many
+seconds before force-cancelling the remaining work and releasing resources.
+"""
+
+SETTING_KEY_TYPES: dict[str, str] = {
+    "max_output_length": "size",
+    "command_timeout_max": "int",
+    "retry_max_attempts": "int",
+    "retry_backoff_base_seconds": "float",
+    "circuit_breaker_failure_threshold": "int",
+    "circuit_breaker_timeout_seconds": "float",
+    "log_level": "str",
+    "max_log_output": "int",
+    "compress_rotated": "bool",
+    "pool_max_connections_per_target": "int",
+    "pool_idle_timeout_seconds": "float",
+    "pool_cleanup_interval_seconds": "float",
+    "max_concurrent_ssh_connections": "int",
+    "watcher_debounce_seconds": "float",
+}
+"""Maps each ``settings`` key to its expected Python type name.
+
+Used to coerce ``MCP_SSH_SETTING_<KEY>`` environment-variable overrides
+before they are merged into the validated config.
+"""
+
+# =============================================================================
+# Config Schema Version
+# =============================================================================
+
+LATEST_CONFIG_VERSION: int = 1
+"""The most recent config schema version this release understands."""
+
+CONFIG_BACKUP_SUFFIX: str = ".bak"
+"""Suffix appended to the original config path when writing a pre-migration backup."""
+
+MIGRATED_FILE_MODE: int = 0o600
+"""File permission applied to migrated/backup config files."""
+
+# =============================================================================
+# Block Patterns
+# =============================================================================
+
+DEFAULT_BLOCK_PATTERNS: tuple[str, ...] = (
+    r"\bsudo\b",
+    r"\brm\s+-rf\b",
+    r"\bdd\s+if=",
+    r"\b>:.*/(dev|proc|sys)/",
+    r"\bmkfs\.",
+    r"\bwipefs\b",
+    r"\bshutdown\b",
+    r"\breboot\b",
+    r"\bpoweroff\b",
+    r"\binit\s+[06]",
+    r"\bhalt\b",
+)
+"""Default dangerous command patterns applied before allow-list authorization.
+
+Each entry is a compiled-able regular expression; if a requested command
+matches any pattern it is denied regardless of other authorization layers.
+"""
+
+REDIRECT_FD_DUP_RE: str = r"(?<!\S)(?:[0-9]+[12]?>&[0-9-]|[12]?>&[0-9-]|[12]?>&-)"
+"""Regex matching shell file-descriptor duplication and closure redirection forms.
+
+Covers forms such as ``2>&1``, ``>&2``, ``3>&1``, ``2>&-``, and ``>&-``.
+Used by the redirection stripper to remove fd-dup/fd-close operators before
+command segmentation.  Anchored on a non-word-boundary start so an ``&`` or
+``>`` embedded inside a quoted argument is not consumed.
+"""
+
+REDIRECT_FILE_OP_RE: str = r"(?<!\S)(?:&>>|&>|[12]>>|[12]>|>>|>)"
+"""Regex matching shell file-redirection operators.
+
+Covers ``>``, ``>>``, ``1>``, ``1>>``, ``2>``, ``2>>``, ``&>``, and ``&>>``,
+optionally prefixed with an fd digit.  Anchored on a non-word-boundary start so
+a ``>`` embedded inside a quoted argument or a comparison in ``awk`` (e.g.
+``awk '$1 > 5'``) is not treated as a redirector.
+"""
+
+PROTECTED_REDIRECT_TARGET_RE: str = r">\s*/?(?:dev|proc|sys)/"
+"""Regex matching redirection targets into protected pseudofilesystem paths.
+
+Matches a ``>`` redirect whose target begins with (optionally leading slash)
+``dev/``, ``proc/``, or ``sys/`` (e.g. ``>/dev/sda``, ``> /proc/self/fd/0``,
+``>/sys/...``).  Used as a defense-in-depth denial so these destructive
+redirections are blocked independently of the operator-supplied
+``block_patterns`` list.
+"""
 
 # =============================================================================
 # File Transfer Limits
 # =============================================================================
 
+BYTES_PER_KB: int = 1024
+"""Number of bytes in one kibibyte."""
+
 BYTES_PER_MB: int = 1024 * 1024
 """Number of bytes in one mebibyte."""
+
+SIZE_UNIT_MULTIPLIERS: dict[str, int] = {
+    "b": 1,
+    "kb": BYTES_PER_KB,
+    "mb": BYTES_PER_MB,
+    "gb": BYTES_PER_MB * BYTES_PER_KB,
+}
+"""Case-insensitive size-suffix to byte multiplier for ``parse_size_bytes``."""
 
 DEFAULT_MAX_FILE_SIZE_BYTES: int = 10 * BYTES_PER_MB
 """Default maximum file size (10 MiB) for uploads and downloads."""
@@ -207,3 +382,22 @@ DEFAULT_RATE_LIMIT_WINDOW_SECONDS: float = 60.0
 
 RATE_LIMIT_CLEANUP_INTERVAL_SECONDS: float = 300.0
 """Minimum interval (seconds) between expired-entry garbage collections."""
+
+# =============================================================================
+# Request Context Defaults
+# =============================================================================
+
+FALLBACK_CLIENT_IP: str = "127.0.0.1"
+"""Fallback client IP used when no request context is active.
+
+Loopback is the safest authorization fallback: it does not accidentally
+grant network allow-list access to an external IP, while still being a
+well-formed, validatable address.
+"""
+
+DEFAULT_REQUEST_ID: str = "unknown"
+"""Fallback request correlation ID used outside any request context.
+
+Must be non-empty so callers can always correlate logs and error
+responses with a stable, truthy identifier.
+"""

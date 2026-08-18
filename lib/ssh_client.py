@@ -1,5 +1,7 @@
 """SSH client management: connection creation and key loading."""
 
+import hashlib
+import json
 import os
 import random
 import socket
@@ -43,6 +45,14 @@ class SSHClientManager:
     appropriately configured Paramiko SSH clients for connecting to targets.
     Transient connection failures are retried with exponential backoff, and a
     per-target circuit breaker fails fast for targets that keep failing.
+
+    Thread safety
+    -------------
+    Holds no mutable state of its own beyond the attached pool/circuit
+    breaker (set once at wiring time via ``set_connection_pool``).  Connection
+    checkout/return is delegated to :class:`~lib.connection_pool.SSHConnectionPool`,
+    which owns all locking; this manager is effectively stateless per call and
+    safe for concurrent use once wiring is complete.
     """
 
     # PEM header dispatch: maps header line to key loader function
@@ -128,8 +138,39 @@ class SSHClientManager:
 
     @staticmethod
     def _target_name(target: Dict[str, Any]) -> str:
-        """Return a stable identifier for *target* (``host:port``)."""
-        return f"{target.get('host', 'unknown')}:{target.get('port', DEFAULT_SSH_PORT)}"
+        """Return a stable, credential-aware identifier for *target*.
+
+        ``host:port`` alone is not a safe key: two configured targets can
+        share the same host and port while authenticating differently (e.g.
+        a working password target and a broken-password target pointing at
+        the same host).  Keying the pool by ``host:port`` alone makes those
+        targets collide, so the pool could serve the wrong credentials.
+
+        A short non-reversible digest of the ``auth`` payload is therefore
+        appended.  The digest is computed with SHA-256, so the raw password
+        or key path is never exposed here -- this key is used in Prometheus
+        labels (``target=``) and structured lifecycle logs.
+        """
+        base = (
+            f"{target.get('host', 'unknown')}:{target.get('port', DEFAULT_SSH_PORT)}"
+        )
+        auth = target.get("auth")
+        if not auth:
+            return base
+        return f"{base}#{SSHClientManager._auth_digest(auth)}"
+
+    @staticmethod
+    def _auth_digest(auth: Dict[str, Any]) -> str:
+        """Return a short SHA-256 digest of an ``auth`` payload.
+
+        Serialises with sorted keys so the digest is stable regardless of
+        dict ordering, and truncates to 16 hex chars to keep the derived
+        pool key compact.  The digest is one-way: the credential can never
+        be recovered from the returned value, which is safe to place in
+        metrics labels and logs.
+        """
+        blob = json.dumps(auth, sort_keys=True, default=str)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
     @staticmethod
     def _is_transient(exc: BaseException) -> bool:

@@ -6,3 +6,5 @@ ssh_key
 .env
 logs/
 config/
+secrets.json
+plans/

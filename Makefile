@@ -14,6 +14,7 @@ test:  ## Run unit tests only (excludes integration tests)
 
 integrationtest:  ## Build :test image and run integration tests
 	docker build -t mcp-ssh:test .
+	python -m pip install -r requirements-dev.txt
 	python -m pytest tests/integration/ -v
 
 clean-test:  ## Remove leftover test containers and network

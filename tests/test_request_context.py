@@ -4,10 +4,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from lib.constants import DEFAULT_REQUEST_ID, FALLBACK_CLIENT_IP
 from lib.request_context import (
     RequestContextMiddleware,
     get_api_key,
     get_client_ip,
+    get_current_request,
     get_request_id,
 )
 
@@ -61,8 +63,8 @@ class TestExtractIp:
         """IPv4 with port notation (e.g. '192.168.1.10:443') is treated as single IP."""
         req = _make_mock_request(x_forwarded_for="192.168.1.10:443")
         result = RequestContextMiddleware._extract_ip(req)
-        # ipaddress.ip_address rejects port notations → falls back to 127.0.0.1
-        assert result == "127.0.0.1"
+        # ipaddress.ip_address rejects port notations → falls back to FALLBACK_CLIENT_IP
+        assert result == FALLBACK_CLIENT_IP
 
     def test_xff_ipv6(self):
         """IPv6 address in X-Forwarded-For is returned."""
@@ -101,40 +103,46 @@ class TestExtractIp:
     # --- Invalid / missing IP fallback ----------------------------------
 
     def test_invalid_ip_returns_default(self):
-        """Garbage in X-Forwarded-For falls back to 127.0.0.1."""
+        """Garbage in X-Forwarded-For falls back to FALLBACK_CLIENT_IP."""
         req = _make_mock_request(x_forwarded_for="not-an-ip")
         result = RequestContextMiddleware._extract_ip(req)
-        assert result == "127.0.0.1"
+        assert result == FALLBACK_CLIENT_IP
 
     def test_empty_xff_no_client_returns_default(self):
-        """Empty X-Forwarded-For and no client falls back to 127.0.0.1."""
+        """Empty X-Forwarded-For and no client falls back to FALLBACK_CLIENT_IP."""
         req = _make_mock_request(x_forwarded_for="")
         result = RequestContextMiddleware._extract_ip(req)
-        assert result == "127.0.0.1"
+        assert result == FALLBACK_CLIENT_IP
 
     def test_invalid_xff_with_valid_client(self):
-        """Invalid X-Forwarded-For with valid client host falls back to 127.0.0.1."""
+        """Invalid X-Forwarded-For with valid client host falls back."""
         req = _make_mock_request(
             x_forwarded_for="invalid!@#", client_host="192.168.1.50"
         )
         result = RequestContextMiddleware._extract_ip(req)
         # X-Forwarded-For is checked first, its value is invalid → fallback
-        assert result == "127.0.0.1"
+        assert result == FALLBACK_CLIENT_IP
 
     def test_bogus_ipv4_range(self):
         """Out-of-range IPv4 octets (e.g. 999.999.999.999) fall back."""
         req = _make_mock_request(x_forwarded_for="999.999.999.999")
         result = RequestContextMiddleware._extract_ip(req)
-        assert result == "127.0.0.1"
+        assert result == FALLBACK_CLIENT_IP
+
+    def test_no_client_no_xff_returns_default(self):
+        """No X-Forwarded-For and no client falls back to FALLBACK_CLIENT_IP."""
+        req = _make_mock_request()
+        result = RequestContextMiddleware._extract_ip(req)
+        assert result == FALLBACK_CLIENT_IP
 
 
 class TestGetClientIpDefault:
     """Tests for get_client_ip() when called outside request context."""
 
     def test_returns_default_outside_context(self):
-        """get_client_ip() returns '127.0.0.1' when no middleware has run."""
+        """get_client_ip() returns FALLBACK_CLIENT_IP when no middleware has run."""
         # No middleware has set the context var → default applies
-        assert get_client_ip() == "127.0.0.1"
+        assert get_client_ip() == FALLBACK_CLIENT_IP
 
 
 # ------------------------------------------------------------------
@@ -248,6 +256,14 @@ class TestGetApiKeyDefault:
         assert get_api_key() is None
 
 
+class TestGetCurrentRequestDefault:
+    """Tests for get_current_request() when called outside request context."""
+
+    def test_returns_none_outside_context(self):
+        """get_current_request() returns None when no middleware has run."""
+        assert get_current_request() is None
+
+
 class TestExtractRequestId:
     """Tests for RequestContextMiddleware._extract_request_id()."""
 
@@ -295,14 +311,14 @@ class TestGetRequestIdDefault:
     """Tests for get_request_id() when called outside request context."""
 
     def test_returns_unknown_outside_context(self):
-        """The constant ``"unknown"`` is returned outside request context."""
+        """DEFAULT_REQUEST_ID is returned outside request context."""
         with patch("lib.request_context._get_mcp_request", return_value=None):
             request_id = get_request_id()
-        assert request_id == "unknown"
+        assert request_id == DEFAULT_REQUEST_ID
 
     def test_unknown_is_cached_within_request(self):
-        """Repeated calls outside a request consistently return ``"unknown"``."""
+        """Repeated calls outside a request consistently return DEFAULT_REQUEST_ID."""
         with patch("lib.request_context._get_mcp_request", return_value=None):
             first = get_request_id()
             second = get_request_id()
-        assert first == second == "unknown"
+        assert first == second == DEFAULT_REQUEST_ID

@@ -10,6 +10,7 @@ threats it mitigates, and how to configure and operate it securely.
 - [Transport Security](#transport-security)
 - [API Key Authentication](#api-key-authentication)
 - [Command Authorization](#command-authorization)
+- [Input Sanitization](#input-sanitization)
 - [Path Traversal Prevention](#path-traversal-prevention)
 - [Rate Limiting](#rate-limiting)
 - [Network Authorization](#network-authorization)
@@ -78,8 +79,13 @@ response time.
 The authorization engine uses a **layered decision chain** evaluated in order:
 
 ```
-block_patterns → default → api_key → network → deny
+block_patterns → dangerous patterns → redirection-target guard → strip redirectors → command segmentation → default → api_key → network → deny
 ```
+
+All rules are compiled once into an immutable, frozen `RulesSnapshot`
+(`block_patterns`, `default` rules, API-key rules, and network rules) and swapped
+atomically as a single reference assignment on reload. A reader therefore never
+observes a partially-updated rule set, even while the config is being hot-reloaded.
 
 ### 1. Block Patterns (`block_patterns`)
 
@@ -112,6 +118,32 @@ are split into individual segments. **Each segment runs through the full
 authorization chain independently.** If any segment is denied, the entire
 command is denied.
 
+Before segmentation, unquoted redirection operators and their targets are
+**stripped from the command** (`strip_redirects`). This prevents a
+"phantom-segment" denial where a redirection such as `2>&1 | grep` is
+tokenized on the `&` and mis-parsed as invalid pipeline structure (which would
+deny otherwise-valid commands like `ls -la 2>&1 | grep proc`). Only the
+**segmentation** step uses the stripped string; `block_patterns` and the
+dangerous-pattern scan always operate on the **raw** command string first, so
+stripping never hides a redirector that a denial pattern should catch.
+
+The strip is intentionally conservative:
+
+- **`fd-dup` / `fd-close`** forms are removed: `2>&1`, `>&2`, `2>&-`, `&>`.
+- **file-redirect** forms and their target filenames are removed: `2>`, `1>`,
+  `>`, `>>`, `2>>`, `&>>`.
+- **Here-docs / here-strings** (`<<`, `<<<`), quoted redirectors, and redirect
+  targets embedded in quotes are **out of scope** and left untouched.
+
+### Redirection Target Guard (defense-in-depth)
+
+As a belt-and-braces control, commands are also scanned (via
+`PROTECTED_REDIRECT_TARGET_RE`) for redirection into sensitive device and
+pseudo-filesystem paths (`/dev/`, `/proc/`, `/sys/`). Any match is denied with
+`matched_via: blocked:redirection-target`. This runs **after** `block_patterns`
+and **before** the dangerous-pattern scan, so even a malformed or quoted
+redirector that escapes stripping cannot write to protected paths.
+
 ### 4. POSIX Shell Tokenization
 
 Command parsing uses [`shlex.split()`] for POSIX-compliant tokenization,
@@ -119,6 +151,47 @@ preventing whitespace normalization attacks. The extracted command basename
 is validated against a character whitelist (`[a-zA-Z0-9][a-zA-Z0-9_-]*`).
 
 [`shlex.split()`]: https://docs.python.org/3/library/shlex.html#shlex.split
+
+## Input Sanitization
+
+Before any input reaches the authorization chain or logging, user-controlled
+fields are sanitized by [`lib/sanitize.py`](../lib/sanitize.py). This is a
+first-line defense, applied **before** authorization so that downstream checks
+operate on a predictable, normalized value.
+
+### Command sanitization (`sanitize_command`)
+
+Every `command` argument is normalized via a fixed pipeline:
+
+1. **Null-byte stripping** — embedded `\x00` bytes are removed.
+2. **Control-character removal** — all control bytes except `\t`, `\n`, and `\r`
+   are stripped, which neutralizes ANSI escape sequences and other terminal or
+   log injection primitives.
+3. **NFKC normalization** — Unicode is normalized to NFKC, collapsing
+   visually-confusable characters and removing homoglyph bypasses.
+4. **Whitespace trimming** — leading/trailing whitespace is removed.
+
+`\n` and `\r` are **deliberately preserved** through sanitization: newline and
+carriage-return injection are denied later by the dangerous shell-pattern scan
+(see [Dangerous Shell Patterns](#2-dangerous-shell-patterns)). If they were
+stripped here, payloads relying on them would pass the sanitizer and then be
+denied by the same dangerous-pattern scan — so preserving them keeps the
+authorization decision correct, not just after the fact.
+
+### Server-name sanitization (`sanitize_server_name`)
+
+`server_name` must match `[a-zA-Z0-9._-]{1,128}`. Leading/trailing whitespace
+is trimmed, then the value is validated against the regex and the
+`MAX_SERVER_NAME_LENGTH` upper bound; invalid values raise `AuthorizationError`
+and are denied at the handler boundary.
+
+### Log-string sanitization (`sanitize_log_string`)
+
+`command` and `server_name` (and remote-path display) fields that are written
+to JSONL logs are passed through `sanitize_log_string`, which collapses `\r`
+and `\n` to a single space. This prevents JSONL **log-injection**, where a
+crafted value could otherwise forge additional log lines or alter the shape of
+a log record.
 
 ---
 
@@ -162,7 +235,7 @@ Retry-After: 60
 
 The `/health` endpoint is **never** rate-limited.
 
-These values can be overridden in `config.json` under
+These values can be overridden in `ssh-mcp-config.json` under
 `settings.rate_limit`:
 
 ```json
@@ -210,6 +283,22 @@ Network rules are evaluated **after** API key rules in the authorization chain,
 providing defense-in-depth: a stolen API key is useless from outside the
 approved network range.
 
+### Request context fallbacks
+
+The request-context accessors in [`lib/request_context.py`](lib/request_context.py)
+return safe fallback values when called outside an active request context
+(e.g. during startup, shutdown, or background tool execution):
+
+| Accessor                | Fallback                | Notes                                        |
+|-------------------------|-------------------------|----------------------------------------------|
+| `get_client_ip()`       | `127.0.0.1`             | Loopback never grants external allow-list IP |
+| `get_api_key()`         | `None`                  | No key available outside a request           |
+| `get_request_id()`      | `"unknown"`             | Non-empty so log/error correlation still works |
+| `get_current_request()` | `None`                  | Must be null-checked before dereferencing    |
+
+Callers must null-check `get_current_request()` (and any `None`-capable
+accessors) rather than assuming a request is always in progress.
+
 ---
 
 ## Secure Defaults
@@ -220,11 +309,12 @@ The server ships with conservative defaults designed for production safety:
 |--------------------------------|------------------------|----------------------------------------|
 | API key hashing                | PBKDF2-SHA256, 100k    | Resistant to offline brute-force       |
 | Command timeout                | 120 seconds            | Prevents runaway remote processes      |
-| Max output length              | 50,000 characters      | Prevents LLM context exhaustion        |
+| Max output length              | 50,000 bytes           | Prevents LLM context exhaustion; accepts an integer byte count or a case-insensitive `b`/`kb`/`mb`/`gb` size string, validated to a positive integer |
 | Max file transfer size         | 10 MiB                 | Prevents disk-fill attacks             |
 | Dangerous pattern detection    | Enabled unconditionally | Prevents command injection             |
 | Path traversal checks          | 7-layer validation     | Defense-in-depth for SFTP paths        |
 | Per-IP rate limiting           | 60 req/min             | Mitigates brute-force and DoS          |
+| Max concurrent SSH connections | 20                     | Global cap on checked-out connections across all targets; excess acquisitions are rejected with HTTP 503 instead of queued, preventing resource exhaustion |
 | Non-root container user        | `mcpssh`               | Limits impact of container escape      |
 | `--no-cache-dir` in Dockerfile | Enabled                | Reduces image size and attack surface  |
 
@@ -236,15 +326,50 @@ The server ships with conservative defaults designed for production safety:
 
 - SSH private keys should be mounted as files (Docker secrets or Kubernetes
   secrets), never baked into the image.
-- The `password` field on SSH targets supports environment-variable
-  substitution (`${ENV_VAR}` syntax).
-- API keys should be hashed before writing to `config.json`. The server
-  provides `hash_api_key()` in [`lib/crypto.py`](../lib/crypto.py) for
-  offline hashing.
+- SSH target `password` and API-key `key_hash` values should live in a
+  separate `secrets.json` file or `MCP_SSH_SECRET_*` environment variables
+  rather than inline in `ssh-mcp-config.json`. Precedence is **env vars >
+  `secrets.json` > main config**. See [`lib/secrets.py`](../lib/secrets.py)
+  and README §2.8.
+- `secrets.json` uses a parallel structure keyed by identifier:
+
+```jsonc
+{
+  "version": 1,
+  "ssh_targets": {
+    "<target-id>": { "password": "..." }
+  },
+  "api_keys": [
+    { "name": "<key-name>", "key_hash": "pbkdf2:sha256:..." }
+  ]
+}
+```
+
+- API keys should be hashed before writing. The server provides
+  `hash_api_key()` in [`lib/crypto.py`](../lib/crypto.py) for offline
+  hashing. `key_hash` is the **only** form stored — never a raw key.
+- Env-var mapping: `MCP_SSH_SECRET_PASSWORD_<TARGET_ID>` overrides a target
+  password; `MCP_SSH_SECRET_API_KEY_<KEY_NAME>` overrides a `key_hash`.
+  Values are hash strings for API keys, not raw keys.
+
+### Error Messages
+
+Config validation messages returned to API clients are sanitized: a
+`ConfigValidationError` message never contains raw config values, type names,
+CIDRs, or echoed identifiers. Operators get the full path/field via the
+structured `field=` attribute; the prose is safe to surface to clients.
 
 ### File Permissions
 
-- `config.json` should be readable only by the `mcpssh` user (`chmod 600`).
+- `ssh-mcp-config.json` should be readable only by the `mcpssh` user
+  (`chmod 600`). The server warns (`config.permissions_insecure`) when it is
+  more permissive than `0o600`.
+- `secrets.json` must not be group/world readable. The server warns
+  (`secrets.permissions_insecure`) when it is more permissive than `0o600`.
+- The `--fix-permissions` CLI flag auto-corrects both
+  `ssh-mcp-config.json` and `secrets.json` to `0o600` on startup, emitting
+  `config.permissions_fixed` / `secrets.permissions_fixed` events. Without
+  it, the operator must set the mode manually.
 - SSH private keys should be readable only by the `mcpssh` user.
 - The log directory should be writable by `mcpssh` but not world-readable
   (logs may contain command output and server names).
@@ -255,10 +380,19 @@ Sensitive values can be injected at runtime:
 
 | Variable          | Purpose                        |
 |-------------------|--------------------------------|
-| `CONFIG_DIR`      | Path to configuration directory |
-| `LOG_DIR`         | Path to log output directory   |
-| `SSH_KEY_PATH`    | Path to SSH private key        |
+| `MCP_SSH_CONFIG_PATH` | Path to configuration directory |
+| `MCP_SSH_LOG_DIR`    | Path to log output directory   |
+| `MCP_SSH_SSH_KEY`    | Path to SSH private key        |
+| `CONFIG_DIR` / `SSH_KEY_PATH` / `LOG_DIR` | Legacy fallbacks for the three above |
 | `MAX_OUTPUT_LENGTH` | Max command output length    |
+| `MCP_SSH_SETTING_*` | Non-secret `settings` overrides (see below) |
+| `MCP_SSH_SECRET_*` | Secrets override (see above) |
+
+`MCP_SSH_SETTING_<KEY>` overrides the `settings` table with the same
+precedence as secrets (env vars > `secrets.json` > main config > defaults).
+Only keys declared in `SETTING_KEY_TYPES` are accepted; unknown keys and
+un-coercible values are ignored with a warning, and the value is never
+logged. See [`lib/constants.py`](../lib/constants.py) for the accepted keys.
 
 ---
 

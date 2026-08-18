@@ -10,7 +10,20 @@ from pathlib import Path
 
 import pytest
 
-from lib.config import ConfigManager, ConfigValidationError
+from lib.config import (
+    ConfigManager,
+    ConfigValidationError,
+    build_default_config,
+)
+from lib.constants import (
+    DEFAULT_BLOCK_PATTERNS,
+    DEFAULT_COMMAND_TIMEOUT_SECONDS,
+    DEFAULT_MAX_OUTPUT_LENGTH,
+    DEFAULT_SSH_PORT,
+    LATEST_CONFIG_VERSION,
+)
+
+_RESTRICTED = 0o600
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -22,6 +35,13 @@ def _write_config(tmpdir: str, config_dict: dict) -> str:
     conf_path = Path(tmpdir) / "ssh-mcp-config.json"
     conf_path.write_text(json.dumps(config_dict), encoding="utf-8")
     return str(conf_path)
+
+
+def _write_secrets(tmpdir: str, secrets_dict: dict) -> str:
+    """Write *secrets_dict* as ``secrets.json`` inside *tmpdir*."""
+    secrets_path = Path(tmpdir) / "secrets.json"
+    secrets_path.write_text(json.dumps(secrets_dict), encoding="utf-8")
+    return str(secrets_path)
 
 
 def _minimal_valid_config(**overrides) -> dict:
@@ -49,6 +69,19 @@ def _minimal_valid_config(**overrides) -> dict:
     }
     cfg.update(overrides)
     return cfg
+
+
+class RecordingLogger:
+    """Duck-typed :class:`~lib.loggers.BaseLogger` that records entries."""
+
+    def __init__(self) -> None:
+        self.entries: list[dict] = []
+
+    def log(self, entry: dict) -> None:
+        self.entries.append(entry)
+
+    def close(self) -> None:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -107,18 +140,68 @@ class TestLoadValidConfig:
 
 
 # ---------------------------------------------------------------------------
+# Tests: build_default_config
+# ---------------------------------------------------------------------------
+
+
+class TestBuildDefaultConfig:
+    """Tests for :func:`lib.config.build_default_config`."""
+
+    def test_returns_expected_structure(self) -> None:
+        """The emitted config carries the canonical top-level keys."""
+        cfg = build_default_config()
+        assert set(cfg.keys()) == {
+            "version",
+            "ssh_targets",
+            "block_patterns",
+            "allowed_commands",
+            "settings",
+        }
+
+    def test_uses_constant_driven_values(self) -> None:
+        """Magic values come from lib.constants, not inline literals."""
+        cfg = build_default_config()
+        assert cfg["version"] == LATEST_CONFIG_VERSION
+        assert cfg["block_patterns"] == list(DEFAULT_BLOCK_PATTERNS)
+        target = next(iter(cfg["ssh_targets"].values()))
+        assert target["port"] == DEFAULT_SSH_PORT
+        assert cfg["settings"]["max_output_length"] == DEFAULT_MAX_OUTPUT_LENGTH
+        assert (
+            cfg["settings"]["command_timeout_max"]
+            == DEFAULT_COMMAND_TIMEOUT_SECONDS
+        )
+
+    def test_emits_single_placeholder_target_and_rule(self) -> None:
+        """Ships one placeholder target and one default rule (non-empty)."""
+        cfg = build_default_config()
+        assert len(cfg["ssh_targets"]) >= 1
+        assert len(cfg["allowed_commands"]["default"]) >= 1
+
+    def test_emitted_config_passes_validation(self) -> None:
+        """A config produced by build_default_config() loads successfully."""
+        cfg = build_default_config()
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            mgr = ConfigManager(td)
+            assert mgr.data["version"] == LATEST_CONFIG_VERSION
+            assert mgr.list_ssh_targets() == list(cfg["ssh_targets"].keys())
+
+
+# ---------------------------------------------------------------------------
 # Tests: validation failures
 # ---------------------------------------------------------------------------
 
 
 class TestValidationFailures:
-    def test_validation_fails_missing_version(self):
+    def test_missing_version_is_treated_as_v1(self):
+        """A config missing the version key loads fine, treated as v1."""
         cfg = _minimal_valid_config()
         del cfg["version"]
         with tempfile.TemporaryDirectory() as td:
             _write_config(td, cfg)
-            with pytest.raises(ConfigValidationError, match="version"):
-                ConfigManager(td)
+            mgr = ConfigManager(td)
+            assert mgr.data["version"] == 1
+            assert "testbox" in mgr.data["ssh_targets"]
 
     def test_validation_fails_empty_ssh_targets(self):
         cfg = _minimal_valid_config()
@@ -182,7 +265,7 @@ class TestValidationFailures:
         cfg["allowed_commands"]["default"][0]["targets"] = ["ghost"]
         with tempfile.TemporaryDirectory() as td:
             _write_config(td, cfg)
-            with pytest.raises(ConfigValidationError, match="unknown.*ssh_target.*ghost"):
+            with pytest.raises(ConfigValidationError, match="unknown ssh_target"):
                 ConfigManager(td)
 
     def test_validation_fails_unknown_top_level_key(self):
@@ -190,7 +273,7 @@ class TestValidationFailures:
         cfg["bogus_key"] = "unexpected"
         with tempfile.TemporaryDirectory() as td:
             _write_config(td, cfg)
-            with pytest.raises(ConfigValidationError, match="Unknown top-level key.*bogus_key"):
+            with pytest.raises(ConfigValidationError, match="Unknown top-level key"):
                 ConfigManager(td)
 
     def test_validation_fails_unknown_ssh_target_key(self):
@@ -198,7 +281,7 @@ class TestValidationFailures:
         cfg["ssh_targets"]["testbox"]["extra_field"] = "no"
         with tempfile.TemporaryDirectory() as td:
             _write_config(td, cfg)
-            with pytest.raises(ConfigValidationError, match="Unknown key.*extra_field"):
+            with pytest.raises(ConfigValidationError, match="Unknown key"):
                 ConfigManager(td)
 
 
@@ -236,11 +319,134 @@ class TestNormalizationAndReload:
 
             # write a broken config
             broken = _minimal_valid_config()
-            del broken["version"]
+            del broken["ssh_targets"]
             _write_config(td, broken)
 
             assert mgr.reload() is False
             assert mgr.data["ssh_targets"]["testbox"]["host"] == original_host
+
+
+# ---------------------------------------------------------------------------
+# Tests: config-change callbacks
+# ---------------------------------------------------------------------------
+
+
+class TestConfigChangeCallbacks:
+    """Config-change notification callbacks are registered and fired on reload."""
+
+    def test_callback_fires_on_successful_reload(self):
+        """A registered callback runs exactly once after a successful reload."""
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            mgr = ConfigManager(td)
+            calls = []
+            mgr.on_config_change(lambda: calls.append(1))
+
+            new_cfg = _minimal_valid_config()
+            new_cfg["ssh_targets"]["testbox"]["host"] = "10.99.99.99"
+            _write_config(td, new_cfg)
+
+            assert mgr.reload() is True
+            assert len(calls) == 1
+
+    def test_callback_not_fired_on_failed_reload(self):
+        """A failed reload does not invoke registered callbacks."""
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            mgr = ConfigManager(td)
+            calls = []
+            mgr.on_config_change(lambda: calls.append(1))
+
+            broken = _minimal_valid_config()
+            del broken["ssh_targets"]
+            _write_config(td, broken)
+
+            assert mgr.reload() is False
+            assert len(calls) == 0
+
+    def test_callback_not_fired_on_initial_load(self):
+        """Callbacks registered after construction are not fired by initial load."""
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            mgr = ConfigManager(td)
+            calls = []
+            mgr.on_config_change(lambda: calls.append(1))
+            assert len(calls) == 0
+
+    def test_callback_exception_is_isolated_and_reload_succeeds(self):
+        """A raising callback does not block other callbacks or the reload."""
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            mgr = ConfigManager(td)
+            ran = []
+
+            def _boom() -> None:
+                raise RuntimeError("callback boom")
+
+            mgr.on_config_change(_boom)
+            mgr.on_config_change(lambda: ran.append(1))
+
+            new_cfg = _minimal_valid_config()
+            new_cfg["ssh_targets"]["testbox"]["host"] = "10.99.99.99"
+            _write_config(td, new_cfg)
+
+            assert mgr.reload() is True
+            assert ran == [1]
+
+    def test_unregister_stops_callback(self):
+        """Unregistering a callback prevents it from firing on reload."""
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            mgr = ConfigManager(td)
+            calls = []
+            cb = lambda: calls.append(1)  # noqa: E731
+            mgr.on_config_change(cb)
+            mgr.unregister_config_change_callback(cb)
+
+            new_cfg = _minimal_valid_config()
+            new_cfg["ssh_targets"]["testbox"]["host"] = "10.99.99.99"
+            _write_config(td, new_cfg)
+
+            assert mgr.reload() is True
+            assert len(calls) == 0
+
+    def test_duplicate_registration_invoked_once(self):
+        """Registering the same callable twice still invokes it once."""
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            mgr = ConfigManager(td)
+            calls = []
+
+            def cb() -> None:
+                calls.append(1)
+
+            mgr.on_config_change(cb)
+            mgr.on_config_change(cb)
+
+            new_cfg = _minimal_valid_config()
+            new_cfg["ssh_targets"]["testbox"]["host"] = "10.99.99.99"
+            _write_config(td, new_cfg)
+
+            assert mgr.reload() is True
+            assert len(calls) == 1
+
+    def test_callback_observes_post_swap_data(self):
+        """A callback sees the NEW data committed by the reload, not the old."""
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            mgr = ConfigManager(td)
+            observed = []
+            mgr.on_config_change(lambda: observed.append(mgr.data))
+
+            new_cfg = _minimal_valid_config()
+            new_cfg["ssh_targets"]["testbox"]["host"] = "10.99.99.99"
+            _write_config(td, new_cfg)
+
+            assert mgr.reload() is True
+            assert observed
+            # The callback reads ``mgr.data`` after the atomic swap, so it must
+            # observe the freshly reloaded host rather than the previous value.
+            assert observed[-1]["ssh_targets"]["testbox"]["host"] == "10.99.99.99"
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +497,55 @@ class TestWatcher:
             assert mgr._watcher_thread is not None
             assert mgr._watcher_thread.daemon is True
             assert mgr._watcher_thread.name == "config-watcher"
+
+            mgr.stop_watcher()
+            assert mgr.watcher_running is False
+
+    def test_watchdog_observer_runs_as_daemon(self, monkeypatch):
+        """The watchdog observer branch must run its watcher as a daemon.
+
+        Forces the ``from watchdog.observers import Observer`` import inside
+        :meth:`ConfigManager.start_watcher` to succeed by substituting a fake
+        ``watchdog.observers`` module, then asserts the observer stored as
+        ``mgr._watcher_thread`` carries ``daemon is True``.
+        """
+        import sys
+        import types
+
+        class FakeObserver:
+            def __init__(self) -> None:
+                self.name = ""
+                self.daemon = False
+
+            def schedule(self, handler, path, recursive=False) -> None:
+                pass
+
+            def start(self) -> None:
+                self._started = True
+
+            def stop(self) -> None:
+                self._started = False
+
+            def join(self, timeout=None) -> None:
+                pass
+
+            def is_alive(self) -> bool:
+                return bool(getattr(self, "_started", False))
+
+        fake_observers = types.ModuleType("watchdog.observers")
+        setattr(fake_observers, "Observer", FakeObserver)
+        monkeypatch.setitem(sys.modules, "watchdog.observers", fake_observers)
+
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            mgr = ConfigManager(td)
+            assert mgr.watcher_running is False
+
+            mgr.start_watcher(polling_interval=0.1)
+            assert mgr._watcher_is_observer is True
+            assert mgr.watcher_running is True
+            assert mgr._watcher_thread is not None
+            assert mgr._watcher_thread.daemon is True
 
             mgr.stop_watcher()
             assert mgr.watcher_running is False
@@ -426,7 +681,7 @@ class TestWatcher:
             old_mtime = mgr._last_mtime
 
             broken = _minimal_valid_config()
-            del broken["version"]
+            del broken["ssh_targets"]
             _write_config(td, broken)
 
             assert mgr.reload() is False
@@ -469,6 +724,53 @@ class TestWatcher:
             mgr.stop_watcher()
             assert len(errors) == 0
 
+    def test_watcher_debounce_coalesces_rapid_changes(self):
+        """Rapid successive file changes are coalesced into a single reload."""
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _minimal_valid_config()
+            cfg["settings"]["watcher_debounce_seconds"] = 1.0
+            _write_config(td, cfg)
+            mgr = ConfigManager(td)
+
+            import time
+
+            mgr._last_reload_monotonic = time.monotonic()
+            # Immediately after a reload a change is debounced (must not reload).
+            assert mgr._should_debounce(mgr._get_watcher_debounce_seconds()) is True
+
+            # After advancing beyond the debounce window the change is allowed.
+            mgr._last_reload_monotonic = time.monotonic() - 2.0
+            assert mgr._should_debounce(mgr._get_watcher_debounce_seconds()) is False
+
+    def test_watcher_debounce_disabled_when_zero(self):
+        """A zero debounce value disables the coalescing behaviour."""
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _minimal_valid_config()
+            cfg["settings"]["watcher_debounce_seconds"] = 0
+            _write_config(td, cfg)
+            mgr = ConfigManager(td)
+            assert mgr.data["settings"]["watcher_debounce_seconds"] == 0.0
+
+            import time
+
+            mgr._last_reload_monotonic = time.monotonic()
+            # With 0 debounce, a change is never suppressed, even right after reload.
+            assert mgr._should_debounce(mgr._get_watcher_debounce_seconds()) is False
+
+    def test_watcher_debounce_uses_configured_value(self):
+        """The configured value flows through to the debounce helper."""
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _minimal_valid_config()
+            cfg["settings"]["watcher_debounce_seconds"] = 7.5
+            _write_config(td, cfg)
+            mgr = ConfigManager(td)
+            assert mgr._get_watcher_debounce_seconds() == 7.5
+
+            import time
+
+            mgr._last_reload_monotonic = time.monotonic()
+            assert mgr._should_debounce(mgr._get_watcher_debounce_seconds()) is True
+
 
 # ---------------------------------------------------------------------------
 # Tests: watcher health (last_reload_timestamp / last_error / healthy)
@@ -496,7 +798,7 @@ class TestWatcherHealth:
             assert mgr.healthy is True
 
             broken = _minimal_valid_config()
-            del broken["version"]
+            del broken["ssh_targets"]
             _write_config(td, broken)
 
             assert mgr.reload() is False
@@ -526,7 +828,7 @@ class TestWatcherHealth:
             first_ts = mgr.last_reload_timestamp
 
             broken = _minimal_valid_config()
-            del broken["version"]
+            del broken["ssh_targets"]
             _write_config(td, broken)
             assert mgr.reload() is False
             assert mgr.healthy is False
@@ -574,8 +876,8 @@ class TestWatcherHealth:
 class TestResilienceSettings:
     """Validation of retry / circuit-breaker settings keys."""
 
-    def test_validated_settings_contain_all_twelve_keys(self):
-        """The validated settings dict always exposes all twelve settings."""
+    def test_validated_settings_contain_all_fourteen_keys(self):
+        """The validated settings dict always exposes all fourteen settings."""
         with tempfile.TemporaryDirectory() as td:
             _write_config(td, _minimal_valid_config())
             mgr = ConfigManager(td)
@@ -593,6 +895,8 @@ class TestResilienceSettings:
                 "pool_max_connections_per_target",
                 "pool_idle_timeout_seconds",
                 "pool_cleanup_interval_seconds",
+                "max_concurrent_ssh_connections",
+                "watcher_debounce_seconds",
             }
 
     def test_defaults_applied_when_keys_missing(self):
@@ -607,6 +911,8 @@ class TestResilienceSettings:
             assert settings["circuit_breaker_timeout_seconds"] == 60.0
             assert settings["max_log_output"] == 4096
             assert settings["compress_rotated"] is True
+            assert settings["max_concurrent_ssh_connections"] == 20
+            assert settings["watcher_debounce_seconds"] == 2.0
 
     def test_valid_values_accepted(self):
         """Positive int/float values for the resilience settings load fine."""
@@ -622,6 +928,8 @@ class TestResilienceSettings:
                     "pool_max_connections_per_target": 10,
                     "pool_idle_timeout_seconds": 600.0,
                     "pool_cleanup_interval_seconds": 30.0,
+                    "max_concurrent_ssh_connections": 25,
+                    "watcher_debounce_seconds": 5.0,
                 }
             )
             _write_config(td, cfg)
@@ -635,6 +943,8 @@ class TestResilienceSettings:
             assert settings["pool_max_connections_per_target"] == 10
             assert settings["pool_idle_timeout_seconds"] == 600.0
             assert settings["pool_cleanup_interval_seconds"] == 30.0
+            assert settings["max_concurrent_ssh_connections"] == 25
+            assert settings["watcher_debounce_seconds"] == 5.0
 
     @pytest.mark.parametrize(
         ("key", "value"),
@@ -664,6 +974,12 @@ class TestResilienceSettings:
             ("pool_cleanup_interval_seconds", 0),
             ("pool_cleanup_interval_seconds", "60"),
             ("pool_cleanup_interval_seconds", False),
+            ("max_concurrent_ssh_connections", 1.5),
+            ("max_concurrent_ssh_connections", 0),
+            ("max_concurrent_ssh_connections", "20"),
+            ("watcher_debounce_seconds", -1.0),
+            ("watcher_debounce_seconds", "2"),
+            ("watcher_debounce_seconds", True),
         ],
     )
     def test_invalid_values_rejected(self, key, value):
@@ -674,3 +990,729 @@ class TestResilienceSettings:
             _write_config(td, cfg)
             with pytest.raises(ConfigValidationError):
                 ConfigManager(td)
+
+    def test_watcher_debounce_zero_is_accepted(self):
+        """A zero debounce value is accepted (disables debouncing)."""
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _minimal_valid_config()
+            cfg["settings"]["watcher_debounce_seconds"] = 0
+            _write_config(td, cfg)
+            mgr = ConfigManager(td)
+            assert mgr.data["settings"]["watcher_debounce_seconds"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Tests: structured config events (config.load / config.reload / watcher)
+# ---------------------------------------------------------------------------
+
+
+class TestStructuredConfigEvents:
+    """Structured ``config.*`` events emitted through a BaseLogger."""
+
+    def test_load_emits_config_load_event(self):
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            recorder = RecordingLogger()
+            ConfigManager(td, logger=recorder)
+
+            events = [e for e in recorder.entries if e["event"] == "config.load"]
+            assert len(events) == 1
+            entry = events[0]
+            assert entry["success"] is True
+            assert entry["config_path"] == str(Path(td) / "ssh-mcp-config.json")
+            assert entry["target_count"] == 1
+            assert entry["request_id"] is not None
+
+    def test_default_creation_emits_event(self):
+        with tempfile.TemporaryDirectory() as td:
+            recorder = RecordingLogger()
+            mgr = ConfigManager(td, logger=recorder)
+
+            events = [e for e in recorder.entries if e["event"] == "config.default_created"]
+            assert len(events) == 1
+            assert events[0]["success"] is True
+            assert events[0]["config_path"] == str(mgr.config_path)
+            assert events[0]["source"].endswith("default-config.json")
+
+    def test_reload_emits_diff_summary(self):
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            recorder = RecordingLogger()
+            mgr = ConfigManager(td, logger=recorder)
+
+            new_cfg = _minimal_valid_config()
+            new_cfg["ssh_targets"]["testbox"]["host"] = "192.168.1.10"
+            _write_config(td, new_cfg)
+            assert mgr.reload() is True
+
+            events = [e for e in recorder.entries if e["event"] == "config.reload"]
+            assert len(events) == 1
+            entry = events[0]
+            assert entry["success"] is True
+            assert entry["trigger"] == "manual"
+            assert entry["changed"] is True
+            assert "ssh_targets" in entry["changed_keys"]
+            assert entry["targets_added"] == []
+            assert entry["targets_removed"] == []
+            assert entry["target_count"] == 1
+
+    def test_reload_emits_trigger_value(self):
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            recorder = RecordingLogger()
+            mgr = ConfigManager(td, logger=recorder)
+
+            new_cfg = _minimal_valid_config()
+            new_cfg["ssh_targets"]["testbox"]["host"] = "10.9.9.9"
+            _write_config(td, new_cfg)
+            assert mgr.reload(trigger="polling") is True
+
+            events = [e for e in recorder.entries if e["event"] == "config.reload"]
+            assert events[-1]["trigger"] == "polling"
+
+    def test_reload_failure_emits_failed_event_and_preserves_data(self):
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            recorder = RecordingLogger()
+            mgr = ConfigManager(td, logger=recorder)
+
+            broken = _minimal_valid_config()
+            del broken["ssh_targets"]
+            _write_config(td, broken)
+            assert mgr.reload() is False
+
+            events = [e for e in recorder.entries if e["event"] == "config.reload"]
+            assert len(events) == 1
+            entry = events[0]
+            assert entry["success"] is False
+            assert "validation failed" in entry["message"]
+            assert "changed_keys" not in entry
+            # Old data preserved
+            assert mgr.data["ssh_targets"]["testbox"]["host"] == "10.0.0.1"
+
+    def test_events_never_leak_secret_values(self):
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            recorder = RecordingLogger()
+            mgr = ConfigManager(td, logger=recorder)
+
+            new_cfg = _minimal_valid_config()
+            new_cfg["ssh_targets"]["testbox"]["password"] = "hunter2-super-secret"
+            new_cfg["ssh_targets"]["newbox"] = {
+                "host": "10.0.0.2",
+                "username": "root",
+                "password": "another-secret",
+                "port": 22,
+            }
+            _write_config(td, new_cfg)
+            assert mgr.reload() is True
+
+            serialized = json.dumps(recorder.entries)
+            assert "hunter2-super-secret" not in serialized
+            assert "another-secret" not in serialized
+            assert "secret" not in serialized
+
+    def test_compute_changes_summary(self):
+        old_cfg = _minimal_valid_config()
+        new_cfg = _minimal_valid_config()
+        new_cfg["ssh_targets"]["testbox"]["host"] = "10.1.1.1"
+        new_cfg["ssh_targets"]["added_box"] = {
+            "host": "10.0.0.9",
+            "username": "admin",
+            "password": "pw",
+            "port": 22,
+        }
+        del new_cfg["ssh_targets"]["testbox"]
+
+        summary = ConfigManager._compute_changes(old_cfg, new_cfg)
+        assert summary["changed"] is True
+        assert "ssh_targets" in summary["changed_keys"]
+        assert summary["targets_added"] == ["added_box"]
+        assert summary["targets_removed"] == ["testbox"]
+        assert summary["target_count"] == 1
+
+    def test_compute_changes_no_changes(self):
+        cfg = _minimal_valid_config()
+        summary = ConfigManager._compute_changes(cfg, _minimal_valid_config())
+        assert summary["changed"] is False
+        assert summary["changed_keys"] == []
+        assert summary["targets_added"] == []
+        assert summary["targets_removed"] == []
+        assert summary["target_count"] == 1
+
+    def test_watcher_start_stop_emit_events(self):
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            recorder = RecordingLogger()
+            mgr = ConfigManager(td, logger=recorder)
+            mgr.start_watcher(polling_interval=5.0)
+
+            starts = [e for e in recorder.entries if e["event"] == "config.watcher.start"]
+            assert len(starts) == 1
+            assert starts[0]["success"] is True
+            assert starts[0]["config_path"] == str(mgr.config_path)
+
+            mgr.stop_watcher()
+            stops = [e for e in recorder.entries if e["event"] == "config.watcher.stop"]
+            assert len(stops) == 1
+            assert stops[0]["success"] is True
+
+    def test_watcher_handler_reload_emits_watchdog_trigger(self):
+        """A watchdog-handler reload carries the ``watchdog`` trigger."""
+        from types import SimpleNamespace
+
+        from lib.config_watcher import FileChangeHandler
+
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            recorder = RecordingLogger()
+            mgr = ConfigManager(td, logger=recorder)
+
+            new_cfg = _minimal_valid_config()
+            new_cfg["ssh_targets"]["testbox"]["host"] = "10.7.7.7"
+            _write_config(td, new_cfg)
+
+            # Drive the handler directly — deterministic, no background race.
+            handler = FileChangeHandler(
+                config_path=mgr.config_path,
+                reload_callback=lambda: mgr.reload(trigger="watchdog"),
+                debounce_callback=lambda: False,
+                logger=None,
+                log_event=lambda event, success, message: recorder.log(
+                    {
+                        "event": event,
+                        "success": success,
+                        "message": message,
+                        "config_path": str(mgr.config_path),
+                    }
+                ),
+            )
+            handler.on_modified(
+                SimpleNamespace(is_directory=False, src_path=str(mgr.config_path))
+            )
+
+            triggered = [
+                e
+                for e in recorder.entries
+                if e["event"] == "config.watcher.reload_triggered"
+            ]
+            assert len(triggered) == 1
+            reloads = [e for e in recorder.entries if e["event"] == "config.reload"]
+            assert reloads[-1]["trigger"] == "watchdog"
+            assert mgr.data["ssh_targets"]["testbox"]["host"] == "10.7.7.7"
+
+    def test_file_change_handler_emits_debounced_event(self):
+        from types import SimpleNamespace
+
+        from lib.config_watcher import FileChangeHandler
+
+        with tempfile.TemporaryDirectory() as td:
+            config_path = _write_config(td, _minimal_valid_config())
+            events = []
+            handler = FileChangeHandler(
+                config_path=Path(config_path),
+                reload_callback=lambda: pytest.fail("reload should not fire"),
+                debounce_callback=lambda: True,
+                log_event=lambda event, success, message: events.append(
+                    (event, success)
+                ),
+            )
+            handler.on_modified(
+                SimpleNamespace(is_directory=False, src_path=config_path)
+            )
+            assert events == [("config.watcher.debounced", True)]
+
+
+# ---------------------------------------------------------------------------
+# Tests: SecretsManager integration with ConfigManager
+# ---------------------------------------------------------------------------
+
+
+class TestSecretsIntegration:
+    """Integration of SecretsManager with ConfigManager load/reload/validation."""
+
+    def _config_without_auth(self) -> dict:
+        """Return a valid config whose testbox target has no password/private_key."""
+        cfg = _minimal_valid_config()
+        del cfg["ssh_targets"]["testbox"]["password"]
+        return cfg
+
+    def test_secrets_merge_applied_before_validation(self):
+        """A target password supplied only by secrets.json passes validation."""
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, self._config_without_auth())
+            _write_secrets(
+                td,
+                {
+                    "version": 1,
+                    "ssh_targets": {"testbox": {"password": "from-secrets"}},
+                },
+            )
+            mgr = ConfigManager(td)
+            assert mgr.data["ssh_targets"]["testbox"]["password"] == "from-secrets"
+
+    def test_missing_secret_password_fails_validation(self):
+        """A target with neither config nor secrets credentials is rejected."""
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, self._config_without_auth())
+            with pytest.raises(ConfigValidationError):
+                ConfigManager(td)
+
+    def test_reload_applies_new_secrets(self):
+        """Rewriting secrets.json and reloading updates the merged data."""
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, self._config_without_auth())
+            _write_secrets(
+                td,
+                {"version": 1, "ssh_targets": {"testbox": {"password": "first"}}},
+            )
+            mgr = ConfigManager(td)
+            assert mgr.data["ssh_targets"]["testbox"]["password"] == "first"
+
+            _write_secrets(
+                td,
+                {"version": 1, "ssh_targets": {"testbox": {"password": "second"}}},
+            )
+            assert mgr.reload() is True
+            assert mgr.data["ssh_targets"]["testbox"]["password"] == "second"
+
+
+# ---------------------------------------------------------------------------
+# Tests: MCP_SSH_SETTING_* environment-variable overrides
+# ---------------------------------------------------------------------------
+
+
+class TestSettingEnvOverrides:
+    """``MCP_SSH_SETTING_*`` vars override ``settings`` with type coercion."""
+
+    def test_int_override_beats_config_file(self, monkeypatch):
+        """An int env var wins over the value written in config.json."""
+        monkeypatch.setenv("MCP_SSH_SETTING_MAX_OUTPUT_LENGTH", "100")
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            mgr = ConfigManager(td)
+            assert mgr.data["settings"]["max_output_length"] == 100
+
+    def test_float_override(self, monkeypatch):
+        """A float env var is coerced to float."""
+        monkeypatch.setenv("MCP_SSH_SETTING_RETRY_BACKOFF_BASE_SECONDS", "2.5")
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            mgr = ConfigManager(td)
+            assert mgr.data["settings"]["retry_backoff_base_seconds"] == 2.5
+
+    def test_bool_override_true(self, monkeypatch):
+        """A bool env var accepts the literal ``true``."""
+        monkeypatch.setenv("MCP_SSH_SETTING_COMPRESS_ROTATED", "true")
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            mgr = ConfigManager(td)
+            assert mgr.data["settings"]["compress_rotated"] is True
+
+    def test_bool_override_false(self, monkeypatch):
+        """A bool env var accepts the literal ``off``."""
+        monkeypatch.setenv("MCP_SSH_SETTING_COMPRESS_ROTATED", "off")
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            mgr = ConfigManager(td)
+            assert mgr.data["settings"]["compress_rotated"] is False
+
+    def test_reload_reapplies_env_override(self, monkeypatch):
+        """Reload applies the current env value even if config is rewritten."""
+        monkeypatch.setenv("MCP_SSH_SETTING_MAX_OUTPUT_LENGTH", "123")
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            mgr = ConfigManager(td)
+            assert mgr.data["settings"]["max_output_length"] == 123
+            _write_config(td, _minimal_valid_config())
+            assert mgr.reload() is True
+            assert mgr.data["settings"]["max_output_length"] == 123
+
+    def test_unknown_key_is_skipped_with_warning(self, monkeypatch):
+        """An unrecognised ``MCP_SSH_SETTING_*`` key is ignored, not fatal."""
+        monkeypatch.setenv("MCP_SSH_SETTING_NOT_A_REAL_KEY", "nope")
+        logger = RecordingLogger()
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            mgr = ConfigManager(td, logger=logger)
+            assert "not_a_real_key" not in mgr.data["settings"]
+        warning_events = [e for e in logger.entries if e.get("log_level") == "WARNING"]
+        assert warning_events, "expected a warning event for the unknown env var"
+        assert any(
+            "MCP_SSH_SETTING_NOT_A_REAL_KEY" in e["message"]
+            for e in warning_events
+        )
+
+    def test_invalid_value_is_skipped_and_config_preserved(self, monkeypatch):
+        """A non-coercible value is ignored; the config value is kept."""
+        monkeypatch.setenv("MCP_SSH_SETTING_MAX_OUTPUT_LENGTH", "not-an-int")
+        logger = RecordingLogger()
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            mgr = ConfigManager(td, logger=logger)
+            # The invalid env var is skipped, so the config value remains.
+            assert mgr.data["settings"]["max_output_length"] == 50000
+        warning_events = [e for e in logger.entries if e.get("log_level") == "WARNING"]
+        assert warning_events, "expected a warning event for the invalid env var"
+        # The offending value must never be logged.
+        assert all("not-an-int" not in e["message"] for e in warning_events)
+
+    def test_env_value_never_logged(self, monkeypatch):
+        """The env-var value is never leaked into structured events."""
+        monkeypatch.setenv("MCP_SSH_SETTING_MAX_OUTPUT_LENGTH", "supersecret")
+        logger = RecordingLogger()
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            ConfigManager(td, logger=logger)
+        serialized = json.dumps(logger.entries)
+        assert "supersecret" not in serialized
+
+    def test_env_override_size_string(self, monkeypatch):
+        """A size-string env var is normalised to a byte count."""
+        monkeypatch.setenv("MCP_SSH_SETTING_MAX_OUTPUT_LENGTH", "10mb")
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            mgr = ConfigManager(td)
+            assert mgr.data["settings"]["max_output_length"] == 10 * 1024 * 1024
+
+    def test_env_override_size_string_uppercase(self, monkeypatch):
+        """An uppercase size-string env var is parsed case-insensitively."""
+        monkeypatch.setenv("MCP_SSH_SETTING_MAX_OUTPUT_LENGTH", "1KB")
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            mgr = ConfigManager(td)
+            assert mgr.data["settings"]["max_output_length"] == 1024
+
+    def test_env_override_invalid_size_skipped_and_config_preserved(self, monkeypatch):
+        """An invalid size-string env var is skipped; the config value is kept."""
+        monkeypatch.setenv("MCP_SSH_SETTING_MAX_OUTPUT_LENGTH", "10tb")
+        logger = RecordingLogger()
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            mgr = ConfigManager(td, logger=logger)
+            # The invalid env var is skipped, so the config value remains.
+            assert mgr.data["settings"]["max_output_length"] == 50000
+        warning_events = [e for e in logger.entries if e.get("log_level") == "WARNING"]
+        assert warning_events, "expected a warning event for the invalid env var"
+        # The offending value must never be logged.
+        assert all("10tb" not in e["message"] for e in warning_events)
+
+    def test_watcher_debounce_override(self, monkeypatch):
+        """MCP_SSH_SETTING_WATCHER_DEBOUNCE_SECONDS coerces to a float."""
+        monkeypatch.setenv("MCP_SSH_SETTING_WATCHER_DEBOUNCE_SECONDS", "3")
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            mgr = ConfigManager(td)
+            assert mgr.data["settings"]["watcher_debounce_seconds"] == 3.0
+
+    def test_watcher_debounce_override_invalid_skipped(self, monkeypatch):
+        """A non-numeric debounce env var is skipped with a warning."""
+        monkeypatch.setenv("MCP_SSH_SETTING_WATCHER_DEBOUNCE_SECONDS", "abc")
+        logger = RecordingLogger()
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, _minimal_valid_config())
+            mgr = ConfigManager(td, logger=logger)
+            # The invalid env var is skipped, so the default remains.
+            assert mgr.data["settings"]["watcher_debounce_seconds"] == 2.0
+        warning_events = [e for e in logger.entries if e.get("log_level") == "WARNING"]
+        assert warning_events, "expected a warning event for the invalid env var"
+        assert all("abc" not in e["message"] for e in warning_events)
+
+
+# ---------------------------------------------------------------------------
+# Tests: duplicate API-key names and overlapping network CIDRs
+# ---------------------------------------------------------------------------
+
+
+class TestDuplicateAndOverlapValidation:
+    """Duplicate api_keys names and overlapping networks CIDRs are rejected."""
+
+    def _api_key(self, name: str, seed: str) -> dict:
+        """Return a valid api_keys entry with the given *name* and hash seed."""
+        return {
+            "name": name,
+            "key_hash": "sha256:" + seed * 64,
+            "rules": [{"targets": ["*"], "commands": ["hostname"]}],
+        }
+
+    def _network(self, name: str, cidr: str) -> dict:
+        """Return a valid networks entry with the given *name* and CIDR."""
+        return {
+            "name": name,
+            "range": cidr,
+            "rules": [{"targets": ["*"], "commands": ["hostname"]}],
+        }
+
+    @pytest.mark.parametrize(
+        "names",
+        [
+            ["key-a", "key-a"],
+            ["dupe", "dupe"],
+        ],
+    )
+    def test_duplicate_api_key_names_rejected(self, names):
+        """Two api_keys sharing a name raise ConfigValidationError."""
+        cfg = _minimal_valid_config()
+        cfg["allowed_commands"]["api_keys"] = [
+            self._api_key(names[0], "0"),
+            self._api_key(names[1], "1"),
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(ConfigValidationError) as exc:
+                ConfigManager(td)
+        assert "Duplicate API key name" in str(exc.value)
+        assert exc.value.field == "api_keys[1].name"
+
+    def test_unique_api_key_names_accepted(self):
+        """Distinct api_keys names load successfully (regression guard)."""
+        cfg = _minimal_valid_config()
+        cfg["allowed_commands"]["api_keys"] = [
+            self._api_key("key-a", "0"),
+            self._api_key("key-b", "1"),
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            mgr = ConfigManager(td)
+            assert len(mgr.data["allowed_commands"]["api_keys"]) == 2
+
+    @pytest.mark.parametrize(
+        "cidrs",
+        [
+            ["10.0.0.0/8", "10.1.0.0/16"],
+            ["192.168.0.0/24", "192.168.0.128/25"],
+        ],
+    )
+    def test_overlapping_network_cidrs_rejected(self, cidrs):
+        """Two overlapping network ranges raise ConfigValidationError."""
+        cfg = _minimal_valid_config()
+        cfg["allowed_commands"]["networks"] = [
+            self._network("net-a", cidrs[0]),
+            self._network("net-b", cidrs[1]),
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(ConfigValidationError) as exc:
+                ConfigManager(td)
+        assert "overlaps" in str(exc.value)
+        assert exc.value.field == "networks[1].range"
+
+    @pytest.mark.parametrize(
+        "cidrs",
+        [
+            ["10.0.0.0/8", "192.168.0.0/16"],
+            ["172.16.0.0/12", "198.18.0.0/15"],
+        ],
+    )
+    def test_non_overlapping_network_cidrs_accepted(self, cidrs):
+        """Two disjoint network ranges load successfully."""
+        cfg = _minimal_valid_config()
+        cfg["allowed_commands"]["networks"] = [
+            self._network("net-a", cidrs[0]),
+            self._network("net-b", cidrs[1]),
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            mgr = ConfigManager(td)
+            assert len(mgr.data["allowed_commands"]["networks"]) == 2
+
+
+class TestMaxOutputLengthValidation:
+    """``settings.max_output_length`` accepts ints or size strings (b/kb/mb/gb)."""
+
+    def test_accepts_integer(self) -> None:
+        """A plain integer byte count is accepted unchanged."""
+        cfg = _minimal_valid_config()
+        cfg["settings"]["max_output_length"] = 50000
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            mgr = ConfigManager(td)
+            assert mgr.data["settings"]["max_output_length"] == 50000
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("50kb", 50 * 1024),
+            ("10MB", 10 * 1024 * 1024),
+            ("1gb", 1024 * 1024 * 1024),
+            ("2048", 2048),
+        ],
+    )
+    def test_accepts_size_string(self, raw: str, expected: int) -> None:
+        """A size string is normalised to a byte count."""
+        cfg = _minimal_valid_config()
+        cfg["settings"]["max_output_length"] = raw
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            mgr = ConfigManager(td)
+            assert mgr.data["settings"]["max_output_length"] == expected
+
+    @pytest.mark.parametrize("raw", ["50tb", "abc", "", "50.5kb", "-50kb"])
+    def test_rejects_invalid_size_string(self, raw: str) -> None:
+        """An invalid size string raises :class:`ConfigValidationError`."""
+        cfg = _minimal_valid_config()
+        cfg["settings"]["max_output_length"] = raw
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(ConfigValidationError):
+                ConfigManager(td)
+
+    @pytest.mark.parametrize("raw", ["0", "0kb", "0mb"])
+    def test_rejects_nonpositive(self, raw: str) -> None:
+        """A size resolving to fewer than one byte is rejected."""
+        cfg = _minimal_valid_config()
+        cfg["settings"]["max_output_length"] = raw
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(ConfigValidationError):
+                ConfigManager(td)
+
+    @pytest.mark.parametrize("bad", [None, True, False, 12.5, [], {}])
+    def test_rejects_wrong_types(self, bad: object) -> None:
+        """Non-int / non-str values are rejected."""
+        cfg = _minimal_valid_config()
+        cfg["settings"]["max_output_length"] = bad
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(ConfigValidationError):
+                ConfigManager(td)
+
+
+class TestFilePermissions:
+    """File-permission warning and ``--fix-permissions`` behavior."""
+
+    def test_insecure_config_permissions_warn(self):
+        """A group/world-readable config emits a ``config.permissions_insecure`` warning."""
+        with tempfile.TemporaryDirectory() as td:
+            conf = _write_config(td, _minimal_valid_config())
+            os.chmod(conf, 0o644)
+            recorder = RecordingLogger()
+            ConfigManager(td, logger=recorder)
+
+            events = [e for e in recorder.entries if e["event"] == "config.permissions_insecure"]
+            assert len(events) == 1
+            assert events[0]["log_level"] == "WARNING"
+            assert events[0]["success"] is False
+            assert events[0]["mode"] == "0o644"
+
+    def test_secure_config_permissions_no_warning(self):
+        """A correctly restricted (0o600) config emits no ``permissions_insecure`` event."""
+        with tempfile.TemporaryDirectory() as td:
+            conf = _write_config(td, _minimal_valid_config())
+            os.chmod(conf, _RESTRICTED)
+            recorder = RecordingLogger()
+            ConfigManager(td, logger=recorder)
+
+            events = [e for e in recorder.entries if e["event"] == "config.permissions_insecure"]
+            assert events == []
+
+    def test_fix_permissions_corrects_mode(self):
+        """``fix_permissions=True`` chmods an insecure config to 0o600."""
+        with tempfile.TemporaryDirectory() as td:
+            conf = _write_config(td, _minimal_valid_config())
+            _write_secrets(td, {})
+            os.chmod(conf, 0o644)
+            recorder = RecordingLogger()
+            ConfigManager(td, logger=recorder, fix_permissions=True)
+
+            assert os.stat(conf).st_mode & 0o777 == _RESTRICTED
+            events = [e for e in recorder.entries if e["event"] == "config.permissions_fixed"]
+            assert len(events) >= 1
+            assert events[0]["fixed_mode"] == "0o600"
+
+    def test_fix_permissions_reports_changed_paths(self):
+        """``fix_permissions()`` returns every config/secrets path it corrected."""
+        with tempfile.TemporaryDirectory() as td:
+            conf = _write_config(td, _minimal_valid_config())
+            sec = _write_secrets(td, {})
+            os.chmod(conf, 0o644)
+            os.chmod(sec, 0o644)
+            mgr = ConfigManager(td)
+
+            changed = mgr.fix_permissions()
+            changed_set = {str(p) for p in changed}
+            assert str(Path(conf)) in changed_set
+            assert str(Path(sec)) in changed_set
+
+    def test_reload_warns_on_insecure_permissions(self):
+        """``reload()`` also warns when the config stays insecure."""
+        with tempfile.TemporaryDirectory() as td:
+            conf = _write_config(td, _minimal_valid_config())
+            os.chmod(conf, 0o644)
+            recorder = RecordingLogger()
+            mgr = ConfigManager(td, logger=recorder)
+            mgr.reload()
+
+            events = [e for e in recorder.entries if e["event"] == "config.permissions_insecure"]
+            assert len(events) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Tests: ConfigValidationError sanitization (API-safe messages)
+# ---------------------------------------------------------------------------
+
+
+class TestConfigValidationErrorSanitization:
+    """`ConfigValidationError` messages never leak raw values while ``field=``
+    stays intact as the structured, machine-readable channel."""
+
+    @pytest.mark.parametrize(
+        ("mutate", "raw_value", "expected_field"),
+        [
+            # Wrong-typed port -> the offending int must not appear in the message.
+            (
+                lambda cfg: cfg["ssh_targets"]["testbox"].update(
+                    {"port": 99999, "password": "secret"}
+                ),
+                "99999",
+                "ssh_targets.testbox.port",
+            ),
+            # Empty host -> nothing sensitive, but field must be present.
+            (
+                lambda cfg: cfg["ssh_targets"]["testbox"].update(
+                    {"host": "   ", "password": "secret"}
+                ),
+                "   ",
+                "ssh_targets.testbox.host",
+            ),
+            # Invalid CIDR -> the raw CIDR string must not leak.
+            (
+                lambda cfg: cfg["allowed_commands"].update(
+                    {
+                        "networks": [
+                            {
+                                "name": "bad",
+                                "range": "999.999.999.999/999",
+                                "rules": [
+                                    {"targets": ["*"], "commands": ["ls"]}
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                "999.999.999.999/999",
+                "networks[0].range",
+            ),
+            # Bad max_output_length -> the raw value must not leak.
+            (
+                lambda cfg: cfg["settings"].update({"max_output_length": -5}),
+                "-5",
+                "settings.max_output_length",
+            ),
+        ],
+    )
+    def test_offending_value_not_leaked(
+        self, mutate, raw_value: str, expected_field: str
+    ) -> None:
+        """The raw offending value never appears in the message, while
+        ``field=`` still carries the structured, machine-readable path."""
+        cfg = _minimal_valid_config()
+        mutate(cfg)
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(ConfigValidationError) as exc:
+                ConfigManager(td)
+        message = str(exc.value)
+        assert raw_value not in message
+        assert exc.value.field == expected_field
+        assert exc.value.field
