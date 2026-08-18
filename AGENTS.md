@@ -20,7 +20,7 @@ Five MCP tools (`ssh_list_servers`, `ssh_list_allowed_commands`, `ssh_execute_co
 - Closure-based dependency injection for tool handlers (no module-level globals)
 - Thread-pool executor for blocking paramiko SSH I/O
 - Per-target SSH connection pooling with idle cleanup
-- Layered authorization chain — see [Authorization Model](#authorization-model-critical-for-correctness) for the full 7-step chain
+- Layered authorization chain — see [Authorization Model](#authorization-model-critical-for-correctness) for the full layered chain
 - Config hot-reload (15 s polling, 2 s debounce, watchdog where available)
 - Circuit breaker + exponential-backoff retry for transient SSH failures
 - Sliding-window rate limiter per client IP; `/health` exempt
@@ -31,12 +31,13 @@ Five MCP tools (`ssh_list_servers`, `ssh_list_allowed_commands`, `ssh_execute_co
 ```
 mcp-ssh/
 ├── server.py                  # FastMCP app factory + CLI entry point
-├── lib/
+├── lib/                       # 23 modules (plus __init__.py re-exports)
 │   ├── __init__.py            # Public re-exports
 │   ├── auth.py                # AuthorizationManager, layered allow-list chain
 │   ├── circuit_breaker.py     # Per-target failure threshold + recovery timeout
-│   ├── command_security.py    # Command segmentation, dangerous-pattern detection
+│   ├── command_security.py    # Command segmentation, dangerous-pattern detection, redirector stripping
 │   ├── config.py              # ConfigManager — JSON load/validate/hot-reload
+│   ├── config_migration.py    # Config schema migration (v1→v2, .bak backup, in-place rewrite)
 │   ├── config_watcher.py      # Filesystem watcher (polling or watchdog)
 │   ├── connection_pool.py     # Per-target SSH connection pooling
 │   ├── constants.py           # ALL magic numbers, strings, defaults (single source of truth)
@@ -49,16 +50,18 @@ mcp-ssh/
 │   ├── metrics.py             # Prometheus metrics + GET /metrics endpoint
 │   ├── rate_limiter.py        # Sliding-window per-IP rate limiter
 │   ├── request_context.py     # Starlette middleware for request_id, client IP, API key
+│   ├── sanitize.py            # Input sanitization helpers (sanitize_command, sanitize_server_name, sanitize_log_string)
+│   ├── secrets.py             # SecretsManager for secrets.json + MCP_SSH_SECRET_* env var merging
+│   ├── size_utils.py          # parse_size_bytes() for size-string settings (e.g. max_output_length)
 │   ├── ssh_client.py          # SSHClientManager — connect, retry, circuit-break, pool
 │   ├── sudo.py                # SudoHandler — validate, wrap sudo command, password injection
 │   └── types.py               # TypedDict models for tool results
 ├── tests/
-│   ├── test_*.py              # 17 unit-test files (15 covering lib modules, 1 for server.py, 1 standalone)
+│   ├── test_*.py              # 24 unit-test files (21 covering lib modules, plus server/e2e/concurrency/schema/deployed-config)
 │   └── integration/
 │       └── test_integration.py # Real Docker containers: SSH server + MCP server
 ├── docs/
 │   └── SECURITY.md            # Full security model and hardening guide
-├── plans/                     # Architecture/feature planning documents
 ├── Dockerfile                 # Multi-stage: SBOM → runtime (non-root, hash-pinned)
 ├── compose.yaml               # Docker Compose with Traefik labels
 ├── Makefile                   # build, up, down, test, integrationtest, clean-test
@@ -69,6 +72,7 @@ mcp-ssh/
 ├── requirements-dev.in        # Dev/test deps (docker SDK for integration tests)
 ├── requirements-dev.txt       # Hash-locked dev/test deps
 ├── default-config.json        # Bundled fallback config
+├── config.schema.json         # JSON Schema validating the config file (used by ConfigManager)
 ├── README.md                  # Full operator + user documentation
 └── AGENTS.md                  # This file
 ```
@@ -94,8 +98,12 @@ graph TD
   ssh --> cpool
   ssh --> cb[circuit_breaker]
   config --> cw[config_watcher]
+  config --> cw2[config_migration]
+  config --> sec[secrets]
+  config --> su[size_utils]
   config --> exceptions
   config --> constants
+  server --> san[sanitize]
   auth --> crypto
   auth --> cs[command_security]
   auth --> config
@@ -110,7 +118,7 @@ graph TD
 
 ### Plan Index
 
-The [`plans/`](plans/) directory contains 55 design documents: all 46 documents in themes 01–15 are Implemented, theme 16 (AGENTS.md Maintenance) has 7 sub-plans (`16a`–`16g`), and [`17-strip-redirectors-before-allow-chain.md`](plans/17-strip-redirectors-before-allow-chain.md) is Implemented — it extends `04b-harden-command-segmentation` and `04-security`. One outlier, [`readme-rewrite.md`](plans/readme-rewrite.md), has no numeric prefix. See `plans/` for the full index; when creating a new theme, follow the `NN-<topic>.md` / `NNa-<subtopic>.md` scheme and update this index.
+The historical `plans/` directory has been **removed** from the repository. It previously tracked design and architecture decisions, but once their content was implemented it fell into dead-link decay and was deleted. The implemented work now lives directly in the code — most notably config schema migration ([`lib/config_migration.py`](lib/config_migration.py)), redirector stripping ([`lib/command_security.py`](lib/command_security.py)), and secret separation ([`lib/secrets.py`](lib/secrets.py)). Do **not** reference `plans/...` documents; there is no active plan index to maintain. Any future design documentation should be kept as lightweight standalone `.md` files at the repo root rather than a `plans/` tree. The historic `NN-<topic>.md` / `NNa-<subtopic>.md` naming convention is no longer in effect.
 
 ### CI Pipeline
 
@@ -127,10 +135,10 @@ The [`plans/`](plans/) directory contains 55 design documents: all 46 documents 
 make test   # pytest tests/ -v --ignore=tests/integration/
 ```
 
-- 17 test files under `tests/`, covering 15 of 19 `lib/*.py` modules plus [`tests/test_server.py`](tests/test_server.py) and [`tests/test_e2e_config.py`](tests/test_e2e_config.py)
+- 24 test files under `tests/`, covering 21 of 23 `lib/*.py` modules plus [`tests/test_server.py`](tests/test_server.py), [`tests/test_e2e_config.py`](tests/test_e2e_config.py), and the concurrency/schema/deployed-config suites
 - Test configs are written to temporary directories — never mutate a shared config file (see [Test Guidelines](#test-guidelines) for the `_write_config` pattern)
 - Server tests mock only true I/O boundaries: `paramiko.SSHClient`, `server.create_app`, `asyncio.run`
-- Authorization tests verify the full layered chain — see [Authorization Model](#authorization-model-critical-for-correctness) for the complete 7-step chain
+- Authorization tests verify the full layered chain — see [Authorization Model](#authorization-model-critical-for-correctness) for the complete chain with all layers
 - Always use `pytest.raises()` for expected exceptions; never bare `try/except`
 
 ### Integration Tests (`make integrationtest`)
@@ -148,7 +156,7 @@ make integrationtest   # builds mcp-ssh:test image, runs tests/integration/
 
 ### Test Guidelines
 
-- Each `lib/*.py` module should have a corresponding `tests/test_*.py`. Currently 15 of 19 lib modules have test coverage; `config_watcher.py`, `constants.py`, `log_handler.py`, and `types.py` do not have dedicated test files.
+- Each `lib/*.py` module should have a corresponding `tests/test_*.py`. Currently 21 of 23 lib modules have a dedicated test file. The modules WITHOUT dedicated per-module test files are `lib/config_watcher.py`, `lib/constants.py`, `lib/log_handler.py`, and `lib/types.py` (note: `lib/types.py` has no `test_types.py`, and `lib/__init__.py` also has no dedicated test). Later additions (`test_config_migration.py`, `test_config_schema.py`, `test_concurrency.py`, `test_piping_chaining_deployed_config.py`, `test_sanitize.py`, `test_secrets.py`, `test_size_utils.py`) bring coverage to the lib modules that support it.
 - New features require both unit tests AND integration-test coverage where the feature touches SSH or HTTP boundaries
 - Config-driven tests should use the `_write_config(tmpdir, config_dict)` helper pattern — never mutate a shared config file (see [`tests/test_auth.py`](tests/test_auth.py) for reference)
 - Integration tests use a `TestConfig` dataclass pattern for structured test configuration
@@ -158,7 +166,7 @@ make integrationtest   # builds mcp-ssh:test image, runs tests/integration/
 
 ### 1. Analyze the Task
 
-- Read the relevant `plans/` document if a plan exists for this area
+- Review any existing lightweight design `.md` files at the repo root if relevant to this area (the historical `plans/` directory has been removed)
 - Understand which modules are involved using the dependency flow diagram above
 - Check if there are existing tests that define the current expected behavior
 - Identify whether changes affect config schema (requires [`ConfigManager.validate()`](lib/config.py) updates)
@@ -230,13 +238,17 @@ python -m pytest tests/test_<module>.py -x
 
 The authorization chain is **layered and ordered**:
 
-1. **block_patterns** — if command matches any regex → DENY (no further checks)
-2. **dangerous patterns** — built-in dangerous command patterns → DENY
-3. **command segmentation** — split into base command + arguments
-4. **default rules** — allow/deny for all clients
-5. **API key rules** — if an authenticated key has matching rules, that decides
-6. **network rules** — if client IP matches a CIDR range with rules, that decides
-7. **deny** — implicit fallback
+1. **target validation** — unknown target → DENY (no further checks)
+2. **block_patterns** — if command matches any regex → DENY (no further checks)
+3. **dangerous patterns** — built-in dangerous shell patterns (`$()`, backticks, newlines) → DENY
+4. **redirection-target guard** — redirection targets into protected pseudofilesystem paths → DENY (defense-in-depth)
+5. **command segmentation + redirector stripping** — shell redirectors are stripped via `strip_redirects()`, the command is split into segments on chaining operators, and each segment runs the FULL chain (making these ordered checks effective against `cmd1 && cmd2`)
+6. **default rules** — allow/deny for all clients
+7. **API key rules** — if an authenticated key has matching rules, that decides
+8. **network rules** — if client IP matches a CIDR range with rules, that decides
+9. **deny** — implicit fallback
+
+When modifying authorization, always consider ALL layers. The `matched_via` field in `AuthResult` tracks which layer made the decision.
 
 When modifying authorization, always consider ALL layers. The `matched_via` field in `AuthResult` tracks which layer made the decision.
 
@@ -282,7 +294,8 @@ Module descriptions are in [Project Layout](#project-layout); the security-criti
 modules are: [`lib/crypto.py`](lib/crypto.py), [`lib/auth.py`](lib/auth.py),
 [`lib/command_security.py`](lib/command_security.py),
 [`lib/file_transfer.py`](lib/file_transfer.py), [`lib/sudo.py`](lib/sudo.py),
-and [`lib/request_context.py`](lib/request_context.py).
+[`lib/request_context.py`](lib/request_context.py), [`lib/secrets.py`](lib/secrets.py),
+and [`lib/sanitize.py`](lib/sanitize.py).
 
 Key rules when modifying these modules:
 - Never log raw API keys, passwords, or private key material
