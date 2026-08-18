@@ -42,7 +42,7 @@ The server speaks **streamable HTTP** on port `8080` at the `/mcp` path and regi
 
 ### Planned improvements (not yet implemented)
 
-The following items are tracked in the project plans (`plans/11a-separate-secrets-env-overrides-migration.md`) but are **not** part of the current code:
+Design history is consolidated directly into the code (e.g. config schema migration in [`lib/config_migration.py`](lib/config_migration.py), redirector stripping in [`lib/command_security.py`](lib/command_security.py), secret separation in [`lib/secrets.py`](lib/secrets.py)). The following item is **not** part of the current code:
 
 - Duplicate SSH-target detection
 
@@ -615,8 +615,8 @@ Config-change callbacks (`config_manager.on_config_change(...)`) run only **afte
 - [`Dockerfile`](Dockerfile) — multi-stage build, non-root runtime, SBOM stage
 - [`default-config.json`](default-config.json) — bundled default configuration
 - [`config.schema.json`](config.schema.json) — JSON Schema (Draft 2020-12) describing the config file format
-- [`plans/`](plans/) — architecture, security, and feature plans (including planned improvements listed in §1)
+- Design history is consolidated into the code itself — config schema migration in [`lib/config_migration.py`](lib/config_migration.py), redirector stripping in [`lib/command_security.py`](lib/command_security.py), and secret separation in [`lib/secrets.py`](lib/secrets.py)
 
 ## License
 
-MIT — see the `LICENSE` file.
+MIT License
