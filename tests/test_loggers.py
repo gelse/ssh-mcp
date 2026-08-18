@@ -422,7 +422,55 @@ class TestFileLoggerThreadSafety:
 
         assert len(all_lines) == num_threads * writes_per_thread
 
-        for line in all_lines:
+    def test_configure_under_concurrent_writes_is_safe(self, tmp_path: Path):
+        """configure() from one thread while others log() must not corrupt data."""
+        log_dir = tmp_path / "logs"
+        fl = FileLogger(str(log_dir), max_file_size_mb=10, backup_count=5)
+
+        errors: list[Exception] = []
+        stop = threading.Event()
+
+        def configurer():
+            try:
+                while not stop.is_set():
+                    fl.configure(max_log_output=20, compress_rotated=True)
+                    fl.configure(max_log_output=200, compress_rotated=False)
+            except Exception as exc:
+                errors.append(exc)
+
+        def writer(thread_id: int, count: int):
+            try:
+                for i in range(count):
+                    fl.log({"thread": thread_id, "seq": i, "data": "z" * 50})
+            except Exception as exc:
+                errors.append(exc)
+
+        cfg = threading.Thread(target=configurer)
+        cfg.start()
+
+        threads = []
+        num_writers = 4
+        writes_per_thread = 200
+        for tid in range(num_writers):
+            t = threading.Thread(target=writer, args=(tid, writes_per_thread))
+            threads.append(t)
+
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        stop.set()
+        cfg.join()
+        fl.close()
+
+        # No exceptions during configure() + concurrent writes
+        assert len(errors) == 0, f"Exceptions during concurrent configure: {errors}"
+
+        # File remains valid JSONL — every line parses and is complete
+        lines = (log_dir / "ssh-mcp.log").read_text().strip().split("\n")
+        assert len(lines) == num_writers * writes_per_thread
+        for line in lines:
             parsed = json.loads(line)
             assert "thread" in parsed
             assert "seq" in parsed

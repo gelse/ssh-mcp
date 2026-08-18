@@ -7,21 +7,30 @@ instead of reimplementing logic inline.  Only true I/O boundaries are mocked:
 ``paramiko.SSHClient``, ``server.create_app`` and ``asyncio.run``.
 """
 
+import asyncio
 import json
 import os
 import sys
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from fastmcp import FastMCP
 
 import server
 from lib.auth import AuthorizationManager
+from lib.config import build_default_config
 from lib.constants import (
     DEFAULT_CONFIG_DIR,
     DEFAULT_LOG_DIR,
+    DEFAULT_SSH_KEY_FILENAME,
     DEFAULT_SSH_PORT,
     DEFAULT_SSH_TIMEOUT_SECONDS,
+    MCP_SSH_CONFIG_PATH,
+    MCP_SSH_LOG_DIR,
+    MCP_SSH_SSH_KEY,
     SUDO_NO_PASSWORD_FLAG,
     SUDO_PASSWORD_PROMPT_FLAGS,
 )
@@ -149,6 +158,7 @@ class TestResolveConfigDir:
 
         monkeypatch.setattr(server, "create_app", fake_create_app)
         monkeypatch.setattr(server, "asyncio", MagicMock())
+        monkeypatch.setattr(server, "_run_server", lambda *a, **k: None)
         monkeypatch.setattr(sys, "argv", argv)
         for key, value in (env or {}).items():
             monkeypatch.setenv(key, value)
@@ -185,6 +195,49 @@ class TestResolveConfigDir:
         )
         assert captured["config_dir"] == "/cli/path"
 
+    def test_new_env_var_overrides_legacy(self, monkeypatch):
+        """MCP_SSH_CONFIG_PATH takes precedence over CONFIG_DIR."""
+        captured = self._run_main(
+            monkeypatch,
+            ["server.py"],
+            env={"CONFIG_DIR": "/legacy/path", MCP_SSH_CONFIG_PATH: "/new/path"},
+        )
+        assert captured["config_dir"] == "/new/path"
+
+
+class TestFixPermissionsFlag:
+    """Tests that server.main() plumbs the --fix-permissions flag to create_app()."""
+
+    @staticmethod
+    def _run_main(monkeypatch, argv, env=None):
+        """Run the real server.main() and return the create_app() kwargs."""
+        captured = {}
+
+        def fake_create_app(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        monkeypatch.setattr(server, "create_app", fake_create_app)
+        monkeypatch.setattr(server, "asyncio", MagicMock())
+        monkeypatch.setattr(server, "_run_server", lambda *a, **k: None)
+        monkeypatch.setattr(sys, "argv", argv)
+        for key, value in (env or {}).items():
+            monkeypatch.setenv(key, value)
+        server.main()
+        return captured
+
+    def test_flag_present_sets_true(self, monkeypatch):
+        """Passing --fix-permissions propagates fix_permissions=True."""
+        monkeypatch.delenv("CONFIG_DIR", raising=False)
+        captured = self._run_main(monkeypatch, ["server.py", "--fix-permissions"])
+        assert captured["fix_permissions"] is True
+
+    def test_flag_absent_defaults_false(self, monkeypatch):
+        """Omitting --fix-permissions leaves fix_permissions=False."""
+        monkeypatch.delenv("CONFIG_DIR", raising=False)
+        captured = self._run_main(monkeypatch, ["server.py"])
+        assert captured["fix_permissions"] is False
+
 
 class TestResolveLogDir:
     """Tests that server.main() resolves --log-dir / LOG_DIR correctly."""
@@ -200,6 +253,7 @@ class TestResolveLogDir:
 
         monkeypatch.setattr(server, "create_app", fake_create_app)
         monkeypatch.setattr(server, "asyncio", MagicMock())
+        monkeypatch.setattr(server, "_run_server", lambda *a, **k: None)
         monkeypatch.setattr(sys, "argv", argv)
         for key, value in (env or {}).items():
             monkeypatch.setenv(key, value)
@@ -235,6 +289,126 @@ class TestResolveLogDir:
             env={"LOG_DIR": "/env/path"},
         )
         assert captured["log_dir"] == "/cli/path"
+
+    def test_new_env_var_overrides_legacy(self, monkeypatch):
+        """MCP_SSH_LOG_DIR takes precedence over LOG_DIR."""
+        captured = self._run_main(
+            monkeypatch,
+            ["server.py"],
+            env={"LOG_DIR": "/legacy/path", MCP_SSH_LOG_DIR: "/new/path"},
+        )
+        assert captured["log_dir"] == "/new/path"
+
+
+class TestPrintDefaultConfig:
+    """Tests that server.main() --print-default-config prints and exits early."""
+
+    def test_flag_prints_config_and_skips_create_app(self, monkeypatch, capsys):
+        """With the flag, main() prints build_default_config() and never calls
+        create_app."""
+        called = []
+
+        def fake_create_app(**kwargs):
+            called.append(kwargs)
+            return MagicMock()
+
+        monkeypatch.setattr(server, "create_app", fake_create_app)
+        monkeypatch.setattr(server, "asyncio", MagicMock())
+        monkeypatch.setattr(sys, "argv", ["server.py", "--print-default-config"])
+        monkeypatch.delenv("CONFIG_DIR", raising=False)
+        server.main()
+
+        captured = capsys.readouterr()
+        printed = json.loads(captured.out)
+        assert printed == build_default_config()
+        assert called == []
+
+    def test_without_flag_calls_create_app(self, monkeypatch):
+        """Without the flag, main() proceeds to create_app() as normal."""
+        captured = {}
+
+        def fake_create_app(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        monkeypatch.setattr(server, "create_app", fake_create_app)
+        monkeypatch.setattr(server, "asyncio", MagicMock())
+        monkeypatch.setattr(server, "_run_server", lambda *a, **k: None)
+        monkeypatch.setattr(sys, "argv", ["server.py"])
+        monkeypatch.delenv("CONFIG_DIR", raising=False)
+        server.main()
+
+        assert captured.get("config_dir") is not None
+
+
+class TestResolveSshKey:
+    """Tests that server.main() resolves --ssh-key / MCP_SSH_SSH_KEY correctly."""
+
+    @staticmethod
+    def _run_main(monkeypatch, argv, env=None):
+        """Run the real server.main() with create_app/asyncio mocked."""
+        captured = {}
+
+        def fake_create_app(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        monkeypatch.setattr(server, "create_app", fake_create_app)
+        monkeypatch.setattr(server, "asyncio", MagicMock())
+        monkeypatch.setattr(server, "_run_server", lambda *a, **k: None)
+        monkeypatch.setattr(sys, "argv", argv)
+        for key, value in (env or {}).items():
+            monkeypatch.setenv(key, value)
+        server.main()
+        return captured
+
+    def test_default(self, monkeypatch):
+        """Uses DEFAULT_SSH_KEY_FILENAME when no env var or CLI arg is given."""
+        monkeypatch.delenv(MCP_SSH_SSH_KEY, raising=False)
+        monkeypatch.delenv("SSH_KEY_PATH", raising=False)
+        captured = self._run_main(monkeypatch, ["server.py"])
+        assert captured["ssh_key_path"] == DEFAULT_SSH_KEY_FILENAME
+
+    def test_new_env_var(self, monkeypatch):
+        """Respects the MCP_SSH_SSH_KEY env var as the default."""
+        captured = self._run_main(
+            monkeypatch, ["server.py"], env={MCP_SSH_SSH_KEY: "/new/key/path"}
+        )
+        assert captured["ssh_key_path"] == "/new/key/path"
+
+    def test_legacy_env_var_fallback(self, monkeypatch):
+        """Falls back to the legacy SSH_KEY_PATH env var."""
+        captured = self._run_main(
+            monkeypatch, ["server.py"], env={"SSH_KEY_PATH": "/legacy/key/path"}
+        )
+        assert captured["ssh_key_path"] == "/legacy/key/path"
+
+    def test_new_env_var_overrides_legacy(self, monkeypatch):
+        """MCP_SSH_SSH_KEY takes precedence over SSH_KEY_PATH."""
+        captured = self._run_main(
+            monkeypatch,
+            ["server.py"],
+            env={"SSH_KEY_PATH": "/legacy/path", MCP_SSH_SSH_KEY: "/new/path"},
+        )
+        assert captured["ssh_key_path"] == "/new/path"
+
+    def test_cli_arg(self, monkeypatch):
+        """Respects the --ssh-key CLI arg."""
+        monkeypatch.delenv(MCP_SSH_SSH_KEY, raising=False)
+        monkeypatch.delenv("SSH_KEY_PATH", raising=False)
+        captured = self._run_main(
+            monkeypatch, ["server.py", "--ssh-key", "/cli/key/path"]
+        )
+        assert captured["ssh_key_path"] == "/cli/key/path"
+
+    def test_cli_arg_overrides_env(self, monkeypatch):
+        """The --ssh-key CLI arg takes precedence over MCP_SSH_SSH_KEY."""
+        captured = self._run_main(
+            monkeypatch,
+            ["server.py", "--ssh-key", "/cli/path"],
+            env={MCP_SSH_SSH_KEY: "/env/path"},
+        )
+        assert captured["ssh_key_path"] == "/cli/path"
 
 
 # ---------------------------------------------------------------------------
@@ -973,3 +1147,292 @@ def test_sudo_validation_before_auth():
         result = "AUTH_RAN"
 
     assert result == "ERROR_VALIDATION"
+
+
+# ---------------------------------------------------------------------------
+# Graceful shutdown tests
+# ---------------------------------------------------------------------------
+
+
+class TestGracefulShutdown:
+    """Tests for server._graceful_shutdown and its wiring through main()."""
+
+    @staticmethod
+    def _make_state(**overrides):
+        """Build a SimpleNamespace with MagicMock runtime resources."""
+        state = SimpleNamespace(
+            ssh_executor=MagicMock(),
+            config_manager=MagicMock(),
+            ssh_connection_pool=MagicMock(),
+            file_logger=MagicMock(),
+            _shutdown_done=False,
+        )
+        for key, value in overrides.items():
+            setattr(state, key, value)
+        return state
+
+    def test_releases_resources_in_dependency_order(self):
+        """Drain executor -> stop watcher -> stop pool -> close log file LAST."""
+        order = []
+
+        def rec(name):
+            def record(*_args, **_kwargs):
+                order.append(name)
+
+            return record
+
+        executor = MagicMock()
+        executor.shutdown.side_effect = rec("drain")
+        config_manager = MagicMock()
+        config_manager.stop_watcher.side_effect = rec("watcher")
+        pool = MagicMock()
+        pool.stop.side_effect = rec("pool")
+        logger = MagicMock()
+        logger.close.side_effect = rec("close-log")
+
+        state = SimpleNamespace(
+            ssh_executor=executor,
+            config_manager=config_manager,
+            ssh_connection_pool=pool,
+            file_logger=logger,
+            _shutdown_done=False,
+        )
+
+        server._graceful_shutdown(state, timeout=5.0)
+
+        assert order == ["drain", "watcher", "pool", "close-log"]
+        logger.close.assert_called_once()
+        pool.stop.assert_called_once()
+        config_manager.stop_watcher.assert_called_once()
+
+    def test_is_idempotent(self):
+        """A second shutdown call is a no-op thanks to the _shutdown_done guard."""
+        state = self._make_state()
+        server._graceful_shutdown(state, timeout=0.1)
+        server._graceful_shutdown(state, timeout=0.1)
+        state.ssh_executor.shutdown.assert_called()
+        state.config_manager.stop_watcher.assert_called_once()
+        state.ssh_connection_pool.stop.assert_called_once()
+        state.file_logger.close.assert_called_once()
+
+    def test_bounded_drain_force_cancels_stuck_work(self):
+        """When the drain exceeds the timeout, pending work is force-cancelled."""
+        release = threading.Event()
+
+        def blocking_shutdown(*_args, **_kwargs):
+            # Simulate in-flight SSH work that never finishes promptly.
+            release.wait(timeout=2.0)
+
+        executor = MagicMock()
+        executor.shutdown.side_effect = blocking_shutdown
+        state = self._make_state(ssh_executor=executor)
+
+        server._graceful_shutdown(state, timeout=0.05)
+        # Unblock the still-running worker thread to avoid cross-test noise.
+        release.set()
+
+        waited = any(
+            call.kwargs.get("wait") is True
+            for call in executor.shutdown.call_args_list
+        )
+        force = any(
+            call.kwargs.get("wait") is False
+            for call in executor.shutdown.call_args_list
+        )
+        assert waited is True
+        assert force is True, "expected a force-cancel shutdown(wait=False)"
+
+    def test_main_plumbs_graceful_run_server(self, monkeypatch):
+        """main() wires create_app()'s app into _run_server for signal handling."""
+        holder = {}
+
+        fake_app = MagicMock()
+        fake_app.state = SimpleNamespace(rate_limiter="limiter")
+
+        monkeypatch.setattr(server, "create_app", lambda **kwargs: fake_app)
+        monkeypatch.setattr(
+            server,
+            "_run_server",
+            lambda app, rate_limiter=None: holder.update(
+                app=app, rate_limiter=rate_limiter
+            ),
+        )
+        monkeypatch.setattr(sys, "argv", ["server.py"])
+        monkeypatch.delenv("CONFIG_DIR", raising=False)
+        server.main()
+
+        assert holder["app"] is fake_app
+        assert holder["rate_limiter"] == "limiter"
+
+
+# ---------------------------------------------------------------------------
+# Handler-entry command sanitization tests
+#
+# These invoke the *real* ``ssh_execute_command`` tool handler (wired through
+# ``_register_tools`` with controlled dependencies) and prove that the
+# hander-entry ``command = sanitize_command(command)`` reassignment runs
+# BEFORE sudo validation and the authorization check.
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_ssh_client_manager(output: bytes = b"fake output"):
+    """Return an (ssh_client_manager, client) pair with a canned exec_command."""
+    stdout = MagicMock()
+    stdout.read.return_value = output
+    stdout.channel = MagicMock()
+    stdout.channel.recv_exit_status.return_value = 0
+    stderr = MagicMock()
+    stderr.read.return_value = b""
+    client = MagicMock()
+    client.exec_command.return_value = (MagicMock(), stdout, stderr)
+    cm = MagicMock()
+    cm.__enter__.return_value = client
+    manager = MagicMock()
+    manager.connect.return_value = cm
+    return manager, client
+
+
+class _SyncExecutor:
+    """A minimal executor that runs submitted callables inline.
+
+    Avoids real thread-pool lifecycle (spawning/GC/shutdown) in tests that
+    only need ``executor.submit(fn).result()`` to execute synchronously.
+    """
+
+    def submit(self, fn, /, *args, **kwargs):
+        fut = MagicMock()
+        fut.result.return_value = fn(*args, **kwargs)
+        return fut
+
+    def shutdown(self, *args, **kwargs):
+        """No-op; nothing to shut down."""
+        return None
+
+
+class TestCommandSanitizationInHandler:
+    """The handler sanitizes the command before sudo validation and auth."""
+
+    @staticmethod
+    def _wire_tool(tmp_path, config, monkeypatch, ssh_client_manager):
+        """Register the real tool handler and return callables/spies."""
+        mgr = _make_config_manager(tmp_path, config)
+        auth_mgr = AuthorizationManager(mgr)
+        auth_spy = MagicMock(wraps=auth_mgr.check_command)
+        auth_mgr.check_command = auth_spy
+
+        sudo_spy = MagicMock(wraps=SudoHandler.validate_sudo)
+        monkeypatch.setattr(SudoHandler, "validate_sudo", sudo_spy)
+
+        mcp = FastMCP("test")
+        file_logger = MagicMock()
+        stdlib_logger = MagicMock()
+        file_transfer = MagicMock()
+        executor = _SyncExecutor()
+
+        server._register_tools(
+            mcp,
+            mgr,
+            auth_mgr,
+            file_logger,
+            stdlib_logger,
+            ssh_client_manager,
+            file_transfer,
+            "",  # ssh_key_path
+            50000,  # max_command_output
+            executor,
+        )
+        tool = asyncio.run(mcp.get_tool("ssh_execute_command"))
+        return tool.fn, auth_spy, sudo_spy
+
+    def test_null_bytes_stripped_before_sudo_and_auth(self, tmp_path, monkeypatch):
+        """Null bytes are removed before sudo validation and the auth check."""
+        config = _make_minimal_config()
+        ssh_cm, _ = _make_mock_ssh_client_manager()
+        fn, auth_spy, sudo_spy = self._wire_tool(
+            tmp_path, config, monkeypatch, ssh_cm
+        )
+
+        fn(server_name="testserver", command="echo hello\x00world")
+
+        # Handles the SSH path (auth denies 'echo', but the sanitized command
+        # must have reached both the sudo validator and the auth manager).
+        assert sudo_spy.call_args[0][0] == "echo helloworld"
+        assert auth_spy.call_args.kwargs["command"] == "echo helloworld"
+
+    def test_ansi_escape_stripped_in_handler(self, tmp_path, monkeypatch):
+        """ANSI/ESC control characters are stripped before execution."""
+        config = _make_minimal_config()
+        ssh_cm, _ = _make_mock_ssh_client_manager()
+        fn, auth_spy, sudo_spy = self._wire_tool(
+            tmp_path, config, monkeypatch, ssh_cm
+        )
+
+        result = fn(
+            server_name="testserver",
+            command="\x1b[31mhostname\x1b[0m",
+        )
+
+        # The ESC control characters (\x1b) are stripped, leaving the plain
+        # '[31m...' text.  The resulting 'command' is sanitized BEFORE the
+        # auth check, so both the sudo validator and the auth manager see the
+        # stripped form.  '[31mhostname[0m' is not allow-listed, so the call
+        # is denied — but the ESC must never reach validation/auth.
+        assert sudo_spy.call_args[0][0] == "[31mhostname[0m"
+        assert auth_spy.call_args.kwargs["command"] == "[31mhostname[0m"
+        assert "error" in json.loads(result)
+
+    def test_fullwidth_homoglyph_sanitized_and_allowed(
+        self, tmp_path, monkeypatch
+    ):
+        """Fullwidth homoglyphs are NFKC-normalised before auth."""
+        config = _make_minimal_config(
+            allowed_commands={
+                "default": [
+                    {"targets": ["*"], "commands": ["ls"]},
+                ],
+                "api_keys": [],
+                "networks": [],
+            },
+        )
+        ssh_cm, _ = _make_mock_ssh_client_manager()
+        fn, auth_spy, sudo_spy = self._wire_tool(
+            tmp_path, config, monkeypatch, ssh_cm
+        )
+
+        result = fn(server_name="testserver", command="ｌｓ ＼etc")
+
+        # NFKC turns the fullwidth chars into plain 'ls \etc' (the fullwidth
+        # reverse solidus U+FF3C normalises to a backslash U+005C).  'ls' is
+        # allow-listed, so the sanitized command executes.
+        assert sudo_spy.call_args[0][0] == "ls \\etc"
+        assert auth_spy.call_args.kwargs["command"] == "ls \\etc"
+        assert "fake output" in result
+
+    def test_fullwidth_sudo_rejected_by_validation_before_auth(
+        self, tmp_path, monkeypatch
+    ):
+        """Fullwidth 'sudo' is normalised by the handler entry, so sudo
+        validation rejects it before the auth check runs."""
+        config = _make_minimal_config(
+            allowed_commands={
+                "default": [
+                    {"targets": ["*"], "commands": ["id"]},
+                ],
+                "api_keys": [],
+                "networks": [],
+            },
+        )
+        ssh_cm, _ = _make_mock_ssh_client_manager()
+        fn, auth_spy, sudo_spy = self._wire_tool(
+            tmp_path, config, monkeypatch, ssh_cm
+        )
+
+        result = fn(server_name="testserver", command="ｓｕｄｏ id", sudo=True)
+
+        payload = json.loads(result)
+        # validate_sudo sees the NFKC-normalised 'sudo id' and rejects it.
+        assert sudo_spy.call_args[0][0] == "sudo id"
+        assert sudo_spy.call_args[0][1] is True
+        # The rejection happens at the handler entry, so auth never runs.
+        assert auth_spy.call_count == 0
+        assert payload["error"] is True

@@ -24,11 +24,13 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from lib.constants import DEFAULT_REQUEST_ID, FALLBACK_CLIENT_IP
+
 if TYPE_CHECKING:
     from lib.rate_limiter import RateLimiter
 
 _current_request: ContextVar[Request | None] = ContextVar("current_request", default=None)
-_request_client_ip: ContextVar[str] = ContextVar("request_client_ip", default="127.0.0.1")
+_request_client_ip: ContextVar[str] = ContextVar("request_client_ip", default=FALLBACK_CLIENT_IP)
 _request_api_key: ContextVar[str | None] = ContextVar("request_api_key", default=None)
 _request_id: ContextVar[str | None] = ContextVar("request_id", default=None)
 
@@ -40,7 +42,12 @@ _REQUEST_ID_MAX_LENGTH = 128
 
 
 def get_current_request() -> Request | None:
-    """Return the current Starlette Request, or None if outside a request."""
+    """Return the current Starlette Request, or ``None`` if outside a request.
+
+    Returns ``None`` when no request context is active (e.g. during
+    startup, shutdown, or background tasks). Callers must handle the
+    ``None`` case explicitly before dereferencing the returned request.
+    """
     return _current_request.get()
 
 
@@ -77,8 +84,9 @@ def get_client_ip() -> str:
 
     Prefers the per-message MCP request (so ``X-Forwarded-For`` from the
     actual tool-call POST is honoured); falls back to the IP stored by
-    :class:`RequestContextMiddleware`, or the safe default ``"127.0.0.1"``
-    when called outside any request context.
+    :class:`RequestContextMiddleware`, or the safe default
+    :data:`~lib.constants.FALLBACK_CLIENT_IP` when called outside any
+    request context.
     """
     mcp_request = _get_mcp_request()
     if mcp_request is not None:
@@ -111,8 +119,8 @@ def get_request_id() -> str:
     MCP request (so the actual tool-call POST is honoured), falling back
     to the header (or generated UUID) stored by
     :class:`RequestContextMiddleware`.  When no request is in progress
-    the constant string ``"unknown"`` is returned so callers always
-    receive a non-empty value.
+    the constant :data:`~lib.constants.DEFAULT_REQUEST_ID` is returned
+    so callers always receive a non-empty value.
 
     The returned ID is truncated to :data:`_REQUEST_ID_MAX_LENGTH`
     characters.
@@ -125,7 +133,7 @@ def get_request_id() -> str:
     cached = _request_id.get()
     if cached is not None:
         return cached
-    return "unknown"
+    return DEFAULT_REQUEST_ID
 
 
 class RequestContextMiddleware(BaseHTTPMiddleware):
@@ -202,7 +210,7 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         Checks ``X-Forwarded-For`` first (leftmost entry = original client),
         then falls back to the direct connection address.  The raw value is
         validated via :func:`ipaddress.ip_address`; invalid addresses are
-        replaced with ``"127.0.0.1"``.
+        replaced with :data:`~lib.constants.FALLBACK_CLIENT_IP`.
         """
         # Check X-Forwarded-For header
         forwarded = request.headers.get("X-Forwarded-For", "")
@@ -211,14 +219,14 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         elif request.client is not None:
             raw_ip = request.client.host
         else:
-            return "127.0.0.1"
+            return FALLBACK_CLIENT_IP
 
         # Validate the IP address
         try:
             ipaddress.ip_address(raw_ip)
             return raw_ip
         except ValueError:
-            return "127.0.0.1"
+            return FALLBACK_CLIENT_IP
 
     @staticmethod
     def _extract_api_key(request: Request) -> str | None:

@@ -13,6 +13,9 @@ import datetime
 import json
 import logging
 import os
+import signal
+import socket
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -24,7 +27,7 @@ from starlette.middleware import Middleware
 
 from lib.auth import AuthorizationManager, AuthResult
 from lib.circuit_breaker import CircuitBreaker
-from lib.config import ConfigManager
+from lib.config import build_default_config, ConfigManager
 from lib.connection_pool import SSHConnectionPool
 from lib.constants import (
     APP_NAME,
@@ -37,6 +40,7 @@ from lib.constants import (
     DEFAULT_LOG_LEVEL,
     DEFAULT_MAX_LOG_OUTPUT,
     DEFAULT_MAX_OUTPUT_LENGTH,
+    DEFAULT_MAX_CONCURRENT_SSH_CONNECTIONS,
     DEFAULT_POOL_CLEANUP_INTERVAL_SECONDS,
     DEFAULT_POOL_IDLE_TIMEOUT_SECONDS,
     DEFAULT_POOL_MAX_CONNECTIONS_PER_TARGET,
@@ -44,11 +48,16 @@ from lib.constants import (
     DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
     DEFAULT_RETRY_BACKOFF_BASE_SECONDS,
     DEFAULT_RETRY_MAX_ATTEMPTS,
+    DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
     DEFAULT_SSH_EXECUTOR_MAX_WORKERS,
     DEFAULT_SSH_KEY_FILENAME,
     DEFAULT_SSH_PORT,
     DEFAULT_WATCHER_INTERVAL_SECONDS,
+    HTTP_SERVICE_UNAVAILABLE,
     LOG_FORMAT_VERSION,
+    MCP_SSH_CONFIG_PATH,
+    MCP_SSH_LOG_DIR,
+    MCP_SSH_SSH_KEY,
     RATE_LIMIT_CLEANUP_INTERVAL_SECONDS,
 )
 from lib.exceptions import (
@@ -57,6 +66,7 @@ from lib.exceptions import (
     FileTransferError,
     MCPSSHError,
     PathValidationError,
+    ServiceUnavailableError,
     SSHAuthenticationError,
     SSHConnectionError,
     SSHTimeoutError,
@@ -80,6 +90,11 @@ from lib.request_context import (
 )
 from lib.ssh_client import SSHClientManager
 from lib.sudo import SudoHandler
+from lib.sanitize import (
+    sanitize_command,
+    sanitize_log_string,
+    sanitize_server_name,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +102,116 @@ from lib.sudo import SudoHandler
 # ---------------------------------------------------------------------------
 
 BASE_DIR = Path(__file__).parent
+
+
+def _graceful_shutdown(state: SimpleNamespace, timeout: float) -> None:
+    """Release all runtime resources in the correct dependency order.
+
+    Runs once (guarded by ``state._shutdown_done``) and is safe to call
+    from the atexit path, a signal handler, or directly via
+    :meth:`create_app().shutdown`.  Resources are released leaf-first so
+    that nothing may log, connect, or reload after its dependencies are
+    gone:
+
+    1. Drain pending SSH work on the executor for at most *timeout*
+       seconds, force-cancelling anything still queued afterwards.
+    2. Stop the config hot-reload watcher.
+    3. Stop the SSH connection pool (closing idle *and* active clients).
+    4. Close the structured log file LAST.
+
+    Args:
+        state: The :class:`~types.SimpleNamespace` attached to the app.
+        timeout: Maximum seconds to wait for in-flight SSH work before
+                 force-cancelling the remainder.
+    """
+    if getattr(state, "_shutdown_done", False):
+        return
+    state._shutdown_done = True
+
+    ssh_executor = getattr(state, "ssh_executor", None)
+    if ssh_executor is not None:
+        # Bounded drain: allow in-flight futures up to *timeout*, then
+        # abandon any that are still running and cancel the queued ones.
+        drain = threading.Thread(
+            target=ssh_executor.shutdown,
+            kwargs={"wait": True, "cancel_futures": True},
+            name="ssh-executor-drain",
+            daemon=True,
+        )
+        drain.start()
+        drain.join(timeout=timeout)
+        if drain.is_alive():
+            ssh_executor.shutdown(wait=False, cancel_futures=True)
+
+    config_manager = getattr(state, "config_manager", None)
+    if config_manager is not None:
+        config_manager.stop_watcher()
+
+    ssh_connection_pool = getattr(state, "ssh_connection_pool", None)
+    if ssh_connection_pool is not None:
+        ssh_connection_pool.stop()
+
+    file_logger = getattr(state, "file_logger", None)
+    if file_logger is not None:
+        file_logger.close()
+
+
+def _run_server(app: FastMCP, rate_limiter: RateLimiter | None = None) -> None:
+    """Run the MCP streamable-HTTP server and handle graceful shutdown.
+
+    Launches ``app.run_http_async(...)`` as an asyncio task and installs
+    SIGTERM/SIGINT handlers so the process shuts the app down cleanly via
+    :meth:`create_app().shutdown` (bounded drain, then resource release)
+    instead of being killed mid-request.
+
+    Args:
+        app: The FastMCP application returned by :func:`create_app`.
+        rate_limiter: The per-IP rate limiter to wire into the request
+            middleware (attach to ``app.state`` when present).
+    """
+    async def _serve() -> None:
+        loop = asyncio.get_running_loop()
+        shutdown_event = asyncio.Event()
+
+        def _request_shutdown() -> None:
+            # From a signal handler: stop accepting new work immediately.
+            shutdown_event.set()
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(sig, _request_shutdown)
+            except NotImplementedError:
+                # Non-UNIX platforms without signal-handler support.
+                pass
+
+        serve_task = asyncio.create_task(
+            app.run_http_async(
+                host="0.0.0.0",
+                port=8080,
+                transport="streamable-http",
+                path="/mcp",
+                middleware=[
+                    Middleware(
+                        RequestContextMiddleware, rate_limiter=rate_limiter
+                    ),
+                ],
+            )
+        )
+        await shutdown_event.wait()
+        serve_task.cancel()
+        try:
+            await serve_task
+        except asyncio.CancelledError:
+            pass
+        finally:
+            timeout = getattr(
+                app.state,  # type: ignore[attr-defined]
+                "shutdown_timeout",
+                DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
+            )
+            app.shutdown()  # type: ignore[attr-defined]   # bounded + resource release
+
+    asyncio.run(_serve())
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +224,7 @@ def create_app(
     ssh_key_path: str = DEFAULT_SSH_KEY_FILENAME,
     log_dir: str = DEFAULT_LOG_DIR,
     max_command_output: int = DEFAULT_MAX_OUTPUT_LENGTH,
+    fix_permissions: bool = False,
 ) -> FastMCP:
     """Create and configure the MCP-SSH FastMCP application.
 
@@ -113,6 +239,8 @@ def create_app(
         max_command_output: Maximum command output size in bytes (used as
                             fallback when ``settings.max_output_length`` is
                             not present in config).
+        fix_permissions: When ``True``, chmod the config and secrets files to
+                         ``RESTRICTED_FILE_MODE`` (0o600) after loading.
 
     Returns:
         A configured :class:`~fastmcp.FastMCP` server instance ready to serve.
@@ -131,7 +259,9 @@ def create_app(
 
     # --- Initialize configuration manager with graceful fallback ---
     try:
-        config_manager = ConfigManager(config_dir, logger=file_logger)
+        config_manager = ConfigManager(
+            config_dir, logger=file_logger, fix_permissions=fix_permissions
+        )
         # Start hot-reload watcher (15-second polling)
         config_manager.start_watcher(polling_interval=DEFAULT_WATCHER_INTERVAL_SECONDS)
     except Exception:
@@ -143,14 +273,42 @@ def create_app(
             config_dir,
             exc_info=True,
         )
+        file_logger.log({
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "event": "config.fallback",
+            "success": False,
+            "message": (
+                "Cannot initialize ConfigManager from primary config dir — "
+                "falling back to bundled default config (read-only, no hot-reload)"
+            ),
+            "config_dir": config_dir,
+            "request_id": get_request_id(),
+            "log_level": "WARNING",
+            "log_format_version": LOG_FORMAT_VERSION,
+        })
         # Fallback: load bundled default-config.json via ConfigManager
         # pointed at the project root (which is always readable).
         _fallback_config_dir = str(BASE_DIR)
-        config_manager = ConfigManager(_fallback_config_dir, logger=file_logger)
+        config_manager = ConfigManager(
+            _fallback_config_dir,
+            logger=file_logger,
+            fix_permissions=fix_permissions,
+        )
         _fallback_log.info(
             "Config loaded from fallback path: %s",
             config_manager.config_path,
         )
+        file_logger.log({
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "event": "config.fallback",
+            "success": True,
+            "message": "Config loaded from fallback bundled default",
+            "config_dir": config_dir,
+            "config_path": str(config_manager.config_path),
+            "request_id": get_request_id(),
+            "log_level": "WARNING",
+            "log_format_version": LOG_FORMAT_VERSION,
+        })
 
     # --- Route standard-library logging through JSONLHandler ---
     # Attach a JSONLHandler to the root logger so logs from this module,
@@ -231,12 +389,17 @@ def create_app(
             "pool_max_connections_per_target",
             DEFAULT_POOL_MAX_CONNECTIONS_PER_TARGET,
         ),
+        max_concurrent_ssh_connections=settings.get(
+            "max_concurrent_ssh_connections",
+            DEFAULT_MAX_CONCURRENT_SSH_CONNECTIONS,
+        ),
         idle_timeout_seconds=settings.get(
             "pool_idle_timeout_seconds", DEFAULT_POOL_IDLE_TIMEOUT_SECONDS
         ),
         cleanup_interval_seconds=settings.get(
             "pool_cleanup_interval_seconds", DEFAULT_POOL_CLEANUP_INTERVAL_SECONDS
         ),
+        config_manager=config_manager,
     )
     ssh_client_manager.set_connection_pool(ssh_connection_pool)
     ssh_connection_pool.start()
@@ -274,24 +437,46 @@ def create_app(
         ssh_executor=ssh_executor,
     )
 
-    # --- Store runtime objects for use in main() middleware wiring ---
+    # --- Store runtime objects for use in main() middleware wiring and
+    # graceful shutdown. ---
     # fastmcp 3.4.x does not define a ``state`` attribute on FastMCP, so we
-    # attach a lightweight namespace to carry the rate limiter and the SSH
-    # executor to main().
+    # attach a lightweight namespace to carry the rate limiter, the SSH
+    # executor, the connection pool, the config manager, and the file
+    # logger to main().
+    shutdown_timeout = config_manager.data.get("settings", {}).get(
+        "shutdown_timeout_seconds", DEFAULT_SHUTDOWN_TIMEOUT_SECONDS
+    )
+
     mcp.state = SimpleNamespace(  # type: ignore[attr-defined]
         rate_limiter=rate_limiter,
         ssh_executor=ssh_executor,
+        ssh_connection_pool=ssh_connection_pool,
+        config_manager=config_manager,
+        file_logger=file_logger,
+        shutdown_timeout=shutdown_timeout,
+        _shutdown_done=False,
     )
 
     # --- Attach health-check endpoint (after pool creation so it can
     # report live connection-pool statistics) ---
     attach_health_endpoint(mcp, logger=file_logger, connection_pool=ssh_connection_pool)
 
-    # --- Register shutdown handler ---
+    # --- Attach a public shutdown() method for graceful teardown ---
+    def shutdown() -> None:
+        """Release runtime resources in dependency order (idempotent)."""
+        _graceful_shutdown(
+            mcp.state,  # type: ignore[attr-defined]
+            getattr(mcp.state, "shutdown_timeout", DEFAULT_SHUTDOWN_TIMEOUT_SECONDS),
+        )
+
+    mcp.shutdown = shutdown  # type: ignore[attr-defined]
+
+    # --- Register shutdown handler as an atexit fallback ---
     def _shutdown() -> None:
-        config_manager.stop_watcher()
-        ssh_connection_pool.stop()
-        ssh_executor.shutdown(wait=False, cancel_futures=True)
+        _graceful_shutdown(
+            mcp.state,  # type: ignore[attr-defined]
+            DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
+        )
 
     atexit.register(_shutdown)
 
@@ -395,11 +580,21 @@ def _register_tools(
     ) -> tuple[AuthResult, dict]:
         """Check authorization and build a base log entry.
 
+        The raw *command* and *server_name* are sanitized before the
+        authorization check.  ``sanitize_command`` preserves ``\\n``/``\\r``
+        so the downstream dangerous-pattern check can still reject
+        newline/CR injection; ``sanitize_server_name`` enforces the
+        ``[a-zA-Z0-9._-]{1,128}`` pattern and raises ``AuthorizationError``
+        on invalid input, which the caller formats as a JSON denial.
+
         Returns:
             ``(auth_result, log_entry)`` — the caller is responsible for
             logging the denial or success message and returning early on
             denial.
         """
+        command = sanitize_command(command)
+        server_name = sanitize_server_name(server_name)
+
         source_ip = get_client_ip()
         api_key = get_api_key()
         api_key_name = _lookup_api_key_name(api_key)
@@ -410,6 +605,8 @@ def _register_tools(
             source_ip=source_ip,
             api_key=api_key,
         )
+        log_command = sanitize_log_string(command)
+        log_server_name = sanitize_log_string(server_name)
         log_entry = {
             "timestamp": datetime.datetime.now(
                 datetime.timezone.utc
@@ -417,8 +614,8 @@ def _register_tools(
             "event": "command.execute",
             "source_ip": source_ip,
             "api_key_name": api_key_name,
-            "command": command,
-            "server_name": server_name,
+            "command": log_command,
+            "server_name": log_server_name,
             "allowed": auth_result.allowed,
             "reason": auth_result.reason,
             "matched_via": auth_result.matched_via,
@@ -438,9 +635,18 @@ def _register_tools(
         ``"tee"`` for upload).  *event_type* labels the log entry
         (``"file.download"`` or ``"file.upload"``).
 
+        The raw *server_name* is sanitized before the authorization check.
+        ``sanitize_command`` is not applied to *verb* because it is a
+        constant string; instead the newline-sanitized *remote_path* is used
+        in the log ``command`` field so user-supplied paths cannot poison the
+        JSONL log.
+
         Returns:
             ``(auth_result, log_entry)``.
         """
+        server_name = sanitize_server_name(server_name)
+        remote_path_display = sanitize_log_string(remote_path)
+
         source_ip = get_client_ip()
         api_key = get_api_key()
         api_key_name = _lookup_api_key_name(api_key)
@@ -451,6 +657,7 @@ def _register_tools(
             source_ip=source_ip,
             api_key=api_key,
         )
+        log_server_name = sanitize_log_string(server_name)
         log_entry = {
             "timestamp": datetime.datetime.now(
                 datetime.timezone.utc
@@ -458,8 +665,8 @@ def _register_tools(
             "event": event_type,
             "source_ip": source_ip,
             "api_key_name": api_key_name,
-            "command": f"{verb} {remote_path}",
-            "server_name": server_name,
+            "command": f"{verb} {remote_path_display}",
+            "server_name": log_server_name,
             "allowed": auth_result.allowed,
             "reason": auth_result.reason,
             "matched_via": auth_result.matched_via,
@@ -483,17 +690,22 @@ def _register_tools(
         Returns:
             ``(stdout, stderr, exit_code)``.
         """
-        stdin, stdout, stderr = client.exec_command(
-            actual_command, timeout=timeout
-        )
-        if sudo and sudo_password:
-            stdin.write(sudo_password + "\n")
-            stdin.flush()
-            stdin.close()
-        out = stdout.read(max_output).decode("utf-8", errors="replace")
-        err = stderr.read(max_output).decode("utf-8", errors="replace")
-        exit_code = stdout.channel.recv_exit_status()
-        return out, err, exit_code
+        try:
+            stdin, stdout, stderr = client.exec_command(
+                actual_command, timeout=timeout
+            )
+            if sudo and sudo_password:
+                stdin.write(sudo_password + "\n")
+                stdin.flush()
+                stdin.close()
+            out = stdout.read(max_output).decode("utf-8", errors="replace")
+            err = stderr.read(max_output).decode("utf-8", errors="replace")
+            exit_code = stdout.channel.recv_exit_status()
+            return out, err, exit_code
+        except socket.timeout as exc:
+            raise SSHTimeoutError(
+                f"Command timed out after {timeout}s: {actual_command}"
+            ) from exc
 
     @staticmethod
     def _format_execution_result(
@@ -543,15 +755,23 @@ def _register_tools(
         """Build a structured error response for an MCPSSHError.
 
         Returns a dict with the ``error`` flag, the concrete exception
-        type name, a human-readable message, and a ``retryable`` flag.
-        The ``request_id`` is taken from the current request context so
-        errors can be correlated with logs.
+        type name, a human-readable message, a ``retryable`` flag, and a
+        ``status_code`` reflecting the intended HTTP status (503 for a
+        :class:`ServiceUnavailableError`, 200 otherwise).  The
+        ``request_id`` is taken from the current request context so errors
+        can be correlated with logs.
         """
+        status_code: int = (
+            HTTP_SERVICE_UNAVAILABLE
+            if isinstance(exc, ServiceUnavailableError)
+            else 200
+        )
         return {
             "error": True,
             "error_type": type(exc).__name__,
             "message": str(exc),
             "retryable": isinstance(exc, SSHTimeoutError),
+            "status_code": status_code,
             "request_id": get_request_id(),
         }
 
@@ -598,6 +818,7 @@ def _register_tools(
             JSON-formatted list of allowed command base names, or error
             message
         """
+        server_name = sanitize_server_name(server_name)
         source_ip = get_client_ip()
         api_key = get_api_key()
 
@@ -640,6 +861,9 @@ def _register_tools(
             Command output (stdout + stderr combined) or auth denial
             reason
         """
+        # --- Sanitize command before any validation/auth/eval ---
+        command = sanitize_command(command)
+
         # --- Validate sudo usage ---
         sudo_error = SudoHandler.validate_sudo(command, sudo)
         if sudo_error is not None:
@@ -1016,26 +1240,38 @@ def main() -> None:
     ================  =======================  =====================
     CLI Flag           Environment Variable     Default
     ================  =======================  =====================
-    ``--config``       ``CONFIG_DIR``           ``/config``
-    ``--ssh-key``      ``SSH_KEY_PATH``         ``ssh_key``
-    ``--log-dir``      ``LOG_DIR``              ``/logs``
+    ``--config``       ``MCP_SSH_CONFIG_PATH``  ``/config``
+    ``--ssh-key``      ``MCP_SSH_SSH_KEY``      ``ssh_key``
+    ``--log-dir``      ``MCP_SSH_LOG_DIR``      ``/logs``
     ``--max-output``   ``MAX_OUTPUT_LENGTH``    ``50000``
+    ``--fix-permissions``  —                    disabled (``False``)
+    ``--print-default-config``  —               — (prints to stdout, exits)
     ================  =======================  =====================
+
+    The legacy variable names (``CONFIG_DIR``, ``SSH_KEY_PATH``, and
+    ``LOG_DIR``) remain supported as fallbacks.
     """
     parser = argparse.ArgumentParser(description="MCP-SSH Server")
     parser.add_argument(
         "--config",
-        default=os.environ.get("CONFIG_DIR", DEFAULT_CONFIG_DIR),
+        default=os.environ.get(
+            MCP_SSH_CONFIG_PATH, os.environ.get("CONFIG_DIR", DEFAULT_CONFIG_DIR)
+        ),
         help=f"Path to configuration directory (default: {DEFAULT_CONFIG_DIR})",
     )
     parser.add_argument(
         "--ssh-key",
-        default=os.environ.get("SSH_KEY_PATH", DEFAULT_SSH_KEY_FILENAME),
+        default=os.environ.get(
+            MCP_SSH_SSH_KEY,
+            os.environ.get("SSH_KEY_PATH", DEFAULT_SSH_KEY_FILENAME),
+        ),
         help=f"Path to SSH private key (default: {DEFAULT_SSH_KEY_FILENAME})",
     )
     parser.add_argument(
         "--log-dir",
-        default=os.environ.get("LOG_DIR", DEFAULT_LOG_DIR),
+        default=os.environ.get(
+            MCP_SSH_LOG_DIR, os.environ.get("LOG_DIR", DEFAULT_LOG_DIR)
+        ),
         help=f"Directory for log files (default: {DEFAULT_LOG_DIR})",
     )
     parser.add_argument(
@@ -1046,28 +1282,36 @@ def main() -> None:
         ),
         help=f"Maximum command output size in bytes (default: {DEFAULT_MAX_OUTPUT_LENGTH})",
     )
+    parser.add_argument(
+        "--fix-permissions",
+        action="store_true",
+        help=(
+            "Chmod the config and secrets files to 0o600 on startup, "
+            "correcting group/world-readable permissions"
+        ),
+    )
+    parser.add_argument(
+        "--print-default-config",
+        action="store_true",
+        help="Print the generated default configuration as JSON to stdout and exit",
+    )
 
     args = parser.parse_args()
+
+    if args.print_default_config:
+        print(json.dumps(build_default_config(), indent=2))
+        return
 
     app = create_app(
         config_dir=args.config,
         ssh_key_path=args.ssh_key,
         log_dir=args.log_dir,
         max_command_output=args.max_output,
+        fix_permissions=args.fix_permissions,
     )
 
     rate_limiter = getattr(app.state, "rate_limiter", None)
-    asyncio.run(
-        app.run_http_async(
-            host="0.0.0.0",
-            port=8080,
-            transport="streamable-http",
-            path="/mcp",
-            middleware=[
-                Middleware(RequestContextMiddleware, rate_limiter=rate_limiter),
-            ],
-        )
-    )
+    _run_server(app, rate_limiter=rate_limiter)
 
 
 if __name__ == "__main__":

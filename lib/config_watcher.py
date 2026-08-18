@@ -37,6 +37,9 @@ class FileChangeHandler(FileSystemEventHandler):
             ignored.
         logger: Optional :class:`logging.Logger`; defaults to the module
             logger.
+        log_event: Optional structured-log callback
+            ``(event, success, message)`` used to emit ``config.watcher.*``
+            events.  Defaults to ``None`` (structured events skipped).
     """
 
     def __init__(
@@ -45,11 +48,13 @@ class FileChangeHandler(FileSystemEventHandler):
         reload_callback,
         debounce_callback,
         logger=None,
+        log_event=None,
     ):
         self._config_path = Path(config_path)
         self._reload_callback = reload_callback
         self._debounce_callback = debounce_callback
         self._logger = logger or logging.getLogger(__name__)
+        self._log_event = log_event
 
     def on_modified(self, event) -> None:
         """Reload the config when the config file itself is modified.
@@ -66,6 +71,18 @@ class FileChangeHandler(FileSystemEventHandler):
             self._logger.info(
                 "Config change within debounce window — skipping reload"
             )
+            if self._log_event is not None:
+                self._log_event(
+                    "config.watcher.debounced",
+                    True,
+                    "Config change within debounce window — skipping reload",
+                )
             return
         self._logger.info("Config file changed, reloading...")
+        if self._log_event is not None:
+            self._log_event(
+                "config.watcher.reload_triggered",
+                True,
+                "Config file changed, reloading...",
+            )
         self._reload_callback()

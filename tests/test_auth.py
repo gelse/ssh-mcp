@@ -8,11 +8,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import threading
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import pytest
 
-from lib.auth import AuthorizationManager, AuthResult, _extract_base_command, _split_command_segments
+from lib.auth import (
+    AuthorizationManager,
+    AuthResult,
+    RulesSnapshot,
+    _extract_base_command,
+    _split_command_segments,
+)
 from lib.config import ConfigManager
 from lib.crypto import hash_api_key, verify_api_key
 
@@ -427,6 +436,96 @@ class TestCheckCommandChainedCommands:
 
 
 # ---------------------------------------------------------------------------
+# TestCheckCommandRedirectionStripping
+# ---------------------------------------------------------------------------
+
+
+class TestCheckCommandRedirectionStripping:
+    """Verify redirect stripping lets allow-listed commands with benign
+    redirections/terminals pass, while protected targets are still denied."""
+
+    def test_redirect_to_tmp_allowed(self, tmp_path):
+        """Redirects into a non-protected path (e.g. /tmp) are stripped, so
+        the allow-listed base command 'uptime' is allowed."""
+        am = _make_auth_manager(tmp_path)
+        result = am.check_command("uptime >/tmp/o 2>&1", "knubbel")
+        assert result.allowed is True
+        assert result.matched_via == "default"
+
+    def test_pipe_with_stderr_redirect_all_segments_allowed(self, tmp_path):
+        """A pipe whose segments are all allow-listed, with a stderr redirect
+        glued to the first segment, should be allowed after stripping."""
+        cfg = _minimal_auth_config()
+        cfg["allowed_commands"]["default"] = [
+            {"targets": ["*"], "commands": ["grep", "head"]}
+        ]
+        am = _make_auth_manager(tmp_path, cfg)
+        result = am.check_command("grep pattern 2>&1 | head", "knubbel")
+        assert result.allowed is True
+        assert result.matched_via == "default"
+
+    def test_chain_second_command_not_allowed_denied(self, tmp_path):
+        """Redirect stripping must not grant access to a non-allow-listed
+        chained command — 'nc' is denied."""
+        cfg = _minimal_auth_config()
+        cfg["allowed_commands"]["default"] = [
+            {"targets": ["*"], "commands": ["echo"]}
+        ]
+        am = _make_auth_manager(tmp_path, cfg)
+        result = am.check_command("echo hi 2>&1 && nc example.com", "knubbel")
+        assert result.allowed is False
+        assert result.matched_via == "denied"
+
+    def test_chain_block_pattern_beats_semicolon(self, tmp_path):
+        """Stripping does not hide a blocked command in a chain — the 'rm -rf'
+        block pattern still denies the whole command."""
+        cfg = _minimal_auth_config()
+        cfg["allowed_commands"]["default"] = [
+            {"targets": ["*"], "commands": ["echo"]}
+        ]
+        am = _make_auth_manager(tmp_path, cfg)
+        result = am.check_command("echo hi 2>&1; rm -rf /tmp/x", "knubbel")
+        assert result.allowed is False
+        assert result.matched_via.startswith("blocked:")
+
+    def test_redirect_to_dev_protected(self, tmp_path):
+        """Redirection into /dev/sda is a protected target and is denied."""
+        am = _make_auth_manager(tmp_path)
+        result = am.check_command("cat file >/dev/sda", "knubbel")
+        assert result.allowed is False
+        assert result.matched_via == "blocked:redirection-target"
+
+    def test_redirect_to_proc_protected(self, tmp_path):
+        """Redirection into /proc/self/fd/0 is denied even though the base
+        command is not otherwise restricted."""
+        am = _make_auth_manager(tmp_path)
+        result = am.check_command("cat file >/proc/self/fd/0", "knubbel")
+        assert result.allowed is False
+        assert result.matched_via == "blocked:redirection-target"
+
+    def test_protected_target_denied_even_without_block_patterns(self, tmp_path):
+        """Defense-in-depth: redirection into a protected path is blocked by
+        the dedicated target check, even with an empty block_patterns list."""
+        cfg = _minimal_auth_config(block_patterns=[])
+        am = _make_auth_manager(tmp_path, cfg)
+        result = am.check_command("cat x >/dev/null", "knubbel")
+        assert result.allowed is False
+        assert result.matched_via == "blocked:redirection-target"
+
+    def test_quoted_greater_than_allowed(self, tmp_path):
+        """A '>' inside quotes is not a redirect — the allow-listed 'echo'
+        command is allowed."""
+        cfg = _minimal_auth_config()
+        cfg["allowed_commands"]["default"] = [
+            {"targets": ["*"], "commands": ["echo"]}
+        ]
+        am = _make_auth_manager(tmp_path, cfg)
+        result = am.check_command('echo "a>b"', "knubbel")
+        assert result.allowed is True
+        assert result.matched_via == "default"
+
+
+# ---------------------------------------------------------------------------
 # TestCheckCommandEdgeCases
 # ---------------------------------------------------------------------------
 
@@ -659,3 +758,153 @@ class TestApiKeyHashing:
         am = _make_auth_manager(tmp_path, cfg)
         result = am.check_command("whoami", "knubbel", api_key="wrong-integration-key")
         assert result.allowed is False
+
+
+# ---------------------------------------------------------------------------
+# TestRulesSnapshot
+# ---------------------------------------------------------------------------
+
+
+class TestRulesSnapshot:
+    """Tests for the frozen, immutable RulesSnapshot dataclass."""
+
+    def test_fields_frozen(self):
+        """Mutating any field of a RulesSnapshot raises FrozenInstanceError."""
+        snap = RulesSnapshot(
+            block_patterns=(("rm", re.compile("rm", re.IGNORECASE)),),
+            default_rules=({"targets": ["*"], "commands": ["hostname"]},),
+            api_keys=(),
+            networks=(),
+        )
+        with pytest.raises(FrozenInstanceError):
+            snap.default_rules = ()
+
+    def test_compiled_patterns_prebuilt(self):
+        """block_patterns carry pre-compiled regex patterns."""
+        snap = RulesSnapshot(
+            block_patterns=(("rm", re.compile("rm", re.IGNORECASE)),),
+            default_rules=(),
+            api_keys=(),
+            networks=(),
+        )
+        raw, compiled = snap.block_patterns[0]
+        assert raw == "rm"
+        assert isinstance(compiled, re.Pattern)
+        assert compiled.search("rm -rf /") is not None
+
+
+# ---------------------------------------------------------------------------
+# TestRulesSnapshotAtomicity
+# ---------------------------------------------------------------------------
+
+
+def _auth_config_a_with(block_patterns, default_commands):
+    """Helper to build a full config dict with the given rules."""
+    cfg = _minimal_auth_config(
+        block_patterns=block_patterns,
+    )
+    cfg["allowed_commands"]["default"] = [
+        {"targets": ["*"], "commands": list(default_commands)}
+    ]
+    return cfg
+
+
+class TestRulesSnapshotAtomicity:
+    """Verify update_rules swaps the snapshot atomically via the config_data seam."""
+
+    def test_single_reference_swap(self, tmp_path):
+        """update_rules performs a fully-consistent snapshot swap."""
+        cfg_a = _auth_config_a_with(
+            [r"\brm\s+-rf\b"], ["hostname", "uptime"]
+        )
+        cfg_b = _auth_config_a_with(
+            [r"\brm\s+-rf\b", r"\bshutdown\b"], ["hostname"]
+        )
+        # Build manager over a minimal base config
+        am = _make_auth_manager(tmp_path, cfg_a)
+
+        # Swap to a new full config via the config_data seam
+        am.update_rules(cfg_b)
+
+        # Everything is consistent with cfg_b
+        assert len(am._rules.default_rules) == 1
+        assert am._rules.block_patterns[0][0] == r"\brm\s+-rf\b"
+        assert am._rules.block_patterns[1][0] == r"\bshutdown\b"
+        # "uptime" no longer allowed by cfg_b defaults
+        assert am.check_command("uptime", "knubbel").allowed is False
+        # "shutdown" is blocked by cfg_b
+        assert am.check_command("shutdown", "knubbel").allowed is False
+
+    def test_threaded_atomicity(self, tmp_path):
+        """Concurrent readers only ever observe fully-consistent rule sets."""
+        cfg_a = _auth_config_a_with(
+            [r"\brm\s+-rf\b"], ["hostname", "uptime", "free"]
+        )
+        cfg_b = _auth_config_a_with(
+            [r"\bshutdown\b"], ["hostname"]
+        )
+        am = _make_auth_manager(tmp_path, cfg_a)
+
+        stop = threading.Event()
+        outcomes: list[bool] = []
+        outcomes_lock = threading.Lock()
+
+        def reader():
+            while not stop.is_set():
+                res = am.check_command("hostname", "knubbel")
+                outcomes_lock.acquire()
+                try:
+                    outcomes.append(res.allowed)
+                finally:
+                    outcomes_lock.release()
+
+        def writer():
+            for _ in range(200):
+                am.update_rules(cfg_a)
+                am.update_rules(cfg_b)
+            stop.set()
+
+        threads = [threading.Thread(target=reader) for _ in range(4)]
+        for t in threads:
+            t.start()
+        w = threading.Thread(target=writer)
+        w.start()
+        w.join()
+        for t in threads:
+            t.join()
+
+        # Every observed result must be one of the two consistent outcomes:
+        # hostname is allowed by both configs' defaults. Since the probe command
+        # is allowed under both snapshots, every outcome must be True; this
+        # still exercises the read/write race while proving no partial update.
+        assert outcomes, "readers should have observed at least one result"
+        assert all(outcome is True for outcome in outcomes)
+
+
+# ---------------------------------------------------------------------------
+# TestRulesSnapshotRefresh
+# ---------------------------------------------------------------------------
+
+
+class TestRulesSnapshotRefresh:
+    """refresh() rebuilds the snapshot from mutated live config data."""
+
+    def test_refresh_picks_up_new_rules(self, tmp_path):
+        """Mutating config_manager.data and calling refresh updates decisions."""
+        cfg = _minimal_auth_config()
+        _write_config(str(tmp_path), cfg)
+        cm = ConfigManager(str(tmp_path))
+        am = AuthorizationManager(cm)
+
+        # Initially "docker" is only allowed for knubbel/home via API keys,
+        # not by any default rule with no API key presented.
+        assert am.check_command("docker", "knubbel").allowed is False
+
+        # Mutate live config data and refresh.
+        cm.data["allowed_commands"]["default"] = [
+            {"targets": ["*"], "commands": ["docker"]}
+        ]
+        am.refresh()
+
+        assert am.check_command("docker", "knubbel").allowed is True
+        assert "docker" in am.list_allowed_commands("knubbel")

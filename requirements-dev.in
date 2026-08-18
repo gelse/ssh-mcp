@@ -1,0 +1,23 @@
+# Dev/test dependencies of the mcp-ssh project (integration-test tooling).
+#
+# Transitive dependencies are resolved and hash-locked into
+# requirements-dev.txt by pip-compile. Regenerate with:
+#
+#   pip-compile --generate-hashes --no-reuse-hashes \
+#     --output-file requirements-dev.txt requirements-dev.in
+#
+# NOTE: run inside the python:3.13-alpine base image so the generated
+# hashes match the wheels used by CI/dev. --no-reuse-hashes collects hashes
+# for ALL platforms (wheels + sdists), not just the wheel selected on the
+# regeneration host.
+#
+# These are NOT runtime deps of the server. They are only needed to run
+# tests/integration/ locally: the ``docker`` Python SDK drives the real
+# Docker daemon to spin up the SSH target and the :test application image.
+# ``paramiko`` (already a runtime dependency) is reused from the venv.
+#
+# pytest is intentionally NOT pinned here: test tooling follows the project
+# convention of leaving pytest unpinned (the unit-test suite runs with
+# whatever pytest is present in the active environment).
+
+docker==7.2.0

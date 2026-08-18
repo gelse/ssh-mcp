@@ -28,6 +28,7 @@ WORKDIR /app
 COPY server.py /app/
 COPY lib/ /app/lib/
 COPY default-config.json /app/
+COPY config.schema.json /app/
 
 # Copy CycloneDX SBOM generated at build time
 COPY --from=sbom /tmp/sbom.json /app/sbom.json

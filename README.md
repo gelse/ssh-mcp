@@ -26,7 +26,7 @@ The server speaks **streamable HTTP** on port `8080` at the `/mcp` path and regi
 |---|---|
 | **MCP tools** | 5 tools: list servers, list allowed commands, execute command, download file, upload file |
 | **Transport** | Streamable HTTP, listens on `0.0.0.0:8080`, MCP path `/mcp` |
-| **Command authorization** | Layered allow-list chain: `block_patterns` → dangerous patterns → command segmentation → `default` rules → API key rules → network rules → deny |
+| **Command authorization** | Layered allow-list chain: `block_patterns` → dangerous patterns → redirection-target guard → redirector stripping → command segmentation → `default` rules → API key rules → network rules → deny. Redirection operators (`2>&1`, `>`, `>>`, `&>`, …) are stripped before segmentation so they never cause phantom-segment denials, while block/dangerous patterns still run against the raw command first |
 | **API key authentication** | Keys are stored as **hashes** in the config file (PBKDF2-HMAC-SHA256 with per-key random salt; legacy `sha256:` hashes supported). Verified with constant-time comparison. Keys are sent via `X-API-Key` or `Authorization: Bearer` headers |
 | **SSH connection pooling** | Reuses connections per target (configurable max connections, idle timeout, cleanup interval) |
 | **Rate limiting** | Sliding-window limiter per client IP (defaults: 60 requests / 60 s window; `/health` is exempt). Returns HTTP 429 with `Retry-After` |
@@ -35,7 +35,8 @@ The server speaks **streamable HTTP** on port `8080` at the `/mcp` path and regi
 | **Sudo support** | `sudo -S -p ''` when the target config provides a password, or `sudo -n` for passwordless sudo |
 | **SFTP security** | 7-layer path validation; uploads are only allowed under `/tmp/` or `/home/`; 10 MiB max file size |
 | **Structured logging** | JSONL logs with rotation (10 MB, 5 backups, optional gzip), output truncation, per-request correlation IDs |
-| **Config hot-reload** | `ssh-mcp-config.json` is re-read on change (15 s polling, 2 s debounce) — no restart required |
+| **Input sanitization** | `command`, `server_name`, and log fields are sanitized before authorization: null bytes and control chars stripped (except `\t`/`\n`/`\r`), NFKC-normalized, and server names validated against `[a-zA-Z0-9._-]{1,128}` |
+| **Config hot-reload** | `ssh-mcp-config.json` is re-read on change (15 s polling, 2 s debounce) — no restart required. Authorization rules are rebuilt into an immutable `RulesSnapshot` and swapped atomically, so readers never observe a partially-updated rule set |
 | **Observability** | `GET /health` and `GET /metrics` (Prometheus) endpoints |
 | **Docker hardening** | Non-root `mcpssh` user, hash-pinned base image, CycloneDX SBOM build stage |
 
@@ -43,11 +44,7 @@ The server speaks **streamable HTTP** on port `8080` at the `/mcp` path and regi
 
 The following items are tracked in the project plans (`plans/11a-separate-secrets-env-overrides-migration.md`) but are **not** part of the current code:
 
-- Separate `secrets.json` file for sensitive values (today all secrets live in `ssh-mcp-config.json`)
-- Environment-variable setting overrides (`MCP_SSH_SETTING_*`)
-- Schema version migration support
 - Duplicate SSH-target detection
-- File-permission validation for config files
 
 ---
 
@@ -60,6 +57,16 @@ The following items are tracked in the project plans (`plans/11a-separate-secret
 The server reads its configuration from `<config_dir>/ssh-mcp-config.json`, where `config_dir` is the `--config` CLI flag or the `CONFIG_DIR` environment variable (default `/config`). See [§3 Deployment](#3-deployment) for how this maps to Docker.
 
 If the config file does not exist and the directory is writable, the server writes a bundled `default-config.json` so it can start. If the directory is not writable, it falls back to the bundled defaults in memory.
+
+To see the exact config the server would generate, run the server with the `--print-default-config` flag. It prints the generated default config as pretty-printed JSON to stdout and exits without starting the server or touching the filesystem:
+
+```bash
+./server.py --print-default-config
+```
+
+The config file format is also described by a bundled JSON Schema, [`config.schema.json`](config.schema.json) (JSON Schema Draft 2020-12). It ships with the repository, is copied into the container image, and `default-config.json` points at it via its top-level `$schema` key. Editors and CI can use the schema to validate `ssh-mcp-config.json` structure.
+
+Sensitive values (SSH target passwords and API-key hashes) may instead live in a separate `<config_dir>/secrets.json` file or in environment variables — see [§2.8 Secrets](#28-secrets).
 
 ### 2.2 Top-level structure
 
@@ -77,6 +84,13 @@ If the config file does not exist and the directory is writable, the server writ
 }
 ```
 
+The top-level `version` key declares the config schema version. On load the
+server migrates the config to the latest supported version automatically:
+
+- A missing `version` is treated as `1` (the original format predated version tracking) — no migration is performed.
+- If the config is older than the latest version, the server applies the registered migrations and **rewrites `ssh-mcp-config.json` in place**, first writing an atomic pre-migration backup to `<config_file>.bak` (with mode `0600`). If the rewrite fails (e.g. a read-only filesystem), the migrated config is used in memory only and a `config.migrated` failure event is logged.
+- A config whose `version` is **newer** than this release understands is rejected at load time (a hard error), since the server cannot downgrade it.
+
 ### 2.3 `ssh_targets`
 
 An object keyed by server identifier. Each target requires a `host`, `port`, and `username`, plus **at least one** of `private_key` or `password`.
@@ -92,13 +106,14 @@ An object keyed by server identifier. Each target requires a `host`, `port`, and
   "db-server": {
     "host": "db.internal",
     "port": 22,
-    "username": "root",
-    "password": "CHANGE_ME"
+    "username": "root"
   }
 }
 ```
 
 > **Note:** `private_key` is a *path on the server's filesystem* to the private key file (in Docker, mounted into the container), not an inline key.
+
+The `password` field may still be present inline (backward-compatible fallback), but it should prefer `secrets.json` or a `MCP_SSH_SECRET_PASSWORD_*` environment variable — see [§2.8 Secrets](#28-secrets).
 
 ### 2.4 `block_patterns`
 
@@ -157,6 +172,8 @@ A **list** of objects, each with `name` (a label, e.g. the client name), `key_ha
 ]
 ```
 
+The `key_hash` (and only the `key_hash`) may instead live in `secrets.json` or a `MCP_SSH_SECRET_API_KEY_*` environment variable; `name` and `rules` stay in the main config — see [§2.8 Secrets](#28-secrets).
+
 **How to generate `key_hash`:** the server hashes keys with PBKDF2-HMAC-SHA256 (100,000 iterations, random 32-byte salt). Generate the hash with the same parameters the server uses:
 
 ```bash
@@ -193,7 +210,7 @@ All settings are **flat keys** — there is no nesting (and no `rate_limit` key;
 
 | Setting | Default | Description |
 |---|---|---|
-| `max_output_length` | `50000` | Max bytes of command output returned to the client (bytes) |
+| `max_output_length` | `50000` | Max bytes of command output returned to the client. Accepts an integer (bytes) or a case-insensitive size string with a `b`/`kb`/`mb`/`gb` suffix (e.g. `"1KB"`, `"50kb"`, `"10mb"`); a bare number is treated as bytes |
 | `command_timeout_max` | `120` | Hard cap on command timeout (seconds) |
 | `retry_max_attempts` | `3` | Retry attempts for transient SSH failures |
 | `retry_backoff_base_seconds` | `1.0` | Base exponential backoff (seconds) |
@@ -205,21 +222,88 @@ All settings are **flat keys** — there is no nesting (and no `rate_limit` key;
 | `pool_max_connections_per_target` | `5` | Max pooled SSH connections per target |
 | `pool_idle_timeout_seconds` | `300.0` | Idle connection timeout (seconds) |
 | `pool_cleanup_interval_seconds` | `60.0` | Pool cleanup interval (seconds) |
+| `max_concurrent_ssh_connections` | `20` | Global maximum of concurrently checked-out SSH connections across all targets; excess acquisitions are rejected with an HTTP 503 `ServiceUnavailableError` rather than queued |
+| `watcher_debounce_seconds` | `2.0` | Minimum gap (seconds) between config reloads triggered by file changes; `0` disables debouncing |
 
 > **Rate limiting note:** the sliding-window rate limiter currently uses **fixed defaults** (60 requests per minute per client IP, 60-second window, `/health` exempt). A `settings.rate_limit` key is **rejected** by config validation in this version — it is a planned configuration surface, not a working one.
 
 ### 2.7 Environment variables and CLI flags
 
-Exactly **four** environment variables are read, each mapping 1:1 to a CLI flag:
+Each of these environment variables maps 1:1 to a CLI flag; CLI flags take
+precedence over environment variables:
 
-| Environment variable | CLI flag | Default |
-|---|---|---|
-| `CONFIG_DIR` | `--config` | `/config` |
-| `SSH_KEY_PATH` | `--ssh-key` | `ssh_key` |
-| `LOG_DIR` | `--log-dir` | `/logs` |
-| `MAX_OUTPUT_LENGTH` | `--max-output` | `50000` |
+| Environment variable | CLI flag | Default | Legacy fallback |
+|---|---|---|---|
+| `MCP_SSH_CONFIG_PATH` | `--config` | `/config` | `CONFIG_DIR` |
+| `MCP_SSH_SSH_KEY` | `--ssh-key` | `ssh_key` | `SSH_KEY_PATH` |
+| `MCP_SSH_LOG_DIR` | `--log-dir` | `/logs` | `LOG_DIR` |
+| `MAX_OUTPUT_LENGTH` | `--max-output` | `50000` | — |
+| — | `--fix-permissions` | `False` (disabled) | — |
+| — | `--print-default-config` | `False` (disabled) | — |
 
-> **Not read by the server:** `API_KEYS`, `SSH_TARGETS_FILE`, `SSL_CERT_PATH`, `SSL_KEY_PATH`, `TRAEFIK_HOST`, `TRAEFIK_PORT`, `TRAEFIK_ENTRYPOINTS`, `CONFIG_PATH`. API keys belong in `ssh-mcp-config.json` (see §2.5), and Traefik settings are compose-level labels, not server config.
+The legacy variable names (`CONFIG_DIR`, `SSH_KEY_PATH`, and `LOG_DIR`)
+remain supported as fallbacks: the `MCP_SSH_*` name wins when both are set.
+
+> **Not read by the server:** `API_KEYS`, `SSH_TARGETS_FILE`, `SSL_CERT_PATH`, `SSL_KEY_PATH`, `TRAEFIK_HOST`, `TRAEFIK_PORT`, `TRAEFIK_ENTRYPOINTS`, `CONFIG_PATH`. Traefik settings are compose-level labels, not server config. (In addition to the flags above, the server reads `MCP_SSH_SECRET_*` variables — see §2.8 — and `MCP_SSH_SETTING_*` variables — see §2.7.1.)
+
+#### 2.7.1 Setting overrides
+
+Any key in the `settings` table (see §2.6) can be overridden at runtime with
+`MCP_SSH_SETTING_<KEY>`, where `<KEY>` is the setting name upper-cased with
+`-` replaced by `_`. Values are coerced to the declared type (int, float,
+bool, or str); a variable whose name is unknown or whose value cannot be
+coerced is ignored with a warning. Precedence is:
+
+```
+env vars  >  secrets.json  >  ssh-mcp-config.json  >  defaults
+```
+
+Examples:
+
+| Env var | Equivalent setting |
+|---|---|
+| `MCP_SSH_SETTING_MAX_OUTPUT_LENGTH=100` | `settings.max_output_length = 100` (size strings like `10mb` are also accepted and normalised to bytes) |
+| `MCP_SSH_SETTING_COMPRESS_ROTATED=true` | `settings.compress_rotated = true` |
+| `MCP_SSH_SETTING_LOG_LEVEL=DEBUG` | `settings.log_level = "DEBUG"` |
+| `MCP_SSH_SETTING_WATCHER_DEBOUNCE_SECONDS=5` | `settings.watcher_debounce_seconds = 5.0` |
+
+### 2.8 Secrets
+
+SSH target passwords and API-key hashes can be separated from `ssh-mcp-config.json` into a dedicated `secrets.json` file and/or `MCP_SSH_SECRET_*` environment variables. The server merges them during load with this precedence:
+
+```
+environment variables  >  secrets.json  >  ssh-mcp-config.json
+```
+
+#### `secrets.json`
+
+Placed at `<config_dir>/secrets.json`:
+
+```jsonc
+{
+  "version": 1,
+  "ssh_targets": {
+    "db-server": { "password": "CHANGE_ME" }
+  },
+  "api_keys": [
+    { "name": "ci-bot", "key_hash": "pbkdf2:sha256:100000$<salt-hex>$<hash-hex>" }
+  ]
+}
+```
+
+- `ssh_targets.<id>.password` overrides the target's password in the main config.
+- `api_keys` entries are matched **by `name`** to the `allowed_commands.api_keys` list in the main config; only the `key_hash` is patched. `name` and `rules` stay in the main config, and a secrets entry whose name does not exist is ignored (it never creates new auth policy).
+- The file must not be world-readable. The server warns (`secrets.permissions_insecure`) when it is more permissive than `0o600`; the `--fix-permissions` CLI flag auto-corrects it (along with `ssh-mcp-config.json`) to `0o600` on startup, emitting `secrets.permissions_fixed` / `config.permissions_fixed` events.
+- A missing `secrets.json` is valid — the server simply falls back to the main config.
+
+#### `MCP_SSH_SECRET_*` environment variables
+
+| Env var | Effect |
+|---|---|
+| `MCP_SSH_SECRET_PASSWORD_<TARGET_ID>` | Override `ssh_targets[<TARGET_ID>].password` |
+| `MCP_SSH_SECRET_API_KEY_<KEY_NAME>` | Override the `key_hash` of the `api_keys` entry named `<KEY_NAME>` |
+
+`<TARGET_ID>` and `<KEY_NAME>` are upper-cased with `-` → `_` (e.g. `db-server` → `DB_SERVER`, `ci-bot` → `CI_BOT`). An empty value is treated as unset and falls through to the next source. Unknown `MCP_SSH_SECRET_*` variables are ignored but may emit a `secrets.unknown_env_var` log event. API-key values must be **hash strings**, not raw keys.
 
 ---
 
@@ -292,7 +376,7 @@ The container's `HEALTHCHECK` runs `wget --spider http://localhost:8080/health`.
 | `make up` | `docker compose up -d --build` |
 | `make down` | `docker compose down` |
 | `make test` | Run unit tests only |
-| `make integrationtest` | Build the test image and run integration tests |
+| `make integrationtest` | Install dev/test deps, build the test image, and run integration tests |
 | `make clean-test` | Remove test artifacts and containers |
 
 ---
@@ -498,6 +582,30 @@ Prometheus metrics are exposed at `GET /metrics` (also reachable through the Tra
 
 Structured JSONL logs are written to `LOG_DIR` (default `/logs`). Each entry includes `timestamp` (ISO 8601 UTC), `log_level`, `log_format_version`, `event`, `request_id` (correlation ID from `X-Request-ID` or generated), `source_ip`, `api_key_name`, `server_name`, `command`, `allowed`, `reason`, `matched_via`, `execution_time_ms`, `exit_code`, and optionally `output` (truncated to `max_log_output` characters). Command-execution entries also carry `sudo`. Files rotate at 10 MB keeping 5 backups; rotated files are gzipped when `compress_rotated` is enabled.
 
+User-controlled `command`, `server_name`, and remote-path fields are newline-sanitized before logging — any run of `\r`/`\n` is collapsed to a single space, so a malicious value cannot forge or inject a spurious JSONL record.
+
+#### 4.8.1 Configuration change / hot-reload events
+
+Configuration lifecycle and hot-reload activity is logged through the following `event` names (all entries carry `config_path`):
+
+| Event | Meaning | Extra fields |
+|---|---|---|
+| `config.load` | Initial config loaded at startup | `target_count` |
+| `config.reload` | Config re-read from disk (hot-reload) | `success`, `trigger` (`manual`/`watchdog`/`polling`), `changed`, `changed_keys`, `targets_added`, `targets_removed`, `target_count` |
+| `config.watcher.start` | Watcher started | `mode` (`watchdog`/`polling`), `polling_interval` |
+| `config.watcher.stop` | Watcher stopped | `mode` |
+| `config.watcher.debounced` | Change ignored inside debounce window | — |
+| `config.watcher.reload_triggered` | Watchdog detected a change and is about to reload | — |
+| `config.watcher.file_missing` | Polling watcher found the config file missing | — |
+| `config.default_created` | Bundled `default-config.json` copied to the config dir | `source` |
+| `config.fallback` | Server fell back to the bundled default config | `config_dir`, `config_path` |
+| `config.migrated` | Config schema migration applied on load | `success`, `from_version`, `to_version` |
+| `config.callback_error` | A registered config-change callback raised an exception | `error` |
+
+Only key names and counts are logged for `config.reload` — secret values (passwords, private keys, key hashes) are never written to the log.
+
+Config-change callbacks (`config_manager.on_config_change(...)`) run only **after** a successful reload has atomically swapped in the new data, so every callback observes the freshly committed configuration, never a partially-updated or stale state. Each callback runs in isolation: if one raises, the failure is logged as a `config.callback_error` event and the reload itself is not aborted nor are the remaining callbacks blocked. The current subscribers are the **authorization manager** (which rebuilds its rules snapshot) and the **SSH connection pool** (which closes idle connections for removed targets and refreshes those whose configuration changed).
+
 ---
 
 ## Additional Resources
@@ -506,6 +614,7 @@ Structured JSONL logs are written to `LOG_DIR` (default `/logs`). Each entry inc
 - [`compose.yaml`](compose.yaml) — Docker Compose deployment with Traefik labels
 - [`Dockerfile`](Dockerfile) — multi-stage build, non-root runtime, SBOM stage
 - [`default-config.json`](default-config.json) — bundled default configuration
+- [`config.schema.json`](config.schema.json) — JSON Schema (Draft 2020-12) describing the config file format
 - [`plans/`](plans/) — architecture, security, and feature plans (including planned improvements listed in §1)
 
 ## License

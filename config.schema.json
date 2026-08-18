@@ -1,0 +1,282 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "./config.schema.json",
+  "title": "mcp-ssh configuration",
+  "description": "JSON Schema (Draft 2020-12) for the mcp-ssh configuration file. This schema mirrors the strict validation performed by ``ConfigManager._validate`` in lib/config.py. Note: a few runtime-only constraints cannot be fully expressed in JSON Schema and are enforced at load time (e.g. regex validity of block_patterns, CIDR overlap between networks, and rule targets referencing an existing ssh_target).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "ssh_targets",
+    "allowed_commands",
+    "settings"
+  ],
+  "properties": {
+    "version": {
+      "description": "Config schema version. Only version 1 is currently supported.",
+      "const": 1
+    },
+    "ssh_targets": {
+      "description": "Map of SSH target identifiers to their connection settings. Must be non-empty.",
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/sshTarget"
+      }
+    },
+    "block_patterns": {
+      "description": "Regular expressions that deny a command if matched. Each entry must be a valid regex (validity is enforced at load time).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "allowed_commands": {
+      "description": "Layered command authorization rules: default rules for all clients, plus per-API-key and per-network rules.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "default",
+        "api_keys",
+        "networks"
+      ],
+      "properties": {
+        "default": {
+          "description": "Rules applied to every client. Must be a non-empty list.",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/rule"
+          }
+        },
+        "api_keys": {
+          "description": "Per-API-key rules. Empty list is allowed.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/apiKey"
+          }
+        },
+        "networks": {
+          "description": "Per-source-CIDR rules. Empty list is allowed; overlapping ranges are rejected at load time.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/network"
+          }
+        }
+      }
+    },
+    "settings": {
+      "$ref": "#/$defs/settings"
+    }
+  },
+  "$defs": {
+    "sshTarget": {
+      "description": "Connection settings for a single SSH target. At least one of private_key or password must be provided (enforced at load time).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "host",
+        "username"
+      ],
+      "properties": {
+        "host": {
+          "type": "string",
+          "minLength": 1
+        },
+        "port": {
+          "description": "TCP port. Defaults to 22 when omitted.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 22
+        },
+        "username": {
+          "type": "string",
+          "minLength": 1
+        },
+        "private_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "password": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "rule": {
+      "description": "A command-allowance rule: a list of targets and the commands permitted on them.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "targets",
+        "commands"
+      ],
+      "properties": {
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "commands": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "apiKey": {
+      "description": "A named API key with its own set of command rules. key_hash must be 'sha256:<64 hex>' or 'pbkdf2:sha256:<iter>$<salt>$<64 hex>'.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "key_hash",
+        "rules"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "key_hash": {
+          "type": "string",
+          "pattern": "^(sha256:[a-f0-9]{64}|pbkdf2:sha256:[0-9]+\\$[a-f0-9]+\\$[a-f0-9]{64})$"
+        },
+        "rules": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/rule"
+          }
+        }
+      }
+    },
+    "network": {
+      "description": "A source CIDR range with its own set of command rules.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "range",
+        "rules"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "range": {
+          "description": "IPv4 or IPv6 CIDR (e.g. '10.0.0.0/8'). Validity is enforced at load time.",
+          "type": "string"
+        },
+        "rules": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/rule"
+          }
+        }
+      }
+    },
+    "settings": {
+      "description": "Runtime settings. All keys are optional; unspecified keys fall back to bundled defaults.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_output_length": {
+          "description": "Maximum length of command output returned to LLMs. An integer byte count or a size string (b/kb/mb/gb, case-insensitive, e.g. '50kb').",
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "string",
+              "pattern": "^\\s*\\d+\\s*((?i)b|(?i)kb|(?i)mb|(?i)gb)?\\s*$"
+            }
+          ]
+        },
+        "command_timeout_max": {
+          "description": "Maximum timeout (seconds) for remote command execution.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "retry_max_attempts": {
+          "description": "Maximum number of SSH connection attempts (including the first).",
+          "type": "integer",
+          "minimum": 1
+        },
+        "retry_backoff_base_seconds": {
+          "description": "Base delay (seconds) for exponential backoff between SSH retries.",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "circuit_breaker_failure_threshold": {
+          "description": "Consecutive per-target failures before the circuit opens.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "circuit_breaker_timeout_seconds": {
+          "description": "Time (seconds) an open circuit waits before allowing a half-open probe.",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "log_level": {
+          "description": "Logging level. One of: DEBUG, INFO, WARNING, ERROR, CRITICAL.",
+          "type": "string",
+          "enum": [
+            "DEBUG",
+            "INFO",
+            "WARNING",
+            "ERROR",
+            "CRITICAL"
+          ]
+        },
+        "max_log_output": {
+          "description": "Maximum number of output characters stored in a log entry.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "compress_rotated": {
+          "description": "Whether rotated log files are gzip-compressed.",
+          "type": "boolean"
+        },
+        "pool_max_connections_per_target": {
+          "description": "Maximum number of idle connections kept per SSH target.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "pool_idle_timeout_seconds": {
+          "description": "Time (seconds) an idle pooled connection is kept before eviction.",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "pool_cleanup_interval_seconds": {
+          "description": "Interval (seconds) between idle-cleanup sweeps of the pool.",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "max_concurrent_ssh_connections": {
+          "description": "Global maximum number of concurrently checked-out SSH connections across all targets. Excess acquisitions are rejected with an HTTP 503 Service Unavailable response rather than queued.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "watcher_debounce_seconds": {
+          "description": "Minimum delay (seconds) between config reloads on file change. 0 disables debouncing.",
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}
