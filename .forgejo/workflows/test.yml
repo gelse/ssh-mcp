@@ -20,5 +20,8 @@ jobs:
       - name: Install runtime dependencies (hash-pinned)
         run: pip install --no-cache-dir --require-hashes -r requirements.txt
 
+      - name: Install test dependencies
+        run: pip install --no-cache-dir pytest
+
       - name: Run unit tests
-        run: make test
+        run: python -m pytest tests/ -v --ignore=tests/integration/

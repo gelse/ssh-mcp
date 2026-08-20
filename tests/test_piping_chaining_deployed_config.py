@@ -51,6 +51,9 @@ def deployed_auth_manager(tmp_path_factory: pytest.TempPathFactory) -> Authoriza
     and all production sources stay untouched.  The return value mirrors
     ``tests/test_auth.py::_make_auth_manager``.
     """
+    if not _DEPLOYED_CONFIG_PATH.is_file():
+        pytest.skip(f"deployed config not found at {_DEPLOYED_CONFIG_PATH}; skipping")
+
     with _DEPLOYED_CONFIG_PATH.open(encoding="utf-8") as fh:
         deployed_cfg = json.load(fh)
 

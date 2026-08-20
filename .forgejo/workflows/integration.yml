@@ -28,9 +28,20 @@ jobs:
       - name: Install runtime dependencies (hash-pinned)
         run: pip install --no-cache-dir --require-hashes -r requirements.txt
 
+      - name: Build test image
+        run: docker build -t mcp-ssh:test .
+
+      - name: Install dev dependencies
+        run: pip install --no-cache-dir --require-hashes -r requirements-dev.txt
+
+      - name: Install test dependencies
+        run: pip install --no-cache-dir pytest
+
       - name: Run integration tests
-        run: make integrationtest
+        run: python -m pytest tests/integration/ -v
 
       - name: Clean up test containers and network
         if: always()
-        run: make clean-test
+        run: |
+          docker rm -f mcp-ssh-test-app mcp-ssh-test-ssh 2>/dev/null || true
+          docker network rm mcp-ssh-test-net 2>/dev/null || true
