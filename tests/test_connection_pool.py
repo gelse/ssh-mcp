@@ -119,7 +119,11 @@ class TestConstruction:
         )
 
     def test_negative_values_clamped(self, manager: FakeManager):
-        p = SSHConnectionPool(manager, max_connections_per_target=0, idle_timeout_seconds=-5)  # type: ignore[arg-type]
+        p = SSHConnectionPool(
+            manager,
+            max_connections_per_target=0,
+            idle_timeout_seconds=-5,  # type: ignore[arg-type]
+        )
         assert p._max_connections_per_target == 1
         assert p._idle_timeout_seconds == 0.0
 
@@ -154,7 +158,9 @@ class TestConstruction:
 class TestGetConnection:
     """get_connection creates or reuses per-target connections."""
 
-    def test_creates_new_connection_when_idle_empty(self, pool: SSHConnectionPool, manager: FakeManager):
+    def test_creates_new_connection_when_idle_empty(
+        self, pool: SSHConnectionPool, manager: FakeManager
+    ):
         client = pool.get_connection(TARGET)
         assert client is manager.clients[0]
         assert manager.calls == [TARGET_DICT]
@@ -180,7 +186,9 @@ class TestGetConnection:
         assert second is first
         assert first.transport.ignore_calls >= 1
 
-    def test_unhealthy_idle_connection_closed_and_skipped(self, pool: SSHConnectionPool, manager: FakeManager):
+    def test_unhealthy_idle_connection_closed_and_skipped(
+        self, pool: SSHConnectionPool, manager: FakeManager
+    ):
         first = pool.get_connection(TARGET)
         pool.return_connection(TARGET, first)
         # Kill the pooled client's transport so the health check fails.
@@ -192,7 +200,9 @@ class TestGetConnection:
         assert len(manager.clients) == 2
         assert pool._created_by_target[TARGET] == 2
 
-    def test_all_unhealthy_idle_connections_dropped(self, pool: SSHConnectionPool, manager: FakeManager):
+    def test_all_unhealthy_idle_connections_dropped(
+        self, pool: SSHConnectionPool, manager: FakeManager
+    ):
         first = pool.get_connection(TARGET)
         pool.return_connection(TARGET, first)
         first.transport._active = False
@@ -202,7 +212,9 @@ class TestGetConnection:
         assert first.closed is True
         assert len(pool._idle_by_target[TARGET]) == 0
 
-    def test_creates_fresh_connection_after_closing_stale(self, pool: SSHConnectionPool, manager: FakeManager):
+    def test_creates_fresh_connection_after_closing_stale(
+        self, pool: SSHConnectionPool, manager: FakeManager
+    ):
         first = pool.get_connection(TARGET)
         pool.return_connection(TARGET, first)
         first.transport._active = False
@@ -293,7 +305,9 @@ class TestMaxConcurrency:
 class TestReturnConnection:
     """return_connection pools healthy clients and closes the rest."""
 
-    def test_returns_healthy_connection_to_idle(self, pool: SSHConnectionPool, manager: FakeManager):
+    def test_returns_healthy_connection_to_idle(
+        self, pool: SSHConnectionPool, manager: FakeManager
+    ):
         client = pool.get_connection(TARGET)
         pool.return_connection(TARGET, client)
         assert pool._active_by_target[TARGET] == 0
@@ -348,7 +362,14 @@ class TestIdleCleanup:
         pool.return_connection(TARGET, client)
         entry = pool._idle_by_target[TARGET][0]
         # Age the entry beyond the idle timeout.
-        with patch("lib.connection_pool.time.monotonic", return_value=entry.last_used_at + pool._idle_timeout_seconds + 1):
+        with patch(
+            "lib.connection_pool.time.monotonic",
+            return_value=(
+                entry.last_used_at
+                + pool._idle_timeout_seconds
+                + 1
+            ),
+        ):
             pool._cleanup_idle()
         assert len(pool._idle_by_target[TARGET]) == 0
         assert client.closed is True
@@ -357,7 +378,14 @@ class TestIdleCleanup:
         client = pool.get_connection(TARGET)
         pool.return_connection(TARGET, client)
         entry = pool._idle_by_target[TARGET][0]
-        with patch("lib.connection_pool.time.monotonic", return_value=entry.last_used_at + pool._idle_timeout_seconds - 1):
+        with patch(
+            "lib.connection_pool.time.monotonic",
+            return_value=(
+                entry.last_used_at
+                + pool._idle_timeout_seconds
+                - 1
+            ),
+        ):
             pool._cleanup_idle()
         assert len(pool._idle_by_target[TARGET]) == 1
         assert client.closed is False
@@ -468,7 +496,9 @@ class TestCloseAllAndLifecycle:
         # The active client is still tracked so stop() can release it later.
         assert pool._active_clients_by_target[TARGET] == {active}
 
-    def test_close_all_include_active_closes_checked_out(self, pool: SSHConnectionPool, manager: FakeManager):
+    def test_close_all_include_active_closes_checked_out(
+        self, pool: SSHConnectionPool, manager: FakeManager
+    ):
         """close_all(include_active=True) closes both idle and active clients."""
         active = pool.get_connection(TARGET)
         idle = pool.get_connection(TARGET)
@@ -489,7 +519,9 @@ class TestCloseAllAndLifecycle:
         assert idle.closed is True
         assert pool._active_clients_by_target[TARGET] == set()
 
-    def test_return_connection_removes_from_active_set(self, pool: SSHConnectionPool, manager: FakeManager):
+    def test_return_connection_removes_from_active_set(
+        self, pool: SSHConnectionPool, manager: FakeManager
+    ):
         """return_connection() drops a client from the active set when pooled or closed."""
         client = pool.get_connection(TARGET)
         assert client in pool._active_clients_by_target[TARGET]

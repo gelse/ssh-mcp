@@ -17,9 +17,10 @@
       "const": 1
     },
     "ssh_targets": {
-      "description": "Map of SSH target identifiers to their connection settings. Must be non-empty.",
+      "description": "Map of SSH target identifiers to their connection settings. Must be non-empty. Count is enforced at load time (see MAX_TARGETS).",
       "type": "object",
       "minProperties": 1,
+      "maxProperties": 1000,
       "propertyNames": {
         "minLength": 1
       },
@@ -28,12 +29,14 @@
       }
     },
     "block_patterns": {
-      "description": "Regular expressions that deny a command if matched. Each entry must be a valid regex (validity is enforced at load time).",
+      "description": "Regular expressions that deny a command if matched. Each entry must be a valid regex and must not contain ReDoS-prone constructs such as nested quantifiers (validity and ReDoS risk are enforced at load time). Count and pattern length are enforced at load time.",
       "type": "array",
       "items": {
-        "type": "string"
+        "type": "string",
+        "maxLength": 10000
       },
-      "default": []
+      "default": [],
+      "maxItems": 500
     },
     "allowed_commands": {
       "description": "Layered command authorization rules: default rules for all clients, plus per-API-key and per-network rules.",
@@ -275,6 +278,32 @@
           "description": "Minimum delay (seconds) between config reloads on file change. 0 disables debouncing.",
           "type": "number",
           "minimum": 0
+        },
+        "trusted_proxies": {
+          "description": "Optional list of trusted reverse-proxy IP addresses. When non-empty, the X-Forwarded-For header is only honored when the direct connection peer is in this list. An empty list (default) means no proxy is trusted and the header is ignored entirely. Entries must be valid IP addresses (IPv4, IPv6, or IPv4-mapped IPv6).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "sftp": {
+          "description": "SFTP file-transfer settings.",
+          "type": "object",
+          "properties": {
+            "sandbox_root": {
+              "description": "Root directory that constrains all SFTP paths via realpath. '/' means unrestricted.",
+              "type": "string",
+              "default": "/"
+            },
+            "max_path_length": {
+              "description": "Maximum allowed length (bytes) for SFTP remote paths. 0 disables the check.",
+              "type": "integer",
+              "default": 4096,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
         }
       }
     }

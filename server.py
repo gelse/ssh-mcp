@@ -17,6 +17,7 @@ import signal
 import socket
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -41,6 +42,7 @@ from lib.constants import (
     DEFAULT_MAX_LOG_OUTPUT,
     DEFAULT_MAX_OUTPUT_LENGTH,
     DEFAULT_MAX_CONCURRENT_SSH_CONNECTIONS,
+    DEFAULT_MAX_SFTP_PATH_LENGTH,
     DEFAULT_POOL_CLEANUP_INTERVAL_SECONDS,
     DEFAULT_POOL_IDLE_TIMEOUT_SECONDS,
     DEFAULT_POOL_MAX_CONNECTIONS_PER_TARGET,
@@ -49,9 +51,11 @@ from lib.constants import (
     DEFAULT_RETRY_BACKOFF_BASE_SECONDS,
     DEFAULT_RETRY_MAX_ATTEMPTS,
     DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
+    DEFAULT_SFTP_SANDBOX_ROOT,
     DEFAULT_SSH_EXECUTOR_MAX_WORKERS,
     DEFAULT_SSH_KEY_FILENAME,
     DEFAULT_SSH_PORT,
+    DEFAULT_TRUSTED_PROXIES,
     DEFAULT_WATCHER_INTERVAL_SECONDS,
     HTTP_SERVICE_UNAVAILABLE,
     LOG_FORMAT_VERSION,
@@ -93,7 +97,7 @@ from lib.sudo import SudoHandler
 from lib.sanitize import (
     sanitize_command,
     sanitize_log_string,
-    sanitize_server_name,
+    sanitize_target_name,
 )
 
 
@@ -156,7 +160,12 @@ def _graceful_shutdown(state: SimpleNamespace, timeout: float) -> None:
         file_logger.close()
 
 
-def _run_server(app: FastMCP, rate_limiter: RateLimiter | None = None) -> None:
+def _run_server(
+    app: FastMCP,
+    rate_limiter: RateLimiter | None = None,
+    trusted_proxies: list[str] | None = None,
+    trusted_proxies_provider: Callable[[], list[str]] | None = None,
+) -> None:
     """Run the MCP streamable-HTTP server and handle graceful shutdown.
 
     Launches ``app.run_http_async(...)`` as an asyncio task and installs
@@ -168,6 +177,14 @@ def _run_server(app: FastMCP, rate_limiter: RateLimiter | None = None) -> None:
         app: The FastMCP application returned by :func:`create_app`.
         rate_limiter: The per-IP rate limiter to wire into the request
             middleware (attach to ``app.state`` when present).
+        trusted_proxies: IPs of reverse proxies trusted for
+            ``X-Forwarded-For`` resolution (attach to ``app.state`` when
+            present).  Used as a static fallback only when
+            ``trusted_proxies_provider`` is not given.
+        trusted_proxies_provider: Optional zero-argument callable returning
+            the live trusted-proxy list, read from the hot-reloaded config
+            manager so config changes take effect without a restart.  Takes
+            precedence over the static *trusted_proxies* list.
     """
     async def _serve() -> None:
         loop = asyncio.get_running_loop()
@@ -192,7 +209,10 @@ def _run_server(app: FastMCP, rate_limiter: RateLimiter | None = None) -> None:
                 path="/mcp",
                 middleware=[
                     Middleware(
-                        RequestContextMiddleware, rate_limiter=rate_limiter
+                        RequestContextMiddleware,
+                        rate_limiter=rate_limiter,
+                        trusted_proxies=trusted_proxies,
+                        trusted_proxies_provider=trusted_proxies_provider,
                     ),
                 ],
             )
@@ -410,7 +430,11 @@ def create_app(
         max_workers=DEFAULT_SSH_EXECUTOR_MAX_WORKERS,
         thread_name_prefix="ssh-executor",
     )
-    file_transfer_service = FileTransferService()
+    sftp_settings = config_manager.data.get("settings", {}).get("sftp", {})
+    file_transfer_service = FileTransferService(
+        sandbox_root=sftp_settings.get("sandbox_root", DEFAULT_SFTP_SANDBOX_ROOT),
+        max_path_length=sftp_settings.get("max_path_length", DEFAULT_MAX_SFTP_PATH_LENGTH),
+    )
 
     # --- Emit startup log entry ---
     file_logger.log({
@@ -440,15 +464,19 @@ def create_app(
     # --- Store runtime objects for use in main() middleware wiring and
     # graceful shutdown. ---
     # fastmcp 3.4.x does not define a ``state`` attribute on FastMCP, so we
-    # attach a lightweight namespace to carry the rate limiter, the SSH
-    # executor, the connection pool, the config manager, and the file
-    # logger to main().
+    # attach a lightweight namespace to carry the rate limiter, the trusted
+    # proxy list, the SSH executor, the connection pool, the config manager,
+    # and the file logger to main().
     shutdown_timeout = config_manager.data.get("settings", {}).get(
         "shutdown_timeout_seconds", DEFAULT_SHUTDOWN_TIMEOUT_SECONDS
+    )
+    trusted_proxies = settings.get(
+        "trusted_proxies", DEFAULT_TRUSTED_PROXIES
     )
 
     mcp.state = SimpleNamespace(  # type: ignore[attr-defined]
         rate_limiter=rate_limiter,
+        trusted_proxies=trusted_proxies,
         ssh_executor=ssh_executor,
         ssh_connection_pool=ssh_connection_pool,
         config_manager=config_manager,
@@ -530,18 +558,18 @@ def _register_tools(
                 return entry["name"]
         return "unknown"
 
-    def _build_auth_target(server_name: str) -> tuple[dict, str | None]:
+    def _build_auth_target(target_name: str) -> tuple[dict, str | None]:
         """Build an auth-style target dict and return ``(target, password_or_none)``.
 
         Adapts the flat config format (``private_key`` / ``password`` on
         target) to the structured auth dict expected by
         :meth:`SSHClientManager.get_client`.
         """
-        target = config_manager.get_ssh_target(server_name)
+        target = config_manager.get_ssh_target(target_name)
         if target is None:
             available = ", ".join(config_manager.list_ssh_targets())
             raise SSHConnectionError(
-                f"Server '{server_name}' not found. Available: {available}"
+                f"Server '{target_name}' not found. Available: {available}"
             )
 
         key_path = target.get("private_key") or ssh_key_path
@@ -565,7 +593,7 @@ def _register_tools(
             }
         else:
             raise SSHConnectionError(
-                f"SSH target '{server_name}' has neither a valid key "
+                f"SSH target '{target_name}' has neither a valid key "
                 f"nor a password"
             )
 
@@ -576,14 +604,14 @@ def _register_tools(
     # ------------------------------------------------------------------
 
     def _authorize_command(
-        server_name: str, command: str, sudo: bool
+        target_name: str, command: str, sudo: bool
     ) -> tuple[AuthResult, dict]:
         """Check authorization and build a base log entry.
 
-        The raw *command* and *server_name* are sanitized before the
+        The raw *command* and *target_name* are sanitized before the
         authorization check.  ``sanitize_command`` preserves ``\\n``/``\\r``
         so the downstream dangerous-pattern check can still reject
-        newline/CR injection; ``sanitize_server_name`` enforces the
+        newline/CR injection; ``sanitize_target_name`` enforces the
         ``[a-zA-Z0-9._-]{1,128}`` pattern and raises ``AuthorizationError``
         on invalid input, which the caller formats as a JSON denial.
 
@@ -593,7 +621,7 @@ def _register_tools(
             denial.
         """
         command = sanitize_command(command)
-        server_name = sanitize_server_name(server_name)
+        target_name = sanitize_target_name(target_name)
 
         source_ip = get_client_ip()
         api_key = get_api_key()
@@ -601,12 +629,12 @@ def _register_tools(
 
         auth_result = auth_manager.check_command(
             command=command,
-            target=server_name,
+            target=target_name,
             source_ip=source_ip,
             api_key=api_key,
         )
         log_command = sanitize_log_string(command)
-        log_server_name = sanitize_log_string(server_name)
+        log_target_name = sanitize_log_string(target_name)
         log_entry = {
             "timestamp": datetime.datetime.now(
                 datetime.timezone.utc
@@ -615,7 +643,7 @@ def _register_tools(
             "source_ip": source_ip,
             "api_key_name": api_key_name,
             "command": log_command,
-            "server_name": log_server_name,
+            "target_name": log_target_name,
             "allowed": auth_result.allowed,
             "reason": auth_result.reason,
             "matched_via": auth_result.matched_via,
@@ -627,7 +655,7 @@ def _register_tools(
         return auth_result, log_entry
 
     def _authorize_file_op(
-        server_name: str, verb: str, remote_path: str, event_type: str
+        target_name: str, verb: str, remote_path: str, event_type: str
     ) -> tuple[AuthResult, dict]:
         """Check file-operation authorization and build a base log entry.
 
@@ -635,7 +663,7 @@ def _register_tools(
         ``"tee"`` for upload).  *event_type* labels the log entry
         (``"file.download"`` or ``"file.upload"``).
 
-        The raw *server_name* is sanitized before the authorization check.
+        The raw *target_name* is sanitized before the authorization check.
         ``sanitize_command`` is not applied to *verb* because it is a
         constant string; instead the newline-sanitized *remote_path* is used
         in the log ``command`` field so user-supplied paths cannot poison the
@@ -644,7 +672,7 @@ def _register_tools(
         Returns:
             ``(auth_result, log_entry)``.
         """
-        server_name = sanitize_server_name(server_name)
+        target_name = sanitize_target_name(target_name)
         remote_path_display = sanitize_log_string(remote_path)
 
         source_ip = get_client_ip()
@@ -653,11 +681,11 @@ def _register_tools(
 
         auth_result = auth_manager.check_command(
             command=verb,
-            target=server_name,
+            target=target_name,
             source_ip=source_ip,
             api_key=api_key,
         )
-        log_server_name = sanitize_log_string(server_name)
+        log_target_name = sanitize_log_string(target_name)
         log_entry = {
             "timestamp": datetime.datetime.now(
                 datetime.timezone.utc
@@ -666,7 +694,7 @@ def _register_tools(
             "source_ip": source_ip,
             "api_key_name": api_key_name,
             "command": f"{verb} {remote_path_display}",
-            "server_name": log_server_name,
+            "target_name": log_target_name,
             "allowed": auth_result.allowed,
             "reason": auth_result.reason,
             "matched_via": auth_result.matched_via,
@@ -733,7 +761,7 @@ def _register_tools(
         Records the tool invocation in ``mcpssh_requests_total`` (status
         ``"success"`` for exit code 0, ``"error"`` otherwise) and observes
         ``mcpssh_command_duration_seconds`` using the entry's
-        ``server_name`` as the target label.  When *output* is given it is
+        ``target_name`` as the target label.  When *output* is given it is
         attached to the entry before writing, so the FileLogger can apply
         the configured truncation limit.
         """
@@ -746,7 +774,7 @@ def _register_tools(
         status = "success" if exit_code == 0 else "error"
         REQUESTS_TOTAL.labels(tool=tool_name, status=status).inc()
         COMMAND_DURATION_SECONDS.labels(
-            target=log_entry.get("server_name", "unknown")
+            target=log_entry.get("target_name", "unknown")
         ).observe(elapsed_ms / 1000.0)
         return elapsed_ms
 
@@ -818,12 +846,12 @@ def _register_tools(
             JSON-formatted list of allowed command base names, or error
             message
         """
-        server_name = sanitize_server_name(server_name)
+        target_name = sanitize_target_name(server_name)
         source_ip = get_client_ip()
         api_key = get_api_key()
 
         commands = auth_manager.list_allowed_commands(
-            target=server_name,
+            target=target_name,
             source_ip=source_ip,
             api_key=api_key,
         )
@@ -863,6 +891,7 @@ def _register_tools(
         """
         # --- Sanitize command before any validation/auth/eval ---
         command = sanitize_command(command)
+        target_name = sanitize_target_name(server_name)
 
         # --- Validate sudo usage ---
         sudo_error = SudoHandler.validate_sudo(command, sudo)
@@ -875,14 +904,14 @@ def _register_tools(
 
         # --- Authorization check ---
         auth_result, log_entry = _authorize_command(
-            server_name, command, sudo
+            target_name, command, sudo
         )
 
         if not auth_result.allowed:
             stdlib_logger.warning(
                 "AUTH DENIED: target=%s command=%s sudo=%s source_ip=%s "
                 "matched_via=%s reason=%s",
-                server_name,
+                target_name,
                 command,
                 sudo,
                 log_entry["source_ip"],
@@ -914,7 +943,7 @@ def _register_tools(
         stdlib_logger.info(
             "AUTH ALLOWED: target=%s command=%s sudo=%s source_ip=%s "
             "matched_via=%s",
-            server_name,
+            target_name,
             command,
             sudo,
             log_entry["source_ip"],
@@ -948,7 +977,7 @@ def _register_tools(
         start_time = time.monotonic()
         try:
             def _ssh_operation() -> str:
-                auth_target, sudo_password = _build_auth_target(server_name)
+                auth_target, sudo_password = _build_auth_target(target_name)
                 with ssh_client_manager.connect(auth_target) as client:
                     actual_command = SudoHandler.wrap_sudo_command(
                         command, sudo, sudo_password
@@ -1001,15 +1030,17 @@ def _register_tools(
         Returns:
             File contents as a string, or auth denial reason
         """
+        target_name = sanitize_target_name(server_name)
+
         auth_result, log_entry = _authorize_file_op(
-            server_name, "cat", remote_path, "file.download"
+            target_name, "cat", remote_path, "file.download"
         )
 
         if not auth_result.allowed:
             stdlib_logger.warning(
                 "AUTH DENIED (download): target=%s path=%s source_ip=%s "
                 "matched_via=%s",
-                server_name,
+                target_name,
                 remote_path,
                 log_entry["source_ip"],
                 auth_result.matched_via,
@@ -1038,7 +1069,7 @@ def _register_tools(
 
         stdlib_logger.info(
             "AUTH ALLOWED (download): target=%s path=%s matched_via=%s",
-            server_name,
+            target_name,
             remote_path,
             auth_result.matched_via,
         )
@@ -1057,7 +1088,7 @@ def _register_tools(
         start_time = time.monotonic()
         try:
             def _ssh_operation() -> str:
-                auth_target, _ = _build_auth_target(server_name)
+                auth_target, _ = _build_auth_target(target_name)
                 with ssh_client_manager.connect(auth_target) as client:
                     _filename, content_bytes = (
                         file_transfer_service.download_file(
@@ -1117,15 +1148,17 @@ def _register_tools(
         Returns:
             Success message or auth denial reason
         """
+        target_name = sanitize_target_name(server_name)
+
         auth_result, log_entry = _authorize_file_op(
-            server_name, "tee", remote_path, "file.upload"
+            target_name, "tee", remote_path, "file.upload"
         )
 
         if not auth_result.allowed:
             stdlib_logger.warning(
                 "AUTH DENIED (upload): target=%s path=%s source_ip=%s "
                 "matched_via=%s",
-                server_name,
+                target_name,
                 remote_path,
                 log_entry["source_ip"],
                 auth_result.matched_via,
@@ -1154,7 +1187,7 @@ def _register_tools(
 
         stdlib_logger.info(
             "AUTH ALLOWED (upload): target=%s path=%s matched_via=%s",
-            server_name,
+            target_name,
             remote_path,
             auth_result.matched_via,
         )
@@ -1166,19 +1199,6 @@ def _register_tools(
             }
         )
 
-        # --- Validate upload path ---
-        if not (
-            remote_path.startswith("/tmp/")
-            or remote_path.startswith("/home/")
-        ):
-            return json.dumps(
-                _format_error(
-                    PathValidationError(
-                        "Upload only allowed to /tmp/ or /home/ paths"
-                    )
-                )
-            )
-
         # --- Execute upload ---
         # The SSH round-trip is blocking, so it runs on the dedicated
         # ``ssh_executor`` thread pool; ``.result()`` re-raises any tool
@@ -1186,7 +1206,7 @@ def _register_tools(
         start_time = time.monotonic()
         try:
             def _ssh_operation() -> str:
-                auth_target, _ = _build_auth_target(server_name)
+                auth_target, _ = _build_auth_target(target_name)
                 with ssh_client_manager.connect(auth_target) as client:
                     content_bytes = content.encode("utf-8")
                     file_transfer_service.upload_file(
@@ -1311,7 +1331,22 @@ def main() -> None:
     )
 
     rate_limiter = getattr(app.state, "rate_limiter", None)
-    _run_server(app, rate_limiter=rate_limiter)
+    trusted_proxies = getattr(app.state, "trusted_proxies", DEFAULT_TRUSTED_PROXIES)
+    config_manager = getattr(app.state, "config_manager", None)
+
+    def _trusted_proxies_provider() -> list[str]:
+        """Read the live trusted-proxy list from the hot-reloaded config."""
+        if config_manager is None:
+            return trusted_proxies
+        settings = config_manager.data.get("settings", {})
+        return settings.get("trusted_proxies", DEFAULT_TRUSTED_PROXIES)
+
+    _run_server(
+        app,
+        rate_limiter=rate_limiter,
+        trusted_proxies=trusted_proxies,
+        trusted_proxies_provider=_trusted_proxies_provider,
+    )
 
 
 if __name__ == "__main__":

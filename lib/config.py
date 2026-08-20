@@ -40,13 +40,21 @@ from lib.constants import (
     DEFAULT_RETRY_BACKOFF_BASE_SECONDS,
     DEFAULT_RETRY_MAX_ATTEMPTS,
     DEFAULT_SSH_PORT,
+    DEFAULT_TRUSTED_PROXIES,
+    DEFAULT_MAX_SFTP_PATH_LENGTH,
+    DEFAULT_SFTP_SANDBOX_ROOT,
     DEFAULT_WATCHER_DEBOUNCE_SECONDS,
     DEFAULT_WATCHER_INTERVAL_SECONDS,
     LATEST_CONFIG_VERSION,
     LOG_FORMAT_VERSION,
     LOG_LEVELS,
+    MAX_BLOCK_PATTERNS,
+    MAX_REGEX_PATTERN_LENGTH,
+    MAX_TARGET_NAME_LENGTH,
+    MAX_TARGETS,
     MCP_SSH_SETTING_PREFIX,
     RESTRICTED_FILE_MODE,
+    TARGET_NAME_PATTERN,
     SETTING_KEY_TYPES,
 )
 from lib.exceptions import (
@@ -54,6 +62,7 @@ from lib.exceptions import (
     ConfigValidationError,
     SecretsError,
 )
+from lib.redos_protection import check_redos_risk, compile_safe_pattern
 from lib.secrets import SecretsManager
 from lib.size_utils import parse_size_bytes
 from lib.types import SSHTarget
@@ -511,6 +520,23 @@ class ConfigManager:
         return value
 
     @staticmethod
+    def _normalize_trusted_proxy(raw: str) -> str | None:
+        """Validate and normalize a trusted-proxy IP string.
+
+        Parses *raw* with :func:`ipaddress.ip_address` and returns the
+        canonical string form, collapsing IPv4-mapped IPv6 addresses
+        (``::ffff:192.168.1.1``) to plain IPv4 (``192.168.1.1``).  Returns
+        ``None`` when *raw* is not a valid IP address at all.
+        """
+        try:
+            addr = ipaddress.ip_address(raw)
+        except ValueError:
+            return None
+        if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+            return str(addr.ipv4_mapped)
+        return str(addr)
+
+    @staticmethod
     def _normalize_max_output_length(value: object) -> int:
         """Normalize ``settings.max_output_length`` to a positive byte count.
 
@@ -960,9 +986,35 @@ class ConfigManager:
                 field="ssh_targets",
             )
 
+        if len(ssh_targets_raw) > MAX_TARGETS:
+            raise ConfigValidationError(
+                f"ssh_targets must not exceed {MAX_TARGETS} entries "
+                f"(found {len(ssh_targets_raw)})",
+                field="ssh_targets",
+            )
+
         ssh_targets = {}
         ALLOWED_TARGET_KEYS = {"host", "port", "username", "private_key", "password"}
         for tid, tdef in ssh_targets_raw.items():
+            # Validate server name format -- the value is never logged so an
+            # invalid/poisoned name cannot leak into logs or error messages.
+            if not isinstance(tid, str):
+                raise ConfigValidationError(
+                    "ssh_targets: server name must be a string",
+                    field="ssh_targets",
+                )
+            if len(tid) > MAX_TARGET_NAME_LENGTH:
+                raise ConfigValidationError(
+                    "ssh_targets: target name exceeds maximum length of "
+                    f"{MAX_TARGET_NAME_LENGTH} characters",
+                    field="ssh_targets",
+                )
+            if not re.fullmatch(TARGET_NAME_PATTERN, tid):
+                raise ConfigValidationError(
+                    "ssh_targets: target name contains invalid characters. "
+                    "Allowed pattern: letters, digits, '.', '_', '-'",
+                    field="ssh_targets",
+                )
             if not isinstance(tdef, dict):
                 raise ConfigValidationError(
                     "ssh_target must be an object",
@@ -1005,7 +1057,10 @@ class ConfigManager:
                     "at least one of 'private_key' or 'password' must be non-empty",
                     field=f"ssh_targets.{tid}",
                 )
-            if "private_key" in tdef and (not isinstance(private_key, str) or private_key.strip() == ""):
+            if "private_key" in tdef and (
+                not isinstance(private_key, str)
+                or private_key.strip() == ""
+            ):
                 raise ConfigValidationError(
                     "'private_key'/'password' must be a non-empty string",
                     field=f"ssh_targets.{tid}.private_key",
@@ -1037,14 +1092,35 @@ class ConfigManager:
                 "'block_patterns' must be a list of strings",
                 field="block_patterns",
             )
+        if len(block_patterns_raw) > MAX_BLOCK_PATTERNS:
+            raise ConfigValidationError(
+                f"block_patterns must not exceed {MAX_BLOCK_PATTERNS} entries "
+                f"(found {len(block_patterns_raw)})",
+                field="block_patterns",
+            )
         for idx, pat in enumerate(block_patterns_raw):
             if not isinstance(pat, str):
                 raise ConfigValidationError(
                     "'block_patterns' entries must be strings",
                     field=f"block_patterns[{idx}]",
                 )
+            if len(pat) > MAX_REGEX_PATTERN_LENGTH:
+                raise ConfigValidationError(
+                    f"block_patterns entry exceeds {MAX_REGEX_PATTERN_LENGTH} "
+                    f"character limit (found {len(pat)})",
+                    field=f"block_patterns[{idx}]",
+                )
+            risk_reason = check_redos_risk(pat)
+            if risk_reason:
+                raise ConfigValidationError(
+                    f"block_patterns entry has potential ReDoS risk: "
+                    f"{risk_reason}",
+                    field=f"block_patterns[{idx}]",
+                )
             try:
-                re.compile(pat)
+                # Compile with re.LIMITED_TIME (if available) so the engine
+                # itself enforces a time bound on matching.
+                compile_safe_pattern(pat)
             except re.error:
                 raise ConfigValidationError(
                     "block_patterns entry is not a valid regex",
@@ -1202,6 +1278,8 @@ class ConfigManager:
             "pool_cleanup_interval_seconds",
             "max_concurrent_ssh_connections",
             "watcher_debounce_seconds",
+            "trusted_proxies",
+            "sftp",
         }
         for sk in settings_raw:
             if sk not in ALLOWED_SETTINGS:
@@ -1353,6 +1431,54 @@ class ConfigManager:
                 field="settings.watcher_debounce_seconds",
             )
 
+        # Optional trusted proxy list for X-Forwarded-For resolution.
+        trusted_proxies_raw = settings_raw.get(
+            "trusted_proxies", DEFAULT_TRUSTED_PROXIES
+        )
+        if not isinstance(trusted_proxies_raw, list):
+            raise ConfigValidationError(
+                "'settings.trusted_proxies' must be a list",
+                field="settings.trusted_proxies",
+            )
+        trusted_proxies: list[str] = []
+        for idx, entry in enumerate(trusted_proxies_raw):
+            if not isinstance(entry, str) or not entry.strip():
+                raise ConfigValidationError(
+                    "'settings.trusted_proxies' entries must be non-empty strings",
+                    field=f"settings.trusted_proxies[{idx}]",
+                )
+            normalized = ConfigManager._normalize_trusted_proxy(entry.strip())
+            if normalized is None:
+                raise ConfigValidationError(
+                    "'settings.trusted_proxies' entries must be valid IP addresses",
+                    field=f"settings.trusted_proxies[{idx}]",
+                )
+            trusted_proxies.append(normalized)
+
+        # --- SFTP settings ---
+        sftp_raw = settings_raw.get("sftp", {})
+        if not isinstance(sftp_raw, dict):
+            raise ConfigValidationError(
+                "'settings.sftp' must be an object",
+                field="settings.sftp",
+            )
+        sandbox_root = sftp_raw.get(
+            "sandbox_root", DEFAULT_SFTP_SANDBOX_ROOT
+        )
+        if not isinstance(sandbox_root, str):
+            raise ConfigValidationError(
+                "'settings.sftp.sandbox_root' must be a string",
+                field="settings.sftp.sandbox_root",
+            )
+        max_path_length = sftp_raw.get(
+            "max_path_length", DEFAULT_MAX_SFTP_PATH_LENGTH
+        )
+        if not isinstance(max_path_length, int) or max_path_length < 0:
+            raise ConfigValidationError(
+                "'settings.sftp.max_path_length' must be a non-negative integer",
+                field="settings.sftp.max_path_length",
+            )
+
         return {
             "version": version,
             "ssh_targets": ssh_targets,
@@ -1373,6 +1499,11 @@ class ConfigManager:
                 "pool_cleanup_interval_seconds": float(pool_cleanup_interval),
                 "max_concurrent_ssh_connections": max_concurrent_ssh_connections,
                 "watcher_debounce_seconds": float(watcher_debounce_seconds),
+                "trusted_proxies": trusted_proxies,
+                "sftp": {
+                    "sandbox_root": sandbox_root,
+                    "max_path_length": max_path_length,
+                },
             },
         }
 

@@ -1,0 +1,36 @@
+name: integration-tests
+
+on:
+  push:
+    tags:
+      - "release*"
+
+jobs:
+  integration-test:
+    name: integration tests (Docker)
+    runs-on: docker
+    container:
+      image: python:3.13-alpine@sha256:399babc8b49529dabfd9c922f2b5eea81d611e4512e3ed250d75bd2e7683f4b0
+    services:
+      docker:
+        image: docker:dind
+        options: --privileged
+    env:
+      DOCKER_HOST: tcp://docker:2375
+    steps:
+      - name: Install Node.js and Git (required by checkout action)
+        run: apk add --no-cache nodejs git
+
+      - uses: https://code.forgejo.org/actions/checkout@v4
+        with:
+          sslVerify: false
+
+      - name: Install runtime dependencies (hash-pinned)
+        run: pip install --no-cache-dir --require-hashes -r requirements.txt
+
+      - name: Run integration tests
+        run: make integrationtest
+
+      - name: Clean up test containers and network
+        if: always()
+        run: make clean-test

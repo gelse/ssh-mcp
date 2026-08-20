@@ -466,3 +466,93 @@ class TestHardenValidatePath:
         """Double slashes (//) must be normalized by normpath."""
         result = self.service._validate_path("/tmp//file.txt")
         assert result == "/tmp/file.txt"
+
+    # ------------------------------------------------------------------
+    # PathValidationError activation (layer 1-7 errors now use subclass)
+    # ------------------------------------------------------------------
+
+    def test_empty_path_raises_path_validation_error(self):
+        """Empty path must raise PathValidationError, not bare FileTransferError."""
+        from lib.exceptions import PathValidationError
+        with pytest.raises(PathValidationError):
+            self.service._validate_path("")
+
+    def test_relative_path_raises_path_validation_error(self):
+        """Relative path must raise PathValidationError."""
+        from lib.exceptions import PathValidationError
+        with pytest.raises(PathValidationError):
+            self.service._validate_path("relative/file.txt")
+
+    def test_traversal_raises_path_validation_error(self):
+        """Parent-dir traversal must raise PathValidationError."""
+        from lib.exceptions import PathValidationError
+        with pytest.raises(PathValidationError):
+            self.service._validate_path("/tmp/../etc/passwd")
+
+    # ------------------------------------------------------------------
+    # Layer 8 — path length limit
+    # ------------------------------------------------------------------
+
+    def test_path_length_within_limit_allowed(self):
+        """Short path must pass the length check."""
+        short_path = "/tmp/" + "a" * 10 + ".txt"
+        result = self.service._validate_path(short_path)
+        assert result == short_path
+
+    def test_path_length_exceeding_limit_rejected(self):
+        """Path exceeding max_path_length must raise PathValidationError."""
+        from lib.exceptions import PathValidationError
+        long_path = "/tmp/" + "a" * 5000 + ".txt"
+        with pytest.raises(PathValidationError, match="exceeds limit"):
+            self.service._validate_path(long_path)
+
+    def test_custom_path_length_limit(self):
+        """Custom max_path_length must be respected."""
+        from lib.exceptions import PathValidationError
+        service = FileTransferService(max_path_length=20)
+        # 21 chars: /tmp/a...a.txt exceeds limit of 20
+        long_path = "/tmp/" + "a" * 12 + ".txt"
+        with pytest.raises(PathValidationError, match="exceeds limit"):
+            service._validate_path(long_path)
+
+    def test_path_length_check_disabled_when_zero(self):
+        """max_path_length=0 disables the length check."""
+        service = FileTransferService(max_path_length=0)
+        long_path = "/tmp/" + "a" * 10000 + ".txt"
+        result = service._validate_path(long_path)
+        assert result == long_path
+
+    def test_path_length_exact_limit_allowed(self):
+        """Path at exactly max_path_length must pass."""
+        limit = 30
+        service = FileTransferService(max_path_length=limit)
+        # /tmp/file.txt = 13 chars; pad to exactly 30
+        path = "/tmp/" + "a" * (limit - 5 - 4) + ".txt"
+        assert len(path) == limit
+        result = service._validate_path(path)
+        assert result == path
+
+    def test_sandbox_and_path_length_combined(self):
+        """Path inside sandbox but exceeding length limit must still be rejected."""
+        from lib.exceptions import PathValidationError
+        service = FileTransferService(
+            sandbox_root="/tmp", max_path_length=20
+        )
+        long_path = "/tmp/" + "a" * 20 + ".txt"
+        with pytest.raises(PathValidationError, match="exceeds limit"):
+            service._validate_path(long_path)
+
+    # ------------------------------------------------------------------
+    # Constructor wiring
+    # ------------------------------------------------------------------
+
+    def test_default_max_path_length_stored(self):
+        """Default max_path_length must be stored on the instance."""
+        from lib.constants import DEFAULT_MAX_SFTP_PATH_LENGTH
+        service = FileTransferService()
+        assert service.max_path_length == DEFAULT_MAX_SFTP_PATH_LENGTH
+
+    def test_custom_sandbox_root_stored(self):
+        """Custom sandbox_root must be resolved and stored."""
+        service = FileTransferService(sandbox_root="/home/app/sftp")
+        assert "/home/app/sftp" in service._sandbox_root

@@ -45,17 +45,17 @@ class AllowedCommand(TypedDict):
 class AllowedCommandsResult(TypedDict):
     """Return type for the ``ssh_list_allowed_commands`` MCP tool."""
 
-    server_name: str
+    target_name: str
     """The target server for which commands were queried."""
 
     commands: list[AllowedCommand]
-    """Commands the caller is authorised to run on *server_name*."""
+    """Commands the caller is authorised to run on *target_name*."""
 
 
 class CommandResult(TypedDict):
     """Return type for the ``ssh_execute_command`` MCP tool on success."""
 
-    server_name: str
+    target_name: str
     """Target server where the command ran."""
 
     command: str
@@ -77,7 +77,7 @@ class CommandError(TypedDict):
     error: str
     """Human-readable error message."""
 
-    server_name: str
+    target_name: str
     """Target server where the error occurred."""
 
     command: str
@@ -97,7 +97,7 @@ class FileDownloadResult(TypedDict):
 class FileUploadResult(TypedDict):
     """Return type for the ``ssh_upload_file`` MCP tool."""
 
-    server_name: str
+    target_name: str
     """Target server where the file was uploaded."""
 
     remote_path: str

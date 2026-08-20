@@ -16,6 +16,7 @@ threats it mitigates, and how to configure and operate it securely.
 - [Network Authorization](#network-authorization)
 - [Secure Defaults](#secure-defaults)
 - [Configuration Hardening](#configuration-hardening)
+- [Client IP Extraction](#client-ip-extraction)
 - [Vulnerability Reporting](#vulnerability-reporting)
 
 ---
@@ -39,6 +40,38 @@ The reverse proxy should:
 - Strip the `X-Forwarded-For` header from untrusted sources and set it to the
   real client IP.
 - (Optional) Enforce IP allowlisting for the `/mcp` path at the proxy level.
+
+### Client IP Extraction
+
+The effective client IP used for rate limiting and network authorization is
+resolved by [`lib/request_context.py`](lib/request_context.py) from two
+sources, in order:
+
+1. **`X-Forwarded-For` header** — but **only** when the direct connection peer
+   is listed in the `settings.trusted_proxies` configuration list. An empty
+   `trusted_proxies` list (the default) means **no proxy is trusted** and the
+   header is ignored entirely, falling back to the direct peer IP.
+2. **Direct peer IP** (`request.client.host`) — used whenever the header is
+   absent, untrusted, malformed, or empty.
+
+The extracted value is always normalized and validated using the standard
+library `ipaddress` module:
+
+- **Invalid IPs are rejected.** Values that fail `ipaddress.ip_address()` (for
+  example `not-an-ip`, `999.999.999.999`, or trailing garbage) are discarded
+  and the caller falls back to `FALLBACK_CLIENT_IP`.
+- **IPv4-mapped IPv6 is collapsed.** `::ffff:192.168.1.1` is normalized to
+  `192.168.1.1` so that IPv4 addresses carried over IPv6 do not bypass
+  IPv4-based allowlists or rate-limit keys.
+- **Whitespace is trimmed.** Leading/trailing whitespace around the first
+  `X-Forwarded-For` entry is removed before validation.
+- **Untrusted headers are ignored.** If the direct peer is not in
+  `trusted_proxies`, the `X-Forwarded-For` header is never honored, defeating
+  spoofed-header attacks against the rate limiter and network authorization.
+
+`trusted_proxies` entries are validated at config load time with
+`ipaddress.ip_address()` and normalized the same way, so only syntactically
+valid IP addresses can be trusted.
 
 ---
 
@@ -79,7 +112,15 @@ response time.
 The authorization engine uses a **layered decision chain** evaluated in order:
 
 ```
-block_patterns → dangerous patterns → redirection-target guard → strip redirectors → command segmentation → default → api_key → network → deny
+block_patterns
+  → dangerous patterns
+  → redirection-target guard
+  → strip redirectors
+  → command segmentation
+  → default
+  → api_key
+  → network
+  → deny
 ```
 
 All rules are compiled once into an immutable, frozen `RulesSnapshot`
@@ -99,6 +140,25 @@ matching destructive or dangerous operations. Examples:
 | `\bdd\s+if=`          | Direct disk writes                          |
 | `\bshutdown\b`        | System shutdown                             |
 | `\breboot\b`          | System reboot                               |
+
+#### ReDoS Protection
+
+Because `block_patterns` are evaluated against every command, a pathological
+pattern could otherwise become a denial-of-service vector (catastrophic
+backtracking). Three defense layers mitigate this:
+
+1. **Load-time static screening** — each pattern is scanned by
+   `check_redos_risk()` for known ReDoS-prone constructs (nested quantifiers like
+   `(a+)+`, overlapping alternation like `(a|a)+`, and quantified dot-star groups
+   like `(.*a){n}`). A risky pattern invalidates the whole config and is rejected.
+2. **`re.LIMITED_TIME`** — where the host Python provides it, block patterns are
+   compiled with the engine's time-limited matching flag so the regex engine
+   itself bounds matching time.
+3. **Hard timeout on match** — every block-pattern match runs through
+   `safe_regex_search()`, which executes the search on a single-worker thread and
+   aborts past a wall-clock timeout. On timeout the match is treated as **no
+   match** (i.e. the command is NOT blocked) so an attacker cannot force a block
+   or starve the executor.
 
 ### 2. Dangerous Shell Patterns
 
@@ -178,11 +238,11 @@ stripped here, payloads relying on them would pass the sanitizer and then be
 denied by the same dangerous-pattern scan — so preserving them keeps the
 authorization decision correct, not just after the fact.
 
-### Server-name sanitization (`sanitize_server_name`)
+### Target-name sanitization (`sanitize_target_name`)
 
 `server_name` must match `[a-zA-Z0-9._-]{1,128}`. Leading/trailing whitespace
 is trimmed, then the value is validated against the regex and the
-`MAX_SERVER_NAME_LENGTH` upper bound; invalid values raise `AuthorizationError`
+`MAX_TARGET_NAME_LENGTH` upper bound; invalid values raise `AuthorizationError`
 and are denied at the handler boundary.
 
 ### Log-string sanitization (`sanitize_log_string`)
@@ -197,7 +257,7 @@ a log record.
 
 ## Path Traversal Prevention
 
-SFTP file transfer paths are validated through **seven layers of defense**:
+SFTP file transfer paths are validated through **eight layers of defense**:
 
 | Layer | Check | Threat Mitigated |
 |-------|-------|------------------|
@@ -208,10 +268,14 @@ SFTP file transfer paths are validated through **seven layers of defense**:
 | 5 | Path components not `.`, `..`, or `~` | Direct traversal |
 | 6 | `normpath` result is absolute | Relative-path escape |
 | 7 | `realpath` result starts with sandbox root | Symlink escape |
+| 8 | Path length within configured limit | Protocol-level buffer overflows |
 
-The sandbox root is configured via `settings.sftp_sandbox_root` and defaults
+The sandbox root is configured via `settings.sftp.sandbox_root` and defaults
 to `"/"` (full access). To restrict file transfers, set it to a subdirectory
 such as `"/home/app/sftp"`.
+
+The maximum path length is configured via `settings.sftp.max_path_length` and
+defaults to `4096` bytes. Set to `0` to disable the length check.
 
 ---
 
@@ -293,7 +357,7 @@ return safe fallback values when called outside an active request context
 |-------------------------|-------------------------|----------------------------------------------|
 | `get_client_ip()`       | `127.0.0.1`             | Loopback never grants external allow-list IP |
 | `get_api_key()`         | `None`                  | No key available outside a request           |
-| `get_request_id()`      | `"unknown"`             | Non-empty so log/error correlation still works |
+| `get_request_id()`      | `"unknown"`             | Non-empty for log/error correlation     |
 | `get_current_request()` | `None`                  | Must be null-checked before dereferencing    |
 
 Callers must null-check `get_current_request()` (and any `None`-capable
@@ -309,12 +373,12 @@ The server ships with conservative defaults designed for production safety:
 |--------------------------------|------------------------|----------------------------------------|
 | API key hashing                | PBKDF2-SHA256, 100k    | Resistant to offline brute-force       |
 | Command timeout                | 120 seconds            | Prevents runaway remote processes      |
-| Max output length              | 50,000 bytes           | Prevents LLM context exhaustion; accepts an integer byte count or a case-insensitive `b`/`kb`/`mb`/`gb` size string, validated to a positive integer |
+| Max output length              | 50,000 bytes           | Caps command output          |
 | Max file transfer size         | 10 MiB                 | Prevents disk-fill attacks             |
-| Dangerous pattern detection    | Enabled unconditionally | Prevents command injection             |
+| Dangerous pattern detection    | Always enabled         | Prevents command injection             |
 | Path traversal checks          | 7-layer validation     | Defense-in-depth for SFTP paths        |
 | Per-IP rate limiting           | 60 req/min             | Mitigates brute-force and DoS          |
-| Max concurrent SSH connections | 20                     | Global cap on checked-out connections across all targets; excess acquisitions are rejected with HTTP 503 instead of queued, preventing resource exhaustion |
+| Max concurrent SSH connections | 20                     | Global cap; excess gets HTTP 503     |
 | Non-root container user        | `mcpssh`               | Limits impact of container escape      |
 | `--no-cache-dir` in Dockerfile | Enabled                | Reduces image size and attack surface  |
 
@@ -420,7 +484,7 @@ open a public issue. Instead, report it privately:
 ## Related Documentation
 
 - [API Key Hashing](../lib/crypto.py) — `hash_api_key()` and `verify_api_key()`
-- [Command Security](../lib/command_security.py) — `check_dangerous_patterns()` and `segment_command()`
+- [Command Security](../lib/command_security.py) — dangerous-pattern and segmentation checks
 - [File Transfer Security](../lib/file_transfer.py) — `_validate_path()` with 7-layer checks
 - [Authorization Engine](../lib/auth.py) — Layered decision chain
 - [Rate Limiter](../lib/rate_limiter.py) — Sliding-window implementation

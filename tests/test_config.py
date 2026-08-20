@@ -21,6 +21,9 @@ from lib.constants import (
     DEFAULT_MAX_OUTPUT_LENGTH,
     DEFAULT_SSH_PORT,
     LATEST_CONFIG_VERSION,
+    MAX_BLOCK_PATTERNS,
+    MAX_REGEX_PATTERN_LENGTH,
+    MAX_TARGETS,
 )
 
 _RESTRICTED = 0o600
@@ -235,7 +238,11 @@ class TestValidationFailures:
     def test_validation_fails_invalid_cidr(self):
         cfg = _minimal_valid_config()
         cfg["allowed_commands"]["networks"] = [
-            {"name": "bad", "range": "not-a-cidr", "rules": [{"targets": ["*"], "commands": ["ls"]}]}
+            {
+                "name": "bad",
+                "range": "not-a-cidr",
+                "rules": [{"targets": ["*"], "commands": ["ls"]}],
+            }
         ]
         with tempfile.TemporaryDirectory() as td:
             _write_config(td, cfg)
@@ -250,10 +257,46 @@ class TestValidationFailures:
             with pytest.raises(ConfigValidationError, match="valid regex"):
                 ConfigManager(td)
 
+    def test_validation_rejects_redos_nested_quantifiers(self):
+        """A block_pattern with nested quantifiers is rejected at load time."""
+        cfg = _minimal_valid_config(block_patterns=["(a+)+"])
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(ConfigValidationError, match="ReDoS"):
+                ConfigManager(td)
+
+    def test_validation_rejects_redos_overlapping_alternation(self):
+        """A block_pattern with overlapping alternation is rejected."""
+        cfg = _minimal_valid_config(block_patterns=["(a|a)+"])
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(ConfigValidationError, match="ReDoS"):
+                ConfigManager(td)
+
+    def test_validation_error_message_includes_redos_reason(self):
+        """The rejection message explains the specific ReDoS risk."""
+        cfg = _minimal_valid_config(block_patterns=["(a+)+"])
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(ConfigValidationError, match="potential ReDoS risk"):
+                ConfigManager(td)
+
+    def test_validation_accepts_safe_block_patterns(self):
+        """All default block patterns (and benign alternation) pass validation."""
+        safe_patterns = list(DEFAULT_BLOCK_PATTERNS) + ["(dev|proc|sys)"]
+        cfg = _minimal_valid_config(block_patterns=safe_patterns)
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            ConfigManager(td)
+
     def test_validation_fails_invalid_key_hash(self):
         cfg = _minimal_valid_config()
         cfg["allowed_commands"]["api_keys"] = [
-            {"name": "k1", "key_hash": "bad-hash-format", "rules": [{"targets": ["*"], "commands": ["ls"]}]}
+            {
+                "name": "k1",
+                "key_hash": "bad-hash-format",
+                "rules": [{"targets": ["*"], "commands": ["ls"]}],
+            }
         ]
         with tempfile.TemporaryDirectory() as td:
             _write_config(td, cfg)
@@ -876,8 +919,8 @@ class TestWatcherHealth:
 class TestResilienceSettings:
     """Validation of retry / circuit-breaker settings keys."""
 
-    def test_validated_settings_contain_all_fourteen_keys(self):
-        """The validated settings dict always exposes all fourteen settings."""
+    def test_validated_settings_contain_all_fifteen_keys(self):
+        """The validated settings dict always exposes all fifteen settings."""
         with tempfile.TemporaryDirectory() as td:
             _write_config(td, _minimal_valid_config())
             mgr = ConfigManager(td)
@@ -897,6 +940,8 @@ class TestResilienceSettings:
                 "pool_cleanup_interval_seconds",
                 "max_concurrent_ssh_connections",
                 "watcher_debounce_seconds",
+                "trusted_proxies",
+                "sftp",
             }
 
     def test_defaults_applied_when_keys_missing(self):
@@ -1716,3 +1761,229 @@ class TestConfigValidationErrorSanitization:
         assert raw_value not in message
         assert exc.value.field == expected_field
         assert exc.value.field
+
+
+# ---------------------------------------------------------------------------
+# Server name validation at config load time
+# ---------------------------------------------------------------------------
+
+
+def _config_with_target_name(name: object) -> dict:
+    """Return a minimal-valid config whose first ssh_target uses *name*.
+
+    ``name`` may be any JSON value; it is spliced in as the ssh_targets key so
+    the new load-time server-name checks are exercised directly.
+    """
+    cfg = _minimal_valid_config()
+    cfg["ssh_targets"] = {name: cfg["ssh_targets"].pop("testbox")}
+    return cfg
+
+
+class TestTargetNameValidation:
+    """Target names are validated for type, length, and allowed characters when
+    the config is loaded -- not only at runtime via ``sanitize_target_name``."""
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "bad name",        # space
+            "bad@name",        # at sign
+            "bad#name",        # hash
+            "bad!name",        # bang
+            "bad/name",        # slash
+            "bad\\name",       # backslash
+            "bad;name",        # semicolon
+            "bad&name",        # ampersand
+            "bad|name",        # pipe
+            "bad$name",        # dollar
+            "ünïcode",         # non-ASCII letters
+            "名字",            # CJK characters
+            "bad.name/hack",   # mixed valid + slash
+        ],
+    )
+    def test_invalid_characters_raise(self, name: str) -> None:
+        """Names with disallowed characters are rejected at load time."""
+        cfg = _config_with_target_name(name)
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(ConfigValidationError):
+                ConfigManager(td)
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "h" * 129,  # one char beyond the 128 limit
+            "host.name_" * 15 + "tok",  # 15*9+3 = 138, also over length
+        ],
+    )
+    def test_over_length_name_raises(self, name: str) -> None:
+        """Names longer than MAX_TARGET_NAME_LENGTH are rejected."""
+        cfg = _config_with_target_name(name)
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(ConfigValidationError):
+                ConfigManager(td)
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "h" * 128,  # exactly the max length -> valid
+        ],
+    )
+    def test_boundary_max_length_valid(self, name: str) -> None:
+        """A name of exactly MAX_TARGET_NAME_LENGTH loads successfully."""
+        cfg = _config_with_target_name(name)
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            mgr = ConfigManager(td)
+            assert name in mgr.data["ssh_targets"]
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "h" * 129,  # one char beyond the 128 limit
+        ],
+    )
+    def test_boundary_max_length_plus_one_raises(self, name: str) -> None:
+        """A name one char beyond MAX_TARGET_NAME_LENGTH is rejected."""
+        cfg = _config_with_target_name(name)
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(ConfigValidationError):
+                ConfigManager(td)
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "host1",
+            "host_1.beta-x",
+            "HOST1.2-3_4",
+            "a",
+            "Z",  # single uppercase
+            "0",  # single digit
+            "a-b_c.d",
+            "42.42-42_42",
+        ],
+    )
+    def test_valid_names_load(self, name: str) -> None:
+        """Names using only letters, digits, '.', '_', '-' load successfully."""
+        cfg = _config_with_target_name(name)
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            mgr = ConfigManager(td)
+            assert name in mgr.data["ssh_targets"]
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "log\ninject",       # newline
+            "log\rinject",       # carriage return
+            "log\x00inject",     # null byte
+            "a\nb\rc\x00d",      # mixed control characters
+        ],
+    )
+    def test_log_injection_names_raise(self, name: str) -> None:
+        """Names containing log-injection control bytes are rejected and do not
+        leak into the error message."""
+        cfg = _config_with_target_name(name)
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(ConfigValidationError) as exc:
+                ConfigManager(td)
+        # The raw poisoned name must never appear in the error text.
+        assert name not in str(exc.value)
+
+    @pytest.mark.parametrize(
+        "name",
+        [123, 4.5, True, None],
+    )
+    def test_non_string_name_raises(self, name: object) -> None:
+        """Non-string target names are rejected.
+
+        The type check cannot be exercised through the JSON file path because
+        ``json.dumps`` coerces dict keys to strings (``123`` loads as ``"123"``,
+        which is a valid name). Calling ``_validate()`` directly with an
+        in-memory dict keeps the key as its original type.
+        """
+        cfg = _config_with_target_name(name)
+        with tempfile.TemporaryDirectory() as td:
+            mgr = ConfigManager(td)
+            with pytest.raises(ConfigValidationError):
+                mgr._validate(cfg)
+
+
+class TestResourceLimits:
+    """Validate that config resource limits are enforced."""
+
+    # -- SSH target count limits --
+
+    def test_exactly_max_targets_accepted(self) -> None:
+        """A config with exactly MAX_TARGETS targets loads successfully."""
+        targets = {
+            f"host{i}": {
+                "host": f"10.0.{i // 256}.{i % 256}",
+                "username": "admin",
+                "password": "secret",
+                "port": 22,
+            }
+            for i in range(MAX_TARGETS)
+        }
+        cfg = _minimal_valid_config(ssh_targets=targets)
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            ConfigManager(td)
+
+    def test_max_targets_plus_one_rejected(self) -> None:
+        """A config with MAX_TARGETS + 1 targets is rejected."""
+        targets = {
+            f"host{i}": {
+                "host": f"10.0.{i // 256}.{i % 256}",
+                "username": "admin",
+                "password": "secret",
+                "port": 22,
+            }
+            for i in range(MAX_TARGETS + 1)
+        }
+        cfg = _minimal_valid_config(ssh_targets=targets)
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(ConfigValidationError, match="ssh_targets must not exceed"):
+                ConfigManager(td)
+
+    # -- Block pattern count limits --
+
+    def test_exactly_max_block_patterns_accepted(self) -> None:
+        """A config with exactly MAX_BLOCK_PATTERNS patterns loads."""
+        patterns = [f"pattern{i}" for i in range(MAX_BLOCK_PATTERNS)]
+        cfg = _minimal_valid_config(block_patterns=patterns)
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            ConfigManager(td)
+
+    def test_max_block_patterns_plus_one_rejected(self) -> None:
+        """A config with MAX_BLOCK_PATTERNS + 1 patterns is rejected."""
+        patterns = [f"pattern{i}" for i in range(MAX_BLOCK_PATTERNS + 1)]
+        cfg = _minimal_valid_config(block_patterns=patterns)
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(ConfigValidationError, match="block_patterns must not exceed"):
+                ConfigManager(td)
+
+    # -- Regex pattern length limits --
+
+    def test_exactly_max_regex_pattern_length_accepted(self) -> None:
+        """A regex of exactly MAX_REGEX_PATTERN_LENGTH chars loads."""
+        long_pattern = "a" * MAX_REGEX_PATTERN_LENGTH
+        cfg = _minimal_valid_config(block_patterns=[long_pattern])
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            ConfigManager(td)
+
+    def test_max_regex_pattern_length_plus_one_rejected(self) -> None:
+        """A regex of MAX_REGEX_PATTERN_LENGTH + 1 chars is rejected."""
+        long_pattern = "a" * (MAX_REGEX_PATTERN_LENGTH + 1)
+        cfg = _minimal_valid_config(block_patterns=[long_pattern])
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(ConfigValidationError, match="exceeds.*character limit"):
+                ConfigManager(td)

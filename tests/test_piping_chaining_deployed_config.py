@@ -111,10 +111,16 @@ class TestPipingAllowed:
             "ls -la | grep foo",
         ],
     )
-    def test_pipe_all_allowed(self, deployed_auth_manager: AuthorizationManager, commands: str) -> None:
+    def test_pipe_all_allowed(
+        self,
+        deployed_auth_manager: AuthorizationManager,
+        commands: str,
+    ) -> None:
         _assert_cmd(deployed_auth_manager, commands, expected=True)
 
-    def test_stderr_redirect_stripped_before_pipe(self, deployed_auth_manager: AuthorizationManager) -> None:
+    def test_stderr_redirect_stripped_before_pipe(
+        self, deployed_auth_manager: AuthorizationManager
+    ) -> None:
         """A stderr redirect glued to the first segment must be stripped before
         segmentation, so the allow-listed 'docker logs' | 'grep' pipe is allowed
         (regression for redirection-stripping before the allow-chain)."""
@@ -166,7 +172,11 @@ class TestChainingAllowed:
             "hostname || uptime",
         ],
     )
-    def test_chain_all_allowed(self, deployed_auth_manager: AuthorizationManager, commands: str) -> None:
+    def test_chain_all_allowed(
+        self,
+        deployed_auth_manager: AuthorizationManager,
+        commands: str,
+    ) -> None:
         _assert_cmd(deployed_auth_manager, commands, expected=True)
 
     def test_chain_later_command_not_allowed_denied(

@@ -1136,7 +1136,7 @@ class TestFileTransfer:
         text = "".join(item.get("text", "") for item in content)
         error = json.loads(text)
         assert error["error"] is True, f"Expected traversal error, got: {text!r}"
-        assert error["error_type"] == "FileTransferError"
+        assert error["error_type"] == "PathValidationError"
         assert error["retryable"] is False
         assert "must not be '..'" in error["message"]
         assert error.get("request_id"), "Error response must include a request_id"
@@ -1253,7 +1253,9 @@ class TestAuthorizationFlows:
         assert "ERROR" not in allowed_text
         assert len(allowed_text.strip()) > 0
 
-    def test_command_allowed_by_network(self, mcp_url: str, switch_config):
+    def test_command_allowed_by_network(
+        self, mcp_url: str, switch_config, test_network
+    ):
         """A command only allowed from a matching network is denied otherwise."""
         config = _make_valid_config(TEST_SSH_SERVERS)
         config["allowed_commands"]["default"] = [
@@ -1266,8 +1268,15 @@ class TestAuthorizationFlows:
                 "rules": [{"targets": ["*"], "commands": ["date"]}],
             }
         ]
-        # The client (bridge gateway, 10.0.7.1) is inside 10.0.0.0/8, so the
-        # live allowed set also includes "date" from the network layer.
+        # Trust the bridge gateway (the direct connection peer for requests
+        # coming from outside the containers) so the spoofed X-Forwarded-For
+        # header is honored. The gateway IP is the direct peer the MCP server
+        # sees, so without this the header would be ignored under the new
+        # security-first default.
+        gateway = test_network.attrs["IPAM"]["Config"][0]["Gateway"]
+        config.setdefault("settings", {})["trusted_proxies"] = [gateway]
+        # The client (bridge gateway) is inside 10.0.0.0/8, so the live
+        # allowed set also includes "date" from the network layer.
         switch_config(config, {"date", "hostname", "ls"})
 
         # From a non-matching IP: denied
@@ -1339,6 +1348,59 @@ class TestAuthorizationFlows:
         text = "".join(item.get("text", "") for item in content)
         assert "Command rejected" in text
         assert "blocked by pattern" in text
+
+
+class TestConfigRejectsReDoSPattern:
+    """Config validation rejects block_patterns with ReDoS-prone constructs."""
+
+    def test_config_rejects_redos_pattern(
+        self, mcp_url: str, mcp_container, switch_config
+    ):
+        """A block_pattern with nested quantifiers fails to reload.
+
+        The injection writes a config whose ``block_patterns`` entry carries
+        the catastrophic-backtracking shape ``(a+)+``.  Config validation
+        rejects it at load time, so the hot-reload watcher preserves the
+        previously active config.  We therefore assert that the allow-list
+        applied to ``testbox`` is UNCHANGED after waiting past the watcher's
+        polling interval.
+        """
+        global _last_config_mtime
+
+        # Establish a known baseline config and confirm it is active.
+        baseline = _make_valid_config(TEST_SSH_SERVERS)
+        baseline["allowed_commands"]["default"] = [
+            {"targets": ["*"], "commands": ["ls", "hostname"]}
+        ]
+        switch_config(baseline, {"ls", "hostname"})
+
+        # Build a config that is identical except for a dangerous pattern.
+        dangerous = _make_valid_config(TEST_SSH_SERVERS)
+        dangerous["block_patterns"] = ["(a+)+"]
+        dangerous["allowed_commands"]["default"] = [
+            {"targets": ["*"], "commands": ["rm", "ls", "hostname"]}
+        ]
+
+        # Inject with a strictly increasing mtime so the watcher notices it,
+        # but do NOT wait for a new allow-list: a rejected config never
+        # produces one.  The watcher polls every 15 s.
+        _last_config_mtime = max(
+            float(int(time.time())), _last_config_mtime + 1.0
+        )
+        _inject_json_file(
+            mcp_container,
+            "/config/ssh-mcp-config.json",
+            dangerous,
+            mtime=_last_config_mtime,
+        )
+
+        # Wait past the watcher's polling interval so it has a chance to
+        # (incorrectly) apply the dangerous config.
+        time.sleep(17.0)
+
+        # The dangerous config was rejected: the allow-list is still the
+        # baseline set and does not include the never-loaded "rm".
+        assert _get_allowed_commands(mcp_url) == {"ls", "hostname"}
 
 
 class TestCommandSanitizationInHandler:

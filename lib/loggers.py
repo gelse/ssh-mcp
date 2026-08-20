@@ -23,12 +23,14 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 
 from lib.constants import (
+    ACTIVE_LOG_FILENAME,
     BYTES_PER_MB,
     DEFAULT_COMPRESS_ROTATED,
     DEFAULT_LOG_BACKUP_COUNT,
     DEFAULT_LOG_MAX_SIZE_MB,
     DEFAULT_MAX_LOG_OUTPUT,
 )
+from lib.sanitize import validate_log_path
 
 
 # Fallback logger used for graceful degradation when file writes fail.
@@ -90,7 +92,7 @@ class FileLogger(BaseLogger):
     ``_rotate_if_needed`` must be called while holding ``_lock``.
     """
 
-    ACTIVE_NAME = "ssh-mcp.log"
+    ACTIVE_NAME = ACTIVE_LOG_FILENAME
 
     def __init__(
         self,
@@ -110,7 +112,7 @@ class FileLogger(BaseLogger):
                 with a marker appended.  ``None`` disables truncation.
             compress_rotated: Whether rotated backup files are gzip-compressed.
         """
-        self._log_dir = Path(log_dir)
+        self._log_dir = validate_log_path(log_dir)
         self._max_bytes = max_file_size_mb * BYTES_PER_MB
         self._backup_count = max(backup_count, 1)
         self._max_log_output = max_log_output

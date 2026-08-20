@@ -31,7 +31,7 @@ Five MCP tools (`ssh_list_servers`, `ssh_list_allowed_commands`, `ssh_execute_co
 ```
 mcp-ssh/
 ├── server.py                  # FastMCP app factory + CLI entry point
-├── lib/                       # 23 modules (plus __init__.py re-exports)
+├── lib/                       # 24 modules (plus __init__.py re-exports)
 │   ├── __init__.py            # Public re-exports
 │   ├── auth.py                # AuthorizationManager, layered allow-list chain
 │   ├── circuit_breaker.py     # Per-target failure threshold + recovery timeout
@@ -49,15 +49,16 @@ mcp-ssh/
 │   ├── loggers.py             # FileLogger (JSONL rotation/truncation/gzip)
 │   ├── metrics.py             # Prometheus metrics + GET /metrics endpoint
 │   ├── rate_limiter.py        # Sliding-window per-IP rate limiter
+│   ├── redos_protection.py    # Safe regex compilation and ReDoS-resistant matching
 │   ├── request_context.py     # Starlette middleware for request_id, client IP, API key
-│   ├── sanitize.py            # Input sanitization helpers (sanitize_command, sanitize_server_name, sanitize_log_string)
+│   ├── sanitize.py            # Input sanitization helpers (sanitize_command, sanitize_target_name, sanitize_log_string)
 │   ├── secrets.py             # SecretsManager for secrets.json + MCP_SSH_SECRET_* env var merging
 │   ├── size_utils.py          # parse_size_bytes() for size-string settings (e.g. max_output_length)
 │   ├── ssh_client.py          # SSHClientManager — connect, retry, circuit-break, pool
 │   ├── sudo.py                # SudoHandler — validate, wrap sudo command, password injection
 │   └── types.py               # TypedDict models for tool results
 ├── tests/
-│   ├── test_*.py              # 24 unit-test files (21 covering lib modules, plus server/e2e/concurrency/schema/deployed-config)
+│   ├── test_*.py              # 29 unit-test files (24 covering lib modules, plus server/e2e/concurrency/schema/piping-chaining)
 │   └── integration/
 │       └── test_integration.py # Real Docker containers: SSH server + MCP server
 ├── docs/
@@ -101,11 +102,13 @@ graph TD
   config --> cw2[config_migration]
   config --> sec[secrets]
   config --> su[size_utils]
+  config --> redos[redos_protection]
   config --> exceptions
   config --> constants
   server --> san[sanitize]
   auth --> crypto
   auth --> cs[command_security]
+  auth --> redos
   auth --> config
   ft --> exceptions
   ft --> constants
@@ -135,7 +138,7 @@ The historical `plans/` directory has been **removed** from the repository. It p
 make test   # pytest tests/ -v --ignore=tests/integration/
 ```
 
-- 24 test files under `tests/`, covering 21 of 23 `lib/*.py` modules plus [`tests/test_server.py`](tests/test_server.py), [`tests/test_e2e_config.py`](tests/test_e2e_config.py), and the concurrency/schema/deployed-config suites
+- 29 test files under `tests/`, covering 24 of 24 `lib/*.py` modules plus [`tests/test_server.py`](tests/test_server.py), [`tests/test_e2e_config.py`](tests/test_e2e_config.py), and the concurrency/schema/piping-chaining suites
 - Test configs are written to temporary directories — never mutate a shared config file (see [Test Guidelines](#test-guidelines) for the `_write_config` pattern)
 - Server tests mock only true I/O boundaries: `paramiko.SSHClient`, `server.create_app`, `asyncio.run`
 - Authorization tests verify the full layered chain — see [Authorization Model](#authorization-model-critical-for-correctness) for the complete chain with all layers
@@ -156,7 +159,7 @@ make integrationtest   # builds mcp-ssh:test image, runs tests/integration/
 
 ### Test Guidelines
 
-- Each `lib/*.py` module should have a corresponding `tests/test_*.py`. Currently 21 of 23 lib modules have a dedicated test file. The modules WITHOUT dedicated per-module test files are `lib/config_watcher.py`, `lib/constants.py`, `lib/log_handler.py`, and `lib/types.py` (note: `lib/types.py` has no `test_types.py`, and `lib/__init__.py` also has no dedicated test). Later additions (`test_config_migration.py`, `test_config_schema.py`, `test_concurrency.py`, `test_piping_chaining_deployed_config.py`, `test_sanitize.py`, `test_secrets.py`, `test_size_utils.py`) bring coverage to the lib modules that support it.
+- Each `lib/*.py` module should have a corresponding `tests/test_*.py`. Currently 24 of 24 lib modules have a dedicated test file.
 - New features require both unit tests AND integration-test coverage where the feature touches SSH or HTTP boundaries
 - Config-driven tests should use the `_write_config(tmpdir, config_dict)` helper pattern — never mutate a shared config file (see [`tests/test_auth.py`](tests/test_auth.py) for reference)
 - Integration tests use a `TestConfig` dataclass pattern for structured test configuration
@@ -250,8 +253,6 @@ The authorization chain is **layered and ordered**:
 
 When modifying authorization, always consider ALL layers. The `matched_via` field in `AuthResult` tracks which layer made the decision.
 
-When modifying authorization, always consider ALL layers. The `matched_via` field in `AuthResult` tracks which layer made the decision.
-
 ## Definition of Done
 
 Before considering a task complete, verify every applicable item:
@@ -314,11 +315,11 @@ This end-to-end example adds a hypothetical `ssh_get_uptime` tool that executes 
 If the tool needs a new default value, add it in the appropriate section with a docstring. For `ssh_get_uptime`, the command string `"uptime"` is simple enough to inline, but a default timeout constant could be added:
 
 ```python
-# In the "Default Runtime Settings" section, near line 86:
+# In the "Default Runtime Settings" section, near line 163:
 DEFAULT_UPTIME_TIMEOUT_SECONDS: int = 15
 ```
 
-**Grep pattern:** look for existing defaults near `DEFAULT_COMMAND_TIMEOUT_SECONDS` at [`lib/constants.py:86`](lib/constants.py).
+**Grep pattern:** look for existing defaults near `DEFAULT_COMMAND_TIMEOUT_SECONDS` at [`lib/constants.py:163`](lib/constants.py).
 
 ### Step 2 — Add a TypedDict return type (if needed)
 
@@ -333,20 +334,20 @@ For structured returns, add a new TypedDict. `ssh_get_uptime` returns a simple s
 If you added a constant or type in steps 1–2, add it to both the import block and the `__all__` list. Follow the existing alphabetical grouping:
 
 ```python
-# In the constants import block, near line 28:
+# In the constants import block, near line 12:
 DEFAULT_UPTIME_TIMEOUT_SECONDS,
 
-# In __all__, near line 128:
+# In __all__, near line 130:
 "DEFAULT_UPTIME_TIMEOUT_SECONDS",
 ```
 
-**Grep pattern:** `from lib.constants import (` at [`lib/__init__.py:10`](lib/__init__.py) and `__all__ = [` at [`lib/__init__.py:76`](lib/__init__.py).
+**Grep pattern:** `from lib.constants import (` at [`lib/__init__.py:12`](lib/__init__.py) and `__all__ = [` at [`lib/__init__.py:130`](lib/__init__.py).
 
 ### Step 4 — Register the tool handler
 
 **File:** [`server.py`](server.py)
 
-Add a new `@mcp.tool()` decorated function inside `_register_tools()`, following the exact pattern of `ssh_execute_command` at [`server.py:636-786`](server.py). Place it next to other tools of similar complexity — for `ssh_get_uptime`, after the `ssh_execute_command` block:
+Add a new `@mcp.tool()` decorated function inside `_register_tools()`, following the exact pattern of `ssh_execute_command` at [`server.py:861-1015`](server.py). Place it next to other tools of similar complexity — for `ssh_get_uptime`, after the `ssh_execute_command` block:
 
 ```python
 @mcp.tool()
@@ -359,7 +360,7 @@ def ssh_get_uptime(server_name: str) -> str:
     Returns:
         JSON-formatted uptime output, or error message
     """
-    # --- same pattern as ssh_execute_command (server.py:636-786) ---
+    # --- same pattern as ssh_execute_command (server.py:861-1015) ---
     source_ip = get_client_ip()
     auth_result, log_entry = _authorize_command(server_name, "uptime", sudo=False)
     if not auth_result.allowed:
@@ -391,10 +392,10 @@ Key patterns visible in this handler:
 - **Dependencies captured from closure** — `ssh_client_manager`, `ssh_executor`, `max_command_output`, `_authorize_command`, `_build_auth_target`, `_execute_ssh_command`, `_finish_log_entry`, `_format_execution_result`, `_format_error` are all in scope from the enclosing `_register_tools()`.
 - **Request context** — `get_client_ip()` from [`lib/request_context.py`](lib/request_context.py).
 - **Authorization** — `_authorize_command()` returns an `AuthResult` and a `log_entry` dict; check `auth_result.allowed` before executing.
-- **Blocking SSH I/O** — wrapped in a closure, submitted via `ssh_executor.submit(...).result()`. See [`server.py:767`](server.py) for the `ssh_execute_command` equivalent.
+- **Blocking SSH I/O** — wrapped in a closure, submitted via `ssh_executor.submit(...).result()`. See [`server.py:996`](server.py) for the `ssh_execute_command` equivalent.
 - **Error handling** — catch `MCPSSHError`, log via `_finish_log_entry`, return JSON error via `_format_error`. Do NOT raise exceptions from tool handlers.
-- **Logging** — `_finish_log_entry()` at [`server.py:536-563`](server.py) records timing, exit code, and output.
-- **Result formatting** — `_format_execution_result()` at [`server.py:522-534`](server.py) produces the combined stdout/stderr string.
+- **Logging** — `_finish_log_entry()` at [`server.py:752-779`](server.py) records timing, exit code, and output.
+- **Result formatting** — `_format_execution_result()` at [`server.py:738-750`](server.py) produces the combined stdout/stderr string.
 
 ### Step 5 — Write unit tests
 
@@ -402,11 +403,11 @@ Key patterns visible in this handler:
 
 Use the existing helper patterns. For `ssh_get_uptime`, add a test inside the existing test class that:
 
-1. Writes a config with [`_write_config`](tests/test_server.py:40-45) or [`_make_minimal_config`](tests/test_server.py:48-74).
+1. Writes a config with [`_write_config`](tests/test_server.py:49-54) or [`_make_minimal_config`](tests/test_server.py:57-73).
 2. Calls the tool with a mock SSH client (patch `paramiko.SSHClient`).
 3. Asserts the JSON response shape — success path includes `"uptime"` text; error path returns `{"error": true, ...}`.
 
-**Grep pattern:** look for `def test_ssh_list_servers` in [`tests/test_server.py`](tests/test_server.py) to find the list-servers test and model the new test after it.
+**Grep pattern:** look for `class TestSshListServers` in [`tests/test_server.py`](tests/test_server.py) to find the list-servers test and model the new test after it.
 
 ### Step 6 — Run the test suite
 

@@ -1,0 +1,28 @@
+name: integration-tests
+
+on:
+  push:
+    tags:
+      - "release*"
+
+jobs:
+  integration-test:
+    name: integration tests (Docker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install runtime dependencies
+        run: pip install --no-cache-dir --require-hashes -r requirements.txt
+
+      - name: Run integration tests
+        run: make integrationtest
+
+      - name: Clean up test containers and network
+        if: always()
+        run: make clean-test

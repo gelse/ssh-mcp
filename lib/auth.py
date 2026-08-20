@@ -19,6 +19,7 @@ from dataclasses import dataclass
 
 from lib.constants import PROTECTED_REDIRECT_TARGET_RE
 from lib.crypto import hash_api_key, verify_api_key
+from lib.redos_protection import compile_safe_pattern, safe_regex_search
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,10 @@ class AuthResult:
 
     allowed: bool
     reason: str  # human-readable, e.g. "allowed by default"
-    matched_via: str  # "default" | "api_key:<name>" | "network:<name> (<range>)" | "blocked:<pattern>" | "denied"
+    # "default" | "api_key:<name>" | "network:<name> (<range>)" |
+    # "blocked:<pattern>" | "denied"
+    matched_via: str
+    target_name: str  # SSH target identifier this check was for
     api_key_name: str | None = None  # Matched API key name, or None
 
 
@@ -159,7 +163,7 @@ class AuthorizationManager:
         # 1. Validate target exists
         if target not in self._config_manager.data.get("ssh_targets", {}):
             logger.debug("Unknown target '%s' — denying", target)
-            return AuthResult(False, f"Unknown target '{target}'", "denied", None)
+            return AuthResult(False, f"Unknown target '{target}'", "denied", target, None)
 
         # 2. Check block_patterns
         block_result = self._check_block_patterns(command)
@@ -196,7 +200,7 @@ class AuthorizationManager:
         logger.debug("Checking default rules for target '%s'", target)
         if self._is_command_allowed_by_rules(command, default_rules, target):
             logger.info("Command '%s' allowed by default for target '%s'", command, target)
-            return AuthResult(True, "allowed by default", "default", None)
+            return AuthResult(True, "allowed by default", "default", target, None)
 
         # 5. Check API key
         api_entry = self._match_api_key(api_key)
@@ -213,6 +217,7 @@ class AuthorizationManager:
                     True,
                     f"allowed by API key {api_entry['name']}",
                     f"api_key:{api_entry['name']}",
+                    target,
                     api_entry["name"],
                 )
 
@@ -232,13 +237,14 @@ class AuthorizationManager:
                     True,
                     f"allowed by network {net_entry['name']} ({net_entry['range']})",
                     f"network:{net_entry['name']} ({net_entry['range']})",
+                    target,
                     None,
                 )
 
         # 7. Deny
         reason = f"denied: not in any allow list for target {target}"
         logger.info("Command '%s' denied for target '%s'", command, target)
-        return AuthResult(False, reason, "denied", None)
+        return AuthResult(False, reason, "denied", target, None)
 
     def list_allowed_commands(
         self,
@@ -315,6 +321,7 @@ class AuthorizationManager:
                 False,
                 "redirection target is a protected path",
                 "blocked:redirection-target",
+                "",
                 None,
             )
         return None
@@ -334,7 +341,7 @@ class AuthorizationManager:
         if found:
             reason = f"blocked: dangerous shell pattern(s) — {', '.join(found)}"
             logger.debug("Command '%s' %s", command, reason)
-            return AuthResult(False, reason, "blocked:dangerous-patterns", None)
+            return AuthResult(False, reason, "blocked:dangerous-patterns", "", None)
         return None
 
     def update_rules(self, config_data: dict | None = None) -> None:
@@ -364,7 +371,7 @@ class AuthorizationManager:
         allowed_commands = data.get("allowed_commands", {})
         return RulesSnapshot(
             block_patterns=tuple(
-                (p, re.compile(p, re.IGNORECASE))
+                (p, compile_safe_pattern(p, re.IGNORECASE))
                 for p in data.get("block_patterns", [])
             ),
             default_rules=tuple(allowed_commands.get("default", [])),
@@ -379,7 +386,7 @@ class AuthorizationManager:
         the command passes all patterns.
         """
         for pattern, compiled in self._rules.block_patterns:
-            if compiled.search(command):
+            if safe_regex_search(compiled, command):
                 logger.debug(
                     "Command '%s' blocked by pattern '%s'", command, pattern
                 )
@@ -387,6 +394,7 @@ class AuthorizationManager:
                     False,
                     f"blocked by pattern '{pattern}'",
                     f"blocked:{pattern}",
+                    "",
                     None,
                 )
         return None

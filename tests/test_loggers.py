@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import pytest
 
+from lib.exceptions import ConfigValidationError
 from lib.loggers import BaseLogger, FileLogger
 
 
@@ -662,3 +663,66 @@ class TestFileLoggerGracefulDegradation:
             assert fl.consecutive_failures == 1
         finally:
             fl.close()
+
+
+# ---------------------------------------------------------------------------
+# FileLogger — path validation at init time
+# ---------------------------------------------------------------------------
+
+
+class TestFileLoggerPathValidation:
+    """Verify that FileLogger validates log_dir on construction."""
+
+    def test_rejects_log_dir_with_null_bytes(self) -> None:
+        """A log_dir containing null bytes raises ConfigValidationError."""
+        with pytest.raises(ConfigValidationError, match="null bytes"):
+            FileLogger("/tmp/logs\x00/etc")
+
+    def test_rejects_empty_log_dir(self) -> None:
+        """An empty log_dir raises ConfigValidationError."""
+        with pytest.raises(ConfigValidationError, match="must not be empty"):
+            FileLogger("")
+
+    def test_valid_log_dir_accepted(self, tmp_path: Path) -> None:
+        """A valid absolute log_dir is accepted and creates the log file."""
+        log_dir = tmp_path / "logs"
+        fl = FileLogger(str(log_dir))
+        try:
+            fl.log({"event": "test"})
+            assert (log_dir / "ssh-mcp.log").exists()
+        finally:
+            fl.close()
+
+    def test_relative_log_dir_resolves(self, tmp_path: Path) -> None:
+        """A relative log_dir resolves to an absolute path."""
+        fl = FileLogger("test_logs_relative")
+        try:
+            fl.log({"event": "test"})
+        finally:
+            fl.close()
+
+    def test_path_traversal_resolves(self, tmp_path: Path) -> None:
+        """Traversal sequences are resolved, not rejected (they may be valid)."""
+        log_dir = tmp_path / "logs" / ".." / "logs"
+        fl = FileLogger(str(log_dir))
+        try:
+            fl.log({"event": "test"})
+        finally:
+            fl.close()
+        # The resolved path should be under tmp_path / "logs"
+        assert (tmp_path / "logs" / "ssh-mcp.log").exists()
+
+    def test_validation_happens_at_init(self, tmp_path: Path) -> None:
+        """Validation occurs at __init__, not per log() call."""
+        # A valid path should succeed at init
+        log_dir = tmp_path / "logs"
+        fl = FileLogger(str(log_dir))
+        try:
+            # Subsequent log calls should work without re-validation
+            fl.log({"event": "first"})
+            fl.log({"event": "second"})
+        finally:
+            fl.close()
+
+        lines = (log_dir / "ssh-mcp.log").read_text().strip().split("\n")
+        assert len(lines) == 2

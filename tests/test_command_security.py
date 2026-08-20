@@ -474,7 +474,11 @@ class TestAuthorizationManagerInjectionRejection:
                 "default": [
                     {
                         "targets": ["*"],
-                        "commands": ["hostname", "uptime", "free", "df", "grep", "ls", "cat", "echo", "whoami", "id"],
+                        "commands": [
+                            "hostname", "uptime", "free", "df",
+                            "grep", "ls", "cat", "echo",
+                            "whoami", "id",
+                        ],
                     }
                 ],
                 "api_keys": [],
@@ -634,7 +638,13 @@ class TestParametrizedInjectionPayloads:
             "block_patterns": [r"\brm\s+-rf\b"],
             "allowed_commands": {
                 "default": [
-                    {"targets": ["*"], "commands": ["hostname", "uptime", "ls", "echo", "id", "whoami"]}
+                    {
+                        "targets": ["*"],
+                        "commands": [
+                            "hostname", "uptime", "ls",
+                            "echo", "id", "whoami",
+                        ],
+                    }
                 ],
                 "api_keys": [],
                 "networks": [],

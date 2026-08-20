@@ -96,8 +96,16 @@ class SecretsManager:
             "secrets.load",
             "Secrets file loaded",
             success=True,
-            ssh_target_count=len(data.get("ssh_targets", {})) if isinstance(data.get("ssh_targets"), dict) else 0,
-            api_key_count=len(data.get("api_keys", [])) if isinstance(data.get("api_keys"), list) else 0,
+            ssh_target_count=(
+                len(data.get("ssh_targets", {}))
+                if isinstance(data.get("ssh_targets"), dict)
+                else 0
+            ),
+            api_key_count=(
+                len(data.get("api_keys", []))
+                if isinstance(data.get("api_keys"), list)
+                else 0
+            ),
         )
         return data
 

@@ -436,7 +436,12 @@ class TestExtractClientIP:
             headers={"X-Forwarded-For": "203.0.113.9, 10.0.0.1"},
             client_host="10.0.0.1",
         )
-        assert RequestContextMiddleware._extract_ip(request) == "203.0.113.9"
+        assert (
+            RequestContextMiddleware._extract_ip(
+                request, trusted_proxies=["10.0.0.1"]
+            )
+            == "203.0.113.9"
+        )
 
     def test_falls_back_to_client_host(self):
         """Without X-Forwarded-For, the direct client host is used."""
@@ -444,11 +449,16 @@ class TestExtractClientIP:
         assert RequestContextMiddleware._extract_ip(request) == "192.168.1.5"
 
     def test_invalid_forwarded_for_falls_back_to_loopback(self):
-        """Invalid X-Forwarded-For values are replaced with 127.0.0.1."""
+        """Invalid X-Forwarded-For values from a trusted peer fall back to 127.0.0.1."""
         request = self._make_request(
             headers={"X-Forwarded-For": "not-an-ip"}, client_host="10.0.0.1"
         )
-        assert RequestContextMiddleware._extract_ip(request) == "127.0.0.1"
+        assert (
+            RequestContextMiddleware._extract_ip(
+                request, trusted_proxies=["10.0.0.1"]
+            )
+            == "127.0.0.1"
+        )
 
     def test_no_client_returns_loopback(self):
         """A request without client info falls back to 127.0.0.1."""
@@ -664,7 +674,7 @@ class TestIsCommandAllowed:
 
 
 # ---------------------------------------------------------------------------
-# get_ssh_client tests
+# get_ssh_target tests
 # ---------------------------------------------------------------------------
 
 
@@ -788,12 +798,12 @@ class TestSettings:
 
 
 # ---------------------------------------------------------------------------
-# get_ssh_client password tests
+# get_ssh_target password tests
 # ---------------------------------------------------------------------------
 
 
 class TestGetSshClientPassword:
-    """Tests for get_ssh_client target password extraction."""
+    """Tests for get_ssh_target password extraction."""
 
     def test_returns_password(self, tmp_path):
         """When target has a password, get_ssh_target returns it."""
@@ -1246,15 +1256,26 @@ class TestGracefulShutdown:
         """main() wires create_app()'s app into _run_server for signal handling."""
         holder = {}
 
+        config_manager = MagicMock()
+        config_manager.data = {"settings": {"trusted_proxies": ["198.51.100.7"]}}
+
         fake_app = MagicMock()
-        fake_app.state = SimpleNamespace(rate_limiter="limiter")
+        fake_app.state = SimpleNamespace(
+            rate_limiter="limiter",
+            trusted_proxies=["203.0.113.10"],
+            config_manager=config_manager,
+        )
 
         monkeypatch.setattr(server, "create_app", lambda **kwargs: fake_app)
         monkeypatch.setattr(
             server,
             "_run_server",
-            lambda app, rate_limiter=None: holder.update(
-                app=app, rate_limiter=rate_limiter
+            lambda app, rate_limiter=None, trusted_proxies=None,
+            trusted_proxies_provider=None: holder.update(
+                app=app,
+                rate_limiter=rate_limiter,
+                trusted_proxies=trusted_proxies,
+                trusted_proxies_provider=trusted_proxies_provider,
             ),
         )
         monkeypatch.setattr(sys, "argv", ["server.py"])
@@ -1263,6 +1284,10 @@ class TestGracefulShutdown:
 
         assert holder["app"] is fake_app
         assert holder["rate_limiter"] == "limiter"
+        assert holder["trusted_proxies"] == ["203.0.113.10"]
+        # The provider must read the LIVE (hot-reloaded) config manager value,
+        # not the static startup snapshot.
+        assert holder["trusted_proxies_provider"]() == ["198.51.100.7"]
 
 
 # ---------------------------------------------------------------------------
@@ -1436,3 +1461,118 @@ class TestCommandSanitizationInHandler:
         # The rejection happens at the handler entry, so auth never runs.
         assert auth_spy.call_count == 0
         assert payload["error"] is True
+
+
+# ---------------------------------------------------------------------------
+# SFTP config wiring (ticket #32)
+# ---------------------------------------------------------------------------
+
+
+class TestSftpConfigWiring:
+    """Tests that SFTP settings are read from config and passed to FileTransferService."""
+
+    def test_sftp_settings_read_from_config(self, tmp_path):
+        """sandbox_root and max_path_length from config are read correctly."""
+        config = _make_minimal_config(
+            settings={
+                "max_output_length": 50000,
+                "command_timeout_max": 120,
+                "sftp": {
+                    "sandbox_root": "/home/app/sftp",
+                    "max_path_length": 2048,
+                },
+            }
+        )
+        mgr = _make_config_manager(tmp_path, config)
+        sftp_settings = mgr.data.get("settings", {}).get("sftp", {})
+        assert sftp_settings.get("sandbox_root") == "/home/app/sftp"
+        assert sftp_settings.get("max_path_length") == 2048
+
+    def test_sftp_settings_defaults_when_missing(self, tmp_path):
+        """Missing sftp section falls back to sensible defaults."""
+        config = _make_minimal_config()
+        mgr = _make_config_manager(tmp_path, config)
+        sftp_settings = mgr.data.get("settings", {}).get("sftp", {})
+        assert sftp_settings.get("sandbox_root", "/") == "/"
+        assert sftp_settings.get("max_path_length", 4096) == 4096
+
+    def test_file_transfer_service_configured_from_settings(self, tmp_path):
+        """FileTransferService receives config values from sftp settings."""
+        config = _make_minimal_config(
+            settings={
+                "max_output_length": 50000,
+                "command_timeout_max": 120,
+                "sftp": {
+                    "sandbox_root": "/tmp/sftp",
+                    "max_path_length": 1024,
+                },
+            }
+        )
+        mgr = _make_config_manager(tmp_path, config)
+        sftp_settings = mgr.data.get("settings", {}).get("sftp", {})
+        from lib.constants import DEFAULT_SFTP_SANDBOX_ROOT, DEFAULT_MAX_SFTP_PATH_LENGTH
+        ft = FileTransferService(
+            sandbox_root=sftp_settings.get("sandbox_root", DEFAULT_SFTP_SANDBOX_ROOT),
+            max_path_length=sftp_settings.get("max_path_length", DEFAULT_MAX_SFTP_PATH_LENGTH),
+        )
+        assert "/tmp/sftp" in ft._sandbox_root
+        assert ft.max_path_length == 1024
+
+    def test_weak_upload_path_check_removed(self, tmp_path, monkeypatch):
+        """The old startswith('/tmp/' or '/home/') check no longer blocks uploads.
+
+        Previously, an upload to /opt/file.txt would be rejected with
+        'Upload only allowed to /tmp/ or /home/ paths' even before _validate_path
+        ran.  Now _validate_path is the single enforcement point and
+        /opt/file.txt is accepted when the sandbox is '/' (the default).
+        """
+        config = _make_minimal_config()
+        mgr = _make_config_manager(tmp_path, config)
+        auth_mgr = AuthorizationManager(mgr)
+
+        mcp = FastMCP("test")
+        file_logger = MagicMock()
+        stdlib_logger = MagicMock()
+
+        # Use a real FileTransferService so _validate_path runs
+        from lib.constants import DEFAULT_SFTP_SANDBOX_ROOT, DEFAULT_MAX_SFTP_PATH_LENGTH
+        sftp_settings = mgr.data.get("settings", {}).get("sftp", {})
+        ft = FileTransferService(
+            sandbox_root=sftp_settings.get("sandbox_root", DEFAULT_SFTP_SANDBOX_ROOT),
+            max_path_length=sftp_settings.get("max_path_length", DEFAULT_MAX_SFTP_PATH_LENGTH),
+        )
+        executor = _SyncExecutor()
+        ssh_cm = MagicMock()
+        ssh_cm.connect.return_value.__enter__ = MagicMock()
+        ssh_cm.connect.return_value.__exit__ = MagicMock()
+
+        server._register_tools(
+            mcp,
+            mgr,
+            auth_mgr,
+            file_logger,
+            stdlib_logger,
+            ssh_cm,
+            ft,
+            "",  # ssh_key_path
+            50000,  # max_command_output
+            executor,
+        )
+        tool = asyncio.run(mcp.get_tool("ssh_upload_file"))
+
+        # Mock the SFTP open/put call to succeed
+        mock_sftp = MagicMock()
+        mock_ssh_client = MagicMock()
+        mock_ssh_client.open_sftp.return_value = mock_sftp
+        ssh_cm.connect.return_value.__enter__ = MagicMock(return_value=mock_ssh_client)
+
+        # The old code would reject /opt/file.txt before even reaching SFTP.
+        # Now it should pass path validation and reach the SFTP write.
+        result = tool.fn(
+            server_name="testserver",
+            remote_path="/opt/file.txt",
+            content="aGVsbG8=",
+        )
+        payload = json.loads(result)
+        # Must NOT contain the old weak-path-check error
+        assert "Upload only allowed to /tmp/ or /home/ paths" not in str(payload)

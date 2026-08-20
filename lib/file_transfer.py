@@ -9,10 +9,11 @@ import paramiko
 
 from lib.constants import (
     DEFAULT_MAX_FILE_SIZE_BYTES,
+    DEFAULT_MAX_SFTP_PATH_LENGTH,
     DEFAULT_SFTP_SANDBOX_ROOT,
     DANGEROUS_UNICODE_PATH_CHARS,
 )
-from lib.exceptions import FileTransferError
+from lib.exceptions import FileTransferError, PathValidationError
 
 
 # ---------------------------------------------------------------------------
@@ -44,16 +45,21 @@ class FileTransferService:
         self,
         max_file_size_bytes: int = DEFAULT_MAX_FILE_SIZE_BYTES,
         sandbox_root: str = DEFAULT_SFTP_SANDBOX_ROOT,
+        max_path_length: int = DEFAULT_MAX_SFTP_PATH_LENGTH,
     ):
         """Initialize the file transfer service.
 
         Args:
-            max_file_size_bytes: Maximum file size for transfers (default 10 MiB).
+            max_file_size_bytes: Maximum file size for transfers (default 10 MiB).
             sandbox_root: Allowed root directory for SFTP paths.  Resolved
                 with :func:`os.path.realpath` before enforcement.  Defaults
                 to ``"/"`` (full access).
+            max_path_length: Maximum allowed length for SFTP remote paths
+                in bytes.  Set to 0 to disable the length check.  Defaults
+                to 4096.
         """
         self.max_file_size_bytes = max_file_size_bytes
+        self.max_path_length = max_path_length
         # Resolve the sandbox root once so that symlinks in the sandbox
         # directory itself don't affect enforcement.
         self._sandbox_root = os.path.realpath(sandbox_root)
@@ -108,6 +114,7 @@ class FileTransferService:
            (start with ``/``).
         7. The :func:`os.path.realpath`-resolved path must start with the
            configured sandbox root.
+        8. Path length is within the configured maximum.
 
         Args:
             remote_path: The remote file path to validate.
@@ -116,36 +123,36 @@ class FileTransferService:
             The validated, normalized path string (post-``normpath``).
 
         Raises:
-            FileTransferError: If the path fails any validation check.
+            PathValidationError: If the path fails any validation check.
         """
         # --- 1. Non-empty ---
         if not remote_path:
-            raise FileTransferError("Remote path must not be empty")
+            raise PathValidationError("Remote path must not be empty")
 
         # --- 2. Null bytes ---
         if "\x00" in remote_path:
-            raise FileTransferError("Remote path contains null byte")
+            raise PathValidationError("Remote path contains null byte")
 
         # --- 3. Dangerous Unicode homoglyphs ---
         if self._contains_dangerous_unicode(remote_path):
-            raise FileTransferError(
+            raise PathValidationError(
                 "Remote path contains dangerous Unicode characters"
             )
 
         # --- 4. URL-encoded traversal ---
         if self._has_url_encoded_traversal(remote_path):
-            raise FileTransferError(
+            raise PathValidationError(
                 "Remote path contains percent-encoded traversal sequences"
             )
 
         # --- 5. Validate raw components (before normpath collapses them) ---
         for part in remote_path.split(os.sep):
             if part == "." or part == "..":
-                raise FileTransferError(
+                raise PathValidationError(
                     f"Remote path component must not be '{part}'"
                 )
             if part.startswith("~"):
-                raise FileTransferError(
+                raise PathValidationError(
                     "Remote path component must not start with '~'"
                 )
 
@@ -153,7 +160,7 @@ class FileTransferService:
         normalized = os.path.normpath(remote_path)
 
         if not os.path.isabs(normalized):
-            raise FileTransferError(
+            raise PathValidationError(
                 f"Remote path must be absolute: {remote_path}"
             )
 
@@ -164,9 +171,16 @@ class FileTransferService:
         # root.  Use os.path.commonpath for a proper path-prefix check that
         # won't pass e.g. "/etcX/passwd" when sandbox is "/etc".
         if os.path.commonpath([real_path, self._sandbox_root]) != self._sandbox_root:
-            raise FileTransferError(
+            raise PathValidationError(
                 f"Resolved path '{real_path}' is outside the allowed "
                 f"sandbox '{self._sandbox_root}'"
+            )
+
+        # --- 8. Path length limit ---
+        if self.max_path_length > 0 and len(remote_path) > self.max_path_length:
+            raise PathValidationError(
+                f"Remote path length ({len(remote_path)} bytes) exceeds "
+                f"limit ({self.max_path_length} bytes)"
             )
 
         return normalized

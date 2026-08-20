@@ -127,3 +127,14 @@ class TestVerifyApiKey:
     def test_legacy_sha256_nonmatching_digest_fails(self):
         """A legacy sha256: value that is not the key's digest fails."""
         assert verify_api_key("key", "sha256:nothex") is False
+
+    def test_verify_api_key_uses_timing_safe_comparison(self):
+        """Verify secrets.compare_digest is used for timing-safe comparison."""
+        from unittest.mock import patch
+
+        key = "test-key-123"
+        stored_hash = hash_api_key(key)
+        with patch("lib.crypto.secrets.compare_digest", return_value=True) as mock_cd:
+            result = verify_api_key(key, stored_hash)
+            assert mock_cd.called
+            assert result is True

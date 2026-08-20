@@ -1,4 +1,4 @@
-# SSH MCP Server - modular library
+"""Public re-exports for the SSH MCP server library."""
 
 from lib.auth import AuthResult, AuthorizationManager, RulesSnapshot
 from lib.config import build_default_config, ConfigManager
@@ -10,6 +10,8 @@ from lib.command_security import (
     strip_redirects,
 )
 from lib.constants import (
+    ACTIVE_LOG_FILENAME,
+    ACTIVE_LOG_FILENAME,
     API_KEY_HASH_PREFIX,
     APP_NAME,
     APP_VERSION,
@@ -20,6 +22,7 @@ from lib.constants import (
     DANGEROUS_UNICODE_PATH_CHARS,
     LATEST_CONFIG_VERSION,
     DEFAULT_REQUEST_ID,
+    DEFAULT_TRUSTED_PROXIES,
     FALLBACK_CLIENT_IP,
     MIGRATED_FILE_MODE,
     REDIRECT_FD_DUP_RE,
@@ -29,6 +32,8 @@ from lib.constants import (
     DEFAULT_CONFIG_DIR,
     DEFAULT_CONFIG_FILENAME,
     DEFAULT_LOG_BACKUP_COUNT,
+    DEFAULT_REDOGS_TIMEOUT_SECONDS,
+    REDOGS_DANGEROUS_PATTERNS,
     DEFAULT_LOG_DIR,
     DEFAULT_LOG_MAX_SIZE_MB,
     DEFAULT_MAX_CONCURRENT_SSH_CONNECTIONS,
@@ -64,8 +69,11 @@ from lib.constants import (
     SUDO_NO_PASSWORD_FLAG,
     SUDO_PASSWORD_PROMPT_FLAGS,
     MAX_API_KEY_LENGTH,
-    MAX_SERVER_NAME_LENGTH,
-    SERVER_NAME_PATTERN,
+    MAX_BLOCK_PATTERNS,
+    MAX_REGEX_PATTERN_LENGTH,
+    MAX_TARGET_NAME_LENGTH,
+    MAX_TARGETS,
+    TARGET_NAME_PATTERN,
 )
 from lib.crypto import hash_api_key, verify_api_key
 from lib.exceptions import (
@@ -75,6 +83,7 @@ from lib.exceptions import (
     ConfigValidationError,
     FileTransferError,
     MCPSSHError,
+    PathValidationError,
     RateLimitError,
     SecretsError,
     ServiceUnavailableError,
@@ -83,6 +92,11 @@ from lib.exceptions import (
 )
 from lib.file_transfer import FileTransferService
 from lib.rate_limiter import RateLimiter, RateLimitMiddleware
+from lib.redos_protection import (
+    check_redos_risk,
+    compile_safe_pattern,
+    safe_regex_search,
+)
 from lib.secrets import SecretsManager
 from lib.size_utils import parse_size_bytes
 from lib.request_context import (
@@ -97,7 +111,8 @@ from lib.sudo import SudoHandler
 from lib.sanitize import (
     sanitize_command,
     sanitize_log_string,
-    sanitize_server_name,
+    sanitize_target_name,
+    validate_log_path,
 )
 from lib.types import (
     AllowedCommand,
@@ -113,6 +128,8 @@ from lib.types import (
 )
 
 __all__ = [
+    # Input sanitization — path validation
+    "validate_log_path",
     # Command security
     "check_dangerous_patterns",
     "segment_command",
@@ -121,11 +138,18 @@ __all__ = [
     # Rate limiting
     "RateLimiter",
     "RateLimitMiddleware",
+    # ReDoS protection
+    "check_redos_risk",
+    "compile_safe_pattern",
+    "safe_regex_search",
+    "DEFAULT_REDOGS_TIMEOUT_SECONDS",
+    "REDOGS_DANGEROUS_PATTERNS",
     # Services
     "SudoHandler",
     "SSHClientManager",
     "FileTransferService",
     "FileTransferError",
+    "PathValidationError",
     "MCPSSHError",
     "ConfigError",
     "ConfigMigrationError",
@@ -153,11 +177,13 @@ __all__ = [
     # Input sanitization
     "sanitize_command",
     "sanitize_log_string",
-    "sanitize_server_name",
+    "sanitize_target_name",
     # Crypto
     "hash_api_key",
     "verify_api_key",
     # Constants
+    "ACTIVE_LOG_FILENAME",
+    "ACTIVE_LOG_FILENAME",
     "APP_NAME",
     "APP_VERSION",
     "DEFAULT_CONFIG_DIR",
@@ -178,9 +204,12 @@ __all__ = [
     "PBKDF2_HASH_FUNC",
     "PBKDF2_ITERATIONS",
     "PBKDF2_SALT_BYTES",
-    "MAX_SERVER_NAME_LENGTH",
+    "MAX_TARGET_NAME_LENGTH",
     "MAX_API_KEY_LENGTH",
-    "SERVER_NAME_PATTERN",
+    "MAX_BLOCK_PATTERNS",
+    "MAX_REGEX_PATTERN_LENGTH",
+    "MAX_TARGETS",
+    "TARGET_NAME_PATTERN",
     "PEM_HEADER_OPENSSH",
     "PEM_HEADER_RSA",
     "PEM_HEADER_PKCS8",
@@ -201,6 +230,7 @@ __all__ = [
     "REDIRECT_FILE_OP_RE",
     "PROTECTED_REDIRECT_TARGET_RE",
     "DEFAULT_MAX_FILE_SIZE_BYTES",
+    "DEFAULT_MAX_SFTP_PATH_LENGTH",
     "DEFAULT_SFTP_SANDBOX_ROOT",
     "DANGEROUS_UNICODE_PATH_CHARS",
     "DEFAULT_SHUTDOWN_TIMEOUT_SECONDS",
@@ -214,6 +244,7 @@ __all__ = [
     "SUDO_NO_PASSWORD_FLAG",
     "FALLBACK_CLIENT_IP",
     "DEFAULT_REQUEST_ID",
+    "DEFAULT_TRUSTED_PROXIES",
     # Types
     "ServerInfo",
     "ServerListResult",

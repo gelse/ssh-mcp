@@ -37,6 +37,9 @@ permissions and excluded from VCS.
 DEFAULT_LOG_DIR: str = "/logs"
 """Default directory for JSONL log output."""
 
+ACTIVE_LOG_FILENAME: str = "ssh-mcp.log"
+"""Filename of the active JSONL log file written inside the log directory."""
+
 DEFAULT_SSH_KEY_FILENAME: str = "ssh_key"
 """Default filename for the private SSH key inside ``DEFAULT_CONFIG_DIR``."""
 
@@ -105,15 +108,24 @@ PBKDF2_ITERATIONS: int = 100_000
 PBKDF2_SALT_BYTES: int = 16
 """Length of the random per-key salt in bytes."""
 
-MAX_SERVER_NAME_LENGTH: int = 128
-"""Maximum length (characters) of an SSH-target server name."""
+MAX_TARGET_NAME_LENGTH: int = 128
+"""Maximum length (characters) of an SSH target identifier."""
+
+MAX_TARGETS: int = 1_000
+"""Maximum number of SSH targets allowed in a single config file."""
+
+MAX_BLOCK_PATTERNS: int = 500
+"""Maximum number of block_patterns entries allowed in a single config file."""
+
+MAX_REGEX_PATTERN_LENGTH: int = 10_000
+"""Maximum character length of a single block_patterns regex entry."""
 
 MAX_API_KEY_LENGTH: int = 1024
 """Maximum length (characters) of a raw API key before hashing."""
 
-SERVER_NAME_PATTERN: re.Pattern[str] = re.compile(r"[a-zA-Z0-9._-]+")
-"""Regex matching a single valid server-name run (see MAX_SERVER_NAME_LENGTH
-for the upper bound; ``sanitize_server_name`` combines both)."""
+TARGET_NAME_PATTERN: re.Pattern[str] = re.compile(r"[a-zA-Z0-9._-]+")
+"""Regex matching a single valid target-name run (see MAX_TARGET_NAME_LENGTH
+for the upper bound; ``sanitize_target_name`` combines both)."""
 
 # =============================================================================
 # PEM Header Strings
@@ -206,6 +218,7 @@ SETTING_KEY_TYPES: dict[str, str] = {
     "pool_cleanup_interval_seconds": "float",
     "max_concurrent_ssh_connections": "int",
     "watcher_debounce_seconds": "float",
+    "trusted_proxies": "list",
 }
 """Maps each ``settings`` key to its expected Python type name.
 
@@ -278,6 +291,34 @@ redirections are blocked independently of the operator-supplied
 """
 
 # =============================================================================
+# ReDoS Protection
+# =============================================================================
+
+DEFAULT_REDOGS_TIMEOUT_SECONDS: float = 0.5
+"""Hard timeout (seconds) for regex matching in block pattern checks.
+
+If a compiled pattern does not complete and return within this window, the
+match is treated as a non-match (safe default: the command is **not** blocked
+by that pattern).  The operator should repair the offending pattern; the
+static analysis in :mod:`lib.redos_protection` catches most dangerous
+patterns at config load before they ever reach runtime.
+"""
+
+REDOGS_DANGEROUS_PATTERNS: tuple[str, ...] = (
+    r"\([^()]*[\*\+][^()]*\)[\*\+]",
+    r"\([^()]+\|[^()]+\)[\*\+]",
+    r"\([^()]*\.[\*\+][^()]*\)(?:\{[^}]*\}|\+)",
+)
+"""Detector regexes applied to block-pattern *source* strings to flag known
+ReDoS-prone constructs.
+
+These are best-effort heuristics that scan the raw pattern text for nested
+quantifiers, overlapping alternations, and quantified dot-star groups.  They
+catch obvious unsafe constructs (e.g. ``(a+)+``, ``(a|a)+``, ``(.*a){n}``)
+but are not exhaustive — the runtime timeout wrapper is the true safety net.
+"""
+
+# =============================================================================
 # File Transfer Limits
 # =============================================================================
 
@@ -304,6 +345,13 @@ DEFAULT_SFTP_SANDBOX_ROOT: str = "/"
 When set to ``"/"`` any absolute path is allowed (full access).
 Set to a subdirectory (e.g. ``"/home/app/sftp"``) to restrict
 file transfers to that directory tree.
+"""
+
+DEFAULT_MAX_SFTP_PATH_LENGTH: int = 4096
+"""Default maximum allowed length for SFTP remote paths (bytes).
+
+Protects against excessively long paths that could trigger filesystem
+or SFTP protocol edge cases.  Set to 0 to disable the length check.
 """
 
 # =============================================================================
@@ -400,4 +448,13 @@ DEFAULT_REQUEST_ID: str = "unknown"
 
 Must be non-empty so callers can always correlate logs and error
 responses with a stable, truthy identifier.
+"""
+
+DEFAULT_TRUSTED_PROXIES: list[str] = []
+"""Trusted reverse proxies honored for ``X-Forwarded-For`` resolution.
+
+When non-empty, the request middleware only accepts the client IP from
+the ``X-Forwarded-For`` header when the direct connection peer is in
+this list.  An empty list means no proxy is trusted and the header is
+ignored entirely, preventing header spoofing by untrusted clients.
 """

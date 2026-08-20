@@ -61,6 +61,11 @@
     "pool_idle_timeout_seconds": 300.0,
     "pool_cleanup_interval_seconds": 60.0,
     "max_concurrent_ssh_connections": 20,
-    "watcher_debounce_seconds": 2.0
+    "watcher_debounce_seconds": 2.0,
+    "trusted_proxies": [],
+    "sftp": {
+      "sandbox_root": "/",
+      "max_path_length": 4096
+    }
   }
 }

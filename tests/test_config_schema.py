@@ -25,8 +25,9 @@ EXPECTED_REQUIRED_KEYS = {
     "settings",
 }
 
-# The 13 settings keys validated by ConfigManager._validate.
-EXPECTED_SETTING_KEYS = set(SETTING_KEY_TYPES.keys())
+# The settings keys validated by ConfigManager._validate, derived from the
+# SETTING_KEY_TYPES mapping so the schema test stays in sync with _validate.
+EXPECTED_SETTING_KEYS = set(SETTING_KEY_TYPES.keys()) | {"sftp"}
 
 
 def _load_schema() -> dict:

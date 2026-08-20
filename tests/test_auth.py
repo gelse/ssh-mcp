@@ -63,7 +63,10 @@ def _minimal_auth_config(**overrides) -> dict:
             "api_keys": [
                 {
                     "name": "monitoring-service",
-                    "key_hash": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+                    "key_hash": (
+                        "sha256:9f86d081884c7d659a2feaa0c55ad015"
+                        "a3bf4f1b2b0b822cd15d6c15b0f00a08"
+                    ),
                     "rules": [
                         {
                             "targets": ["knubbel", "home"],
@@ -77,7 +80,10 @@ def _minimal_auth_config(**overrides) -> dict:
                 },
                 {
                     "name": "full-admin",
-                    "key_hash": "sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
+                    "key_hash": (
+                        "sha256:2c26b46b68ffc68ff99b453c1d304134"
+                        "13422d706483bfa0f98a5e886266e7ae"
+                    ),
                     "rules": [
                         {"targets": ["*"], "commands": ["*"]}
                     ],
@@ -190,14 +196,16 @@ class TestAuthResult:
     """Tests for the AuthResult dataclass."""
 
     def test_auth_result_allowed(self):
-        result = AuthResult(True, "ok", "default")
+        result = AuthResult(True, "ok", "default", "test-target")
         assert result.allowed is True
         assert result.reason == "ok"
         assert result.matched_via == "default"
+        assert result.target_name == "test-target"
 
     def test_auth_result_denied(self):
-        result = AuthResult(False, "blocked", "blocked:rm -rf")
+        result = AuthResult(False, "blocked", "blocked:rm -rf", "test-target")
         assert result.allowed is False
+        assert result.target_name == "test-target"
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +236,38 @@ class TestCheckCommandBlockPatterns:
     def test_non_blocked_passes(self, tmp_path):
         am = _make_auth_manager(tmp_path)
         result = am.check_command("hostname", "knubbel")
+        assert result.allowed is True
+
+
+# ---------------------------------------------------------------------------
+# TestBlockPatternReDoSProtection
+# ---------------------------------------------------------------------------
+
+
+class TestBlockPatternReDoSProtection:
+    """Verify the ReDoS protection layers applied to block patterns."""
+
+    def test_block_patterns_compiled_with_safety_flag(self, tmp_path):
+        """Block patterns are compiled with ``re.LIMITED_TIME`` when available."""
+        am = _make_auth_manager(tmp_path)
+        _raw, compiled = am._rules.block_patterns[0]
+        limited_time = getattr(re, "LIMITED_TIME", None)
+        if limited_time is not None:
+            assert compiled.flags & int(limited_time)
+
+    def test_block_pattern_timeout_returns_no_match(self, tmp_path, monkeypatch):
+        """A timeout during matching yields no block -- the safe default."""
+        import lib.auth as auth_mod
+
+        cfg = _minimal_auth_config(block_patterns=[r"\bblockme\b"])
+        cfg["allowed_commands"]["default"] = [
+            {"targets": ["*"], "commands": ["blockme", "hostname"]}
+        ]
+        monkeypatch.setattr(auth_mod, "safe_regex_search", lambda *a, **k: None)
+        am = _make_auth_manager(tmp_path, cfg)
+        result = am.check_command("blockme", "knubbel")
+        # Pattern match timed out (returned None) so block_patterns did not
+        # block; the command passes through to the default allow rule.
         assert result.allowed is True
 
 
@@ -357,7 +397,10 @@ class TestCheckCommandNetwork:
         rules so the network layer is reached."""
         cfg = _minimal_auth_config()
         cfg["allowed_commands"]["default"] = [
-            {"targets": ["knubbel", "home", "mail"], "commands": ["hostname", "uptime", "free", "df", "grep"]}
+            {
+                "targets": ["knubbel", "home", "mail"],
+                "commands": ["hostname", "uptime", "free", "df", "grep"],
+            }
         ]
         am = _make_auth_manager(tmp_path, cfg)
         result = am.check_command("uptime", "piprint", source_ip="10.42.99.50")
@@ -612,7 +655,11 @@ class TestListAllowedCommands:
         am = _make_auth_manager(tmp_path)
         result = am.list_allowed_commands("knubbel", api_key="test")
         expected = sorted(
-            ["df", "docker", "free", "grep", "hostname", "journalctl", "ping", "systemctl", "uptime"]
+            [
+                "df", "docker", "free", "grep",
+                "hostname", "journalctl", "ping",
+                "systemctl", "uptime",
+            ]
         )
         assert result == expected
 
@@ -632,7 +679,8 @@ class TestListAllowedCommands:
         assert result == []
 
     def test_target_specific_filtering(self, tmp_path):
-        """mail target: default rules apply (wildcard target), plus monitoring-service wildcard-target rules."""
+        """mail target: default rules apply (wildcard target), plus
+        monitoring-service wildcard-target rules."""
         am = _make_auth_manager(tmp_path)
         result = am.list_allowed_commands("mail", api_key="test")
         expected = sorted(
