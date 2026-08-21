@@ -198,7 +198,7 @@
     lack module docstrings.
 
     **Tasks**:
-    - Rename `TestHelperFunctions` → `TestRequestContextHelpers` (and any other generic
+    - Rename `TestHelperFunctions` → `TestCommandParsingHelpers` (and any other generic
       class names)
     - Rename `tests/integration/test_integration.py` → `tests/integration/test_mcp_ssh_integration.py`
     - Add module docstrings to `tests/test_server.py`, `tests/test_auth.py`,

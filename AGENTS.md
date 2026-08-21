@@ -60,7 +60,7 @@ mcp-ssh/
 ├── tests/
 │   ├── test_*.py              # 29 unit-test files (24 covering lib modules, plus server/e2e/concurrency/schema/piping-chaining)
 │   └── integration/
-│       └── test_integration.py # Real Docker containers: SSH server + MCP server
+│       └── test_mcp_ssh_integration.py # Real Docker containers: SSH server + MCP server
 ├── docs/
 │   └── SECURITY.md            # Full security model and hardening guide
 ├── Dockerfile                 # Multi-stage: SBOM → runtime (non-root, hash-pinned)
@@ -207,7 +207,7 @@ python -m pytest tests/test_<module>.py -x
 
 ### 4. Integration Test
 
-- Add scenarios to [`tests/integration/test_integration.py`](tests/integration/test_integration.py) if the change touches SSH operations, auth flow, rate limiting, or HTTP middleware
+- Add scenarios to [`tests/integration/test_mcp_ssh_integration.py`](tests/integration/test_mcp_ssh_integration.py) if the change touches SSH operations, auth flow, rate limiting, or HTTP middleware
 - Run `make integrationtest` (see [Integration Tests](#integration-tests-make-integrationtest) for container setup, cleanup, and skip behavior)
 
 ### 5. Commit
@@ -272,7 +272,7 @@ Before considering a task complete, verify every applicable item:
 - [ ] **Exception hierarchy respected** — Any new exception type subclasses [`MCPSSHError`](lib/exceptions.py). Bare `Exception` or `ValueError` is never raised for domain errors.
 - [ ] **`make test` passes** — Unit tests exit zero with no regressions (see [Unit Tests](#unit-tests-make-test)).
 - [ ] **New code is tested** — New modules or functions have corresponding tests in `tests/test_<module>.py`. Config-dependent tests use the `_write_config` helper pattern (see [`tests/test_auth.py`](tests/test_auth.py)). Both success and error paths are covered, with `pytest.raises()` for expected exceptions.
-- [ ] **`make integrationtest` passes** — Integration tests exit zero (see [Integration Tests](#integration-tests-make-integrationtest)). New scenarios are added to [`tests/integration/test_integration.py`](tests/integration/test_integration.py) if the change touches SSH operations, auth flow, rate limiting, or HTTP middleware.
+- [ ] **`make integrationtest` passes** — Integration tests exit zero (see [Integration Tests](#integration-tests-make-integrationtest)). New scenarios are added to [`tests/integration/test_mcp_ssh_integration.py`](tests/integration/test_mcp_ssh_integration.py) if the change touches SSH operations, auth flow, rate limiting, or HTTP middleware.
 - [ ] **README up to date** — New settings, tools, config keys, or user-facing behavior are documented in [`README.md`](README.md).
 - [ ] **Security rules followed** — If the change touches [`lib/crypto.py`](lib/crypto.py), [`lib/auth.py`](lib/auth.py), [`lib/command_security.py`](lib/command_security.py), [`lib/file_transfer.py`](lib/file_transfer.py), [`lib/sudo.py`](lib/sudo.py), or [`lib/request_context.py`](lib/request_context.py), the relevant section of [`docs/SECURITY.md`](docs/SECURITY.md) was consulted and its critical rules applied. (See [Security-Sensitive Areas](#security-sensitive-areas).)
 - [ ] **Commit created** — A single commit following the [Git Commit Practices](#git-commit-practices) (short, imperative-mood message).

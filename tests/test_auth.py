@@ -139,8 +139,8 @@ def _make_auth_manager(tmp_path: Path, config: dict | None = None):
 # ---------------------------------------------------------------------------
 
 
-class TestHelperFunctions:
-    """Tests for module-level helper functions (no ConfigManager needed)."""
+class TestCommandParsingHelpers:
+    """Tests for command-segmentation helper functions: _extract_base_command and _split_command_segments."""
 
     # -- _extract_base_command --
 
