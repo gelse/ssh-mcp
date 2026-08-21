@@ -4,7 +4,7 @@
 - [Project Overview](#project-overview) · [Project Layout](#project-layout) · [Plans & CI](#plans--ci)
 - [Testing](#testing) · [Development Workflow](#development-workflow)
 - [Coding Conventions](#coding-conventions) · [Definition of Done](#definition-of-done)
-- [Dependency Management](#dependency-management) · [Docker / Deployment Notes](#docker--deployment-notes)
+- [Git Branching Rules](#git-branching-rules) · [Dependency Management](#dependency-management) · [Docker / Deployment Notes](#docker--deployment-notes)
 - [Security-Sensitive Areas](#security-sensitive-areas) · [Worked Example](#worked-example--adding-a-read-only-tool)
 
 ## Project Overview
@@ -221,6 +221,15 @@ python -m pytest tests/test_<module>.py -x
   - `Add circuit breaker for SSH connection failures`
   - `Refactor auth chain to use dataclass rules`
 
+### 6. Branching & Pull Requests
+
+- **Main branch:** The primary branch is `main`.
+- **Protected branch:** `main` is protected — direct pushes to `main` are **not allowed**. All changes must go through a pull request.
+- **Deprecated branch:** The branch `github` is **deprecated** and must not be used for new work. Do not push to it.
+- **Feature branches:** All development must happen on a separate branch from `main`. Create a descriptive branch name (e.g., `feature/add-uptime-tool`, `fix/path-traversal`).
+- **Pull request required:** After finishing a task on a feature branch, create a pull request against `main`. Do not merge your own pull request — it must be reviewed and approved before merging.
+- **Branch lifecycle:** Delete the feature branch after its pull request has been merged.
+
 ## Coding Conventions
 
 | Rule | Detail |
@@ -267,6 +276,7 @@ Before considering a task complete, verify every applicable item:
 - [ ] **README up to date** — New settings, tools, config keys, or user-facing behavior are documented in [`README.md`](README.md).
 - [ ] **Security rules followed** — If the change touches [`lib/crypto.py`](lib/crypto.py), [`lib/auth.py`](lib/auth.py), [`lib/command_security.py`](lib/command_security.py), [`lib/file_transfer.py`](lib/file_transfer.py), [`lib/sudo.py`](lib/sudo.py), or [`lib/request_context.py`](lib/request_context.py), the relevant section of [`docs/SECURITY.md`](docs/SECURITY.md) was consulted and its critical rules applied. (See [Security-Sensitive Areas](#security-sensitive-areas).)
 - [ ] **Commit created** — A single commit following the [Git Commit Practices](#git-commit-practices) (short, imperative-mood message).
+- [ ] **Pull request created** — After committing, a pull request targeting `main` has been opened. Do not push directly to `main` (see [Git Branching Rules](#git-branching-rules)).
 
 ## Dependency Management
 
