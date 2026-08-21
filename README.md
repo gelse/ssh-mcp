@@ -36,7 +36,7 @@ ssh-mcp runs as a single HTTP service. Multiple AI clients — agents, CI pipeli
 
 ### Local stdio MCP (common pattern)
 
-```
+```text
 AI client
    │
    ▼
@@ -648,7 +648,7 @@ The compose file ships with Traefik labels that route `ssh-mcp.example.com` over
 
 | Command | Description |
 |---|---|
-| `make build` | Build the Docker image (`mcp-ssh:local`) |
+| `make build` | Build the Docker image (`ghcr.io/gelse/ssh-mcp:latest`) |
 | `make up` | `docker compose up -d --build` |
 | `make down` | `docker compose down` |
 | `make test` | Run unit tests |
