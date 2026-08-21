@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.13](https://img.shields.io/badge/python-3.13-blue.svg)](https://www.python.org/downloads/)
-[![Docker](https://img.shields.io/badge/docker-yes-blue.svg)](Dockerfile)
+[![Docker](https://img.shields.io/badge/docker-ready-2496ED.svg?logo=docker)](https://ghcr.io/gelse/ssh-mcp)
 [![MCP](https://img.shields.io/badge/MCP-streamable--HTTP-green.svg)](https://modelcontextprotocol.io/)
 [![Security](https://img.shields.io/badge/security-layered--auth-orange.svg)](docs/SECURITY.md)
 
@@ -605,6 +605,14 @@ The compose file ships with Traefik labels that route `ssh-mcp.example.com` over
 | `make test` | Run unit tests |
 | `make integrationtest` | Build test image, run integration tests |
 | `make clean-test` | Remove test artifacts and containers |
+
+### Pull from GHCR
+
+The Docker image is automatically built and published to GitHub Container Registry:
+
+```bash
+docker pull ghcr.io/gelse/ssh-mcp:latest
+```
 
 ---
 

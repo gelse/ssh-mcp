@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: mcp-ssh:local
+    image: ghcr.io/gelse/ssh-mcp:latest
     container_name: mcp-ssh
     restart: unless-stopped
     user: "${UID:-1000}:${GID:-1000}"
