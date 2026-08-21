@@ -2,6 +2,7 @@ name: unit-tests
 
 on:
   push:
+  workflow_call:
 
 jobs:
   test:
