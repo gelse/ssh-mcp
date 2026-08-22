@@ -29,6 +29,11 @@ COPY config-api/config_api/ /app/config_api/
 # Copy lib/ from MCP server (for ConfigManager import)
 COPY lib/ /app/lib/
 
+# Replace lib/__init__.py with a minimal version that only imports
+# stdlib-only modules needed by the config API (no paramiko, prometheus_client,
+# fastmcp, watchdog, or other heavy dependencies).
+COPY config-api/stubs/lib_init_minimal.py /app/lib/__init__.py
+
 # Copy config schema and default config (needed by ConfigManager)
 COPY config.schema.json /app/config.schema.json
 COPY default-config.json /app/default-config.json
