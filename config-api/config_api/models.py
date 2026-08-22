@@ -99,4 +99,4 @@ class ConfigSectionResponse(BaseModel):
     """Response wrapper for a single config section."""
 
     section: str
-    data: dict
+    data: dict | list
