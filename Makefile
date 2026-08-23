@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help dockercontainer up down test integrationtest config-integrationtest config-clean-test clean-test
+.PHONY: help dockercontainer up down test config-test integrationtest config-integrationtest config-clean-test clean-test
 
 help:  ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-25s\033[0m %s\n", $$1, $$2}'
@@ -16,6 +16,9 @@ down:  ## Stop and remove containers, networks
 
 test:  ## Run unit tests only (excludes integration tests)
 	python -m pytest tests/ -v --ignore=tests/integration/
+
+config-test:  ## Run config-api unit tests only (excludes integration tests)
+	cd config-api && .venv/bin/python -m pytest tests/ -v --ignore=tests/test_integration.py
 
 integrationtest:  ## Build :test image and run integration tests
 	docker build -t mcp-ssh:test .
