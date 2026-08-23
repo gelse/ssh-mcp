@@ -1,6 +1,11 @@
-.PHONY: build up down test integrationtest config-integrationtest config-clean-test clean-test
+.DEFAULT_GOAL := help
 
-build:  ## Build the Docker image using docker compose
+.PHONY: help dockercontainer up down test integrationtest config-integrationtest config-clean-test clean-test
+
+help:  ## Show this help message
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-25s\033[0m %s\n", $$1, $$2}'
+
+dockercontainer:  ## Build the Docker image using docker compose
 	docker compose build
 
 up:  ## Start the service with docker compose (detached)
