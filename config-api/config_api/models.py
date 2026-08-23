@@ -4,6 +4,9 @@ Models validate PUT request bodies and serialize GET responses.
 They are compatible with the config schema in config.schema.json but
 do NOT replicate all of ConfigManager._validate() — that validation
 is handled by the config service layer.
+
+New models for Web UI API extensions: HashKeyRequest, HashKeyResponse,
+BackupInfo, BackupListResponse, ValidateResponse.
 """
 
 from __future__ import annotations
@@ -100,3 +103,47 @@ class ConfigSectionResponse(BaseModel):
 
     section: str
     data: dict | list
+
+
+class HashKeyRequest(BaseModel):
+    """Request body for the hash-key endpoint."""
+
+    key: str = Field(..., min_length=1, max_length=1024)
+    """The plaintext API key to hash."""
+
+
+class HashKeyResponse(BaseModel):
+    """Response from the hash-key endpoint."""
+
+    key_hash: str
+    """The PBKDF2 hash in format pbkdf2:sha256:100000$<salt>$<hash>."""
+
+
+class BackupInfo(BaseModel):
+    """Metadata for a single config backup file."""
+
+    name: str
+    """Backup filename (e.g. ssh-mcp-config.20260823T120000Z.bak)."""
+
+    size_bytes: int = Field(ge=0)
+    """File size in bytes."""
+
+    created_at: str
+    """ISO 8601 UTC timestamp extracted from the filename."""
+
+
+class BackupListResponse(BaseModel):
+    """Response for the backup list endpoint."""
+
+    backups: list[BackupInfo]
+    """List of backup files, sorted newest first."""
+
+
+class ValidateResponse(BaseModel):
+    """Response from the config validation endpoint."""
+
+    valid: bool
+    """Whether the config passed validation."""
+
+    config: dict | None = None
+    """The validated config with defaults applied (only present when valid=true)."""

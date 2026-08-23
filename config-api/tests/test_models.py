@@ -7,14 +7,19 @@ from pydantic import ValidationError
 
 from config_api.models import (
     AllowedCommandsModel,
+    BackupInfo,
+    BackupListResponse,
     ConfigModel,
     ConfigSectionResponse,
     ErrorResponse,
+    HashKeyRequest,
+    HashKeyResponse,
     HealthResponse,
     RuleModel,
     SFTPSettingsModel,
     SettingsModel,
     SSHTargetModel,
+    ValidateResponse,
 )
 
 
@@ -366,3 +371,143 @@ class TestConfigSectionResponse:
     def test_data_required(self) -> None:
         with pytest.raises(ValidationError):
             ConfigSectionResponse(section="settings")
+
+
+# ---------------------------------------------------------------------------
+# HashKeyRequest
+# ---------------------------------------------------------------------------
+
+
+class TestHashKeyRequest:
+    """Tests for HashKeyRequest validation."""
+
+    def test_valid(self) -> None:
+        req = HashKeyRequest(key="my-secret-api-key")
+        assert req.key == "my-secret-api-key"
+
+    def test_key_required(self) -> None:
+        with pytest.raises(ValidationError):
+            HashKeyRequest()
+
+    def test_key_empty_rejected(self) -> None:
+        """Empty key is rejected (min_length=1)."""
+        with pytest.raises(ValidationError):
+            HashKeyRequest(key="")
+
+    def test_key_too_long_rejected(self) -> None:
+        """Key exceeding 1024 chars is rejected."""
+        with pytest.raises(ValidationError):
+            HashKeyRequest(key="a" * 1025)
+
+    def test_key_max_length_accepted(self) -> None:
+        """Key at exactly 1024 chars is accepted."""
+        req = HashKeyRequest(key="a" * 1024)
+        assert len(req.key) == 1024
+
+
+# ---------------------------------------------------------------------------
+# HashKeyResponse
+# ---------------------------------------------------------------------------
+
+
+class TestHashKeyResponse:
+    """Tests for HashKeyResponse."""
+
+    def test_valid(self) -> None:
+        resp = HashKeyResponse(key_hash="pbkdf2:sha256:100000$abc$def")
+        assert resp.key_hash == "pbkdf2:sha256:100000$abc$def"
+
+    def test_key_hash_required(self) -> None:
+        with pytest.raises(ValidationError):
+            HashKeyResponse()
+
+
+# ---------------------------------------------------------------------------
+# BackupInfo
+# ---------------------------------------------------------------------------
+
+
+class TestBackupInfo:
+    """Tests for BackupInfo validation."""
+
+    def test_valid(self) -> None:
+        info = BackupInfo(
+            name="ssh-mcp-config.20260823T120000Z.bak",
+            size_bytes=1024,
+            created_at="2026-08-23T12:00:00Z",
+        )
+        assert info.name == "ssh-mcp-config.20260823T120000Z.bak"
+        assert info.size_bytes == 1024
+        assert info.created_at == "2026-08-23T12:00:00Z"
+
+    def test_name_required(self) -> None:
+        with pytest.raises(ValidationError):
+            BackupInfo(size_bytes=100, created_at="2026-01-01T00:00:00Z")
+
+    def test_size_bytes_zero_accepted(self) -> None:
+        info = BackupInfo(name="empty.bak", size_bytes=0, created_at="2026-01-01T00:00:00Z")
+        assert info.size_bytes == 0
+
+    def test_size_bytes_negative_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            BackupInfo(name="bad.bak", size_bytes=-1, created_at="2026-01-01T00:00:00Z")
+
+    def test_created_at_required(self) -> None:
+        with pytest.raises(ValidationError):
+            BackupInfo(name="file.bak", size_bytes=100)
+
+
+# ---------------------------------------------------------------------------
+# BackupListResponse
+# ---------------------------------------------------------------------------
+
+
+class TestBackupListResponse:
+    """Tests for BackupListResponse."""
+
+    def test_empty_list(self) -> None:
+        resp = BackupListResponse(backups=[])
+        assert resp.backups == []
+
+    def test_with_backups(self) -> None:
+        backups = [
+            BackupInfo(name="a.bak", size_bytes=100, created_at="2026-01-01T00:00:00Z"),
+            BackupInfo(name="b.bak", size_bytes=200, created_at="2026-01-02T00:00:00Z"),
+        ]
+        resp = BackupListResponse(backups=backups)
+        assert len(resp.backups) == 2
+        assert resp.backups[0].name == "a.bak"
+
+    def test_backups_required(self) -> None:
+        with pytest.raises(ValidationError):
+            BackupListResponse()
+
+
+# ---------------------------------------------------------------------------
+# ValidateResponse
+# ---------------------------------------------------------------------------
+
+
+class TestValidateResponse:
+    """Tests for ValidateResponse."""
+
+    def test_valid_true_with_config(self) -> None:
+        cfg = {"version": 1, "ssh_targets": {"s1": {"host": "h", "username": "u"}}}
+        resp = ValidateResponse(valid=True, config=cfg)
+        assert resp.valid is True
+        assert resp.config == cfg
+
+    def test_valid_false_no_config(self) -> None:
+        resp = ValidateResponse(valid=False)
+        assert resp.valid is False
+        assert resp.config is None
+
+    def test_valid_required(self) -> None:
+        with pytest.raises(ValidationError):
+            ValidateResponse()
+
+    def test_valid_true_no_config(self) -> None:
+        """valid=True without config is still valid (config defaults to None)."""
+        resp = ValidateResponse(valid=True)
+        assert resp.valid is True
+        assert resp.config is None
