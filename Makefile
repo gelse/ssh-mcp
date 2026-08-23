@@ -1,4 +1,4 @@
-.PHONY: build up down test integrationtest clean-test
+.PHONY: build up down test integrationtest config-integrationtest config-clean-test clean-test
 
 build:  ## Build the Docker image using docker compose
 	docker compose build
@@ -16,6 +16,14 @@ integrationtest:  ## Build :test image and run integration tests
 	docker build -t mcp-ssh:test .
 	python -m pip install -r requirements-dev.txt
 	python -m pytest tests/integration/ -v
+
+config-integrationtest:  ## Build config-api :test image and run its integration tests
+	docker build -f Dockerfile.config-api -t mcp-ssh-config-api:test .
+	cd config-api && .venv/bin/python -m pytest tests/test_integration.py -v
+
+config-clean-test:  ## Remove leftover config-api test containers and network
+	-docker rm -f test-config-api 2>/dev/null || true
+	-docker network rm mcp-ssh-config-api-test-net 2>/dev/null || true
 
 clean-test:  ## Remove leftover test containers and network
 	-docker rm -f mcp-ssh-test-app mcp-ssh-test-ssh 2>/dev/null || true

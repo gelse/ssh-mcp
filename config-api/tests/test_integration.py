@@ -2,7 +2,8 @@
 
 These tests require:
 - Docker daemon running
-- The config API image built (docker compose build mcp-ssh-config-api)
+- The config API image built: make config-integrationtest (or manually:
+  docker build -f Dockerfile.config-api -t mcp-ssh-config-api:test .)
 - The docker Python SDK (in requirements-dev.txt)
 
 Skip gracefully if Docker is unavailable.
