@@ -139,6 +139,16 @@ class BackupListResponse(BaseModel):
     """List of backup files, sorted newest first."""
 
 
+class BackupRestoreResponse(BaseModel):
+    """Response from the backup restore endpoint."""
+
+    message: str
+    """Human-readable success message."""
+
+    config: dict
+    """The restored configuration (secrets stripped)."""
+
+
 class ValidateResponse(BaseModel):
     """Response from the config validation endpoint."""
 
