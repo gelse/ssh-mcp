@@ -16,19 +16,7 @@ services:
       - CONFIG_DIR=/config
       - LOG_DIR=/logs
     ports:
-      - 8081:8080
-    networks:
-      - traefik
-    labels:
-      traefik.enable: "true"
-      traefik.http.routers.mcp-ssh.entrypoints: "https"
-      traefik.http.routers.mcp-ssh.tls: "true"
-      traefik.http.routers.mcp-ssh.rule: "Host(`ssh-mcp.example.com`)"
-      traefik.http.routers.mcp-ssh.service: "mcp-ssh"
-      traefik.http.routers.mcp-ssh.middlewares: "mcp-ssh-headers"
-      traefik.http.middlewares.mcp-ssh-headers.headers.customrequestheaders.X-Forwarded-For: ""
-      traefik.http.services.mcp-ssh.loadbalancer.server.port: "8080"
-      traefik.docker.network: "traefik"
+      - "9080:8080"
 
   mcp-ssh-config-api:
     build:
@@ -45,24 +33,10 @@ services:
     volumes:
       - ./config:/config:rw
     ports:
-      - "8082:8081"
-    networks:
-      - traefik
-    labels:
-      traefik.enable: "true"
-      traefik.http.routers.mcp-config.entrypoints: "https"
-      traefik.http.routers.mcp-config.tls: "true"
-      traefik.http.routers.mcp-config.rule: "Host(`ssh-mcp-config.example.com`)"
-      traefik.http.routers.mcp-config.service: "mcp-config"
-      traefik.http.services.mcp-config.loadbalancer.server.port: "8081"
-      traefik.docker.network: "traefik"
+      - "9081:8081"
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8081/health"]
       interval: 30s
       timeout: 5s
       start_period: 5s
       retries: 3
-
-networks:
-  traefik:
-    external: true
