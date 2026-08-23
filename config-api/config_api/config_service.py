@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import os
+import re
 import tempfile
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from lib.config import ConfigManager
@@ -19,8 +21,11 @@ from lib.constants import (
     DEFAULT_CONFIG_DIR,
     DEFAULT_CONFIG_FILENAME,
     RESTRICTED_FILE_MODE,
+    TARGET_NAME_PATTERN,
 )
 from lib.exceptions import ConfigValidationError
+
+logger = logging.getLogger(__name__)
 
 
 class ConfigService:
@@ -100,6 +105,47 @@ class ConfigService:
         return config[section]
 
     # ------------------------------------------------------------------
+    # Granular read operations
+    # ------------------------------------------------------------------
+
+    def get_ssh_target(self, name: str) -> dict:
+        """Read a single SSH target by name, with secrets stripped.
+
+        Args:
+            name: The SSH target identifier.
+
+        Returns:
+            The target config dict (password, private_key stripped).
+
+        Raises:
+            KeyError: If the target does not exist.
+            FileNotFoundError: If the config file does not exist.
+        """
+        config = self.read_config()
+        targets = config.get("ssh_targets", {})
+        if name not in targets:
+            raise KeyError(f"SSH target '{name}' not found in config")
+        target = targets[name]
+        # Strip secrets from a single target dict
+        clean = copy.deepcopy(target)
+        if isinstance(clean, dict):
+            for field in self._SECRET_FIELDS:
+                clean.pop(field, None)
+        return clean
+
+    def get_block_patterns(self) -> list[str]:
+        """Read the block_patterns list from the config.
+
+        Returns:
+            The list of block pattern strings.
+
+        Raises:
+            FileNotFoundError: If the config file does not exist.
+        """
+        config = self.read_config()
+        return config.get("block_patterns", [])
+
+    # ------------------------------------------------------------------
     # Validation
     # ------------------------------------------------------------------
 
@@ -116,6 +162,23 @@ class ConfigService:
             ConfigValidationError: If validation fails.
         """
         return self._validator._validate(config)
+
+    def validate_only(self, config: dict) -> dict:
+        """Validate a config dict without writing to disk.
+
+        This is a thin wrapper around validate_config() that makes the
+        intent explicit in the method name.
+
+        Args:
+            config: The candidate config dict to validate.
+
+        Returns:
+            A validated deep copy with defaults applied.
+
+        Raises:
+            ConfigValidationError: If validation fails.
+        """
+        return self.validate_config(config)
 
     # ------------------------------------------------------------------
     # Write operations
@@ -148,15 +211,17 @@ class ConfigService:
         # Step 1: Validate (requires secrets for auth checks)
         validated = self.validate_config(config)
 
-        # Step 2: Strip secrets from the validated config for writing
+        # Step 2: Strip secrets for the return value (API responses)
         clean = self._strip_secrets(validated)
 
         with self._write_lock:
             # Step 3: Backup
             self._create_backup()
 
-            # Step 4-5: Atomic write
-            self._atomic_write(clean)
+            # Step 4-5: Atomic write (secrets kept on disk for
+            # read-modify-write cycles — stripping only happens in
+            # the return value so API callers never see them)
+            self._atomic_write(validated)
 
         return clean
 
@@ -191,6 +256,153 @@ class ConfigService:
 
         # Validate and write (write_config handles stripping + validation)
         return self.write_config(current)
+
+    # ------------------------------------------------------------------
+    # Granular write operations
+    # ------------------------------------------------------------------
+
+    def put_ssh_target(self, name: str, target_data: dict) -> dict:
+        """Create or replace a single SSH target.
+
+        Reads the current config, replaces or adds the target, validates
+        the full config, and atomically writes.
+
+        Args:
+            name: The SSH target identifier.
+            target_data: The target config dict (may include
+                password/private_key).
+
+        Returns:
+            The updated target dict (secrets stripped).
+
+        Raises:
+            ValueError: If the target name is invalid.
+            ConfigValidationError: If the merged config fails validation.
+        """
+        if not re.fullmatch(TARGET_NAME_PATTERN, name):
+            raise ValueError(f"Invalid target name: {name!r}")
+
+        current = self.read_config()
+        current.setdefault("ssh_targets", {})[name] = target_data
+        written = self.write_config(current)
+        target = written["ssh_targets"][name]
+        clean = copy.deepcopy(target)
+        if isinstance(clean, dict):
+            for field in self._SECRET_FIELDS:
+                clean.pop(field, None)
+        return clean
+
+    def delete_ssh_target(self, name: str) -> None:
+        """Delete a single SSH target.
+
+        Reads the current config, removes the target, validates, and
+        writes.
+
+        Args:
+            name: The SSH target identifier to delete.
+
+        Raises:
+            KeyError: If the target does not exist.
+            ConfigValidationError: If the config without this target
+                fails validation (e.g. it was the last target).
+        """
+        current = self.read_config()
+        targets = current.get("ssh_targets", {})
+        if name not in targets:
+            raise KeyError(f"SSH target '{name}' not found in config")
+        del targets[name]
+        self.write_config(current)
+
+    def put_block_pattern(self, index: int, pattern: str) -> list[str]:
+        """Replace a single block pattern at the given index.
+
+        Args:
+            index: Zero-based index into the block_patterns list.
+            pattern: The new regex pattern string.
+
+        Returns:
+            The updated block_patterns list.
+
+        Raises:
+            IndexError: If the index is out of range.
+            ConfigValidationError: If the pattern is not a valid regex
+                or the merged config fails validation.
+        """
+        current = self.read_config()
+        patterns = current.get("block_patterns", [])
+        if index < 0 or index >= len(patterns):
+            raise IndexError(
+                f"Block pattern index {index} out of range "
+                f"(list has {len(patterns)} entries)"
+            )
+        # Validate the regex pattern
+        re.compile(pattern)
+        patterns[index] = pattern
+        current["block_patterns"] = patterns
+        written = self.write_config(current)
+        return written["block_patterns"]
+
+    def delete_block_pattern(self, index: int) -> list[str]:
+        """Remove a single block pattern at the given index.
+
+        Args:
+            index: Zero-based index into the block_patterns list.
+
+        Returns:
+            The updated block_patterns list.
+
+        Raises:
+            IndexError: If the index is out of range.
+        """
+        current = self.read_config()
+        patterns = current.get("block_patterns", [])
+        if index < 0 or index >= len(patterns):
+            raise IndexError(
+                f"Block pattern index {index} out of range "
+                f"(list has {len(patterns)} entries)"
+            )
+        patterns.pop(index)
+        current["block_patterns"] = patterns
+        written = self.write_config(current)
+        return written["block_patterns"]
+
+    def append_block_pattern(self, pattern: str) -> list[str]:
+        """Append a new block pattern to the list.
+
+        Args:
+            pattern: The regex pattern string to append.
+
+        Returns:
+            The updated block_patterns list.
+
+        Raises:
+            ConfigValidationError: If the pattern is not a valid regex
+                or the merged config fails validation.
+        """
+        current = self.read_config()
+        patterns = current.get("block_patterns", [])
+        # Validate the regex pattern
+        re.compile(pattern)
+        patterns.append(pattern)
+        current["block_patterns"] = patterns
+        written = self.write_config(current)
+        return written["block_patterns"]
+
+    def replace_block_patterns(self, patterns: list[str]) -> list[str]:
+        """Replace the entire block_patterns list.
+
+        Args:
+            patterns: The new list of regex pattern strings.
+
+        Returns:
+            The written block_patterns list.
+
+        Raises:
+            ConfigValidationError: If any pattern is not a valid regex
+                or the merged config fails validation.
+        """
+        written = self.write_section("block_patterns", patterns)
+        return written["block_patterns"]
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -268,6 +480,191 @@ class ConfigService:
             pass  # Non-critical
 
         return backup_path
+
+    # ------------------------------------------------------------------
+    # Backup operations
+    # ------------------------------------------------------------------
+
+    def backup_list(self) -> list[dict]:
+        """List all config backup files, sorted newest first.
+
+        Scans config_dir for files matching the pattern
+        ``ssh-mcp-config.*.bak`` (matching the format produced by
+        ``_create_backup()``).
+
+        Returns:
+            List of dicts with keys: name, size_bytes, created_at.
+            Sorted by created_at descending (newest first).
+
+        Raises:
+            FileNotFoundError: If the config directory does not exist.
+        """
+        if not self.config_dir.is_dir():
+            raise FileNotFoundError(
+                f"Config directory does not exist: {self.config_dir}"
+            )
+
+        backups: list[dict] = []
+        for path in self.config_dir.glob("ssh-mcp-config.*.bak"):
+            # Extract the timestamp portion between "ssh-mcp-config." and ".bak"
+            stem = path.stem  # e.g. "ssh-mcp-config.20260823T120000Z"
+            parts = stem.split(".", 1)
+            if len(parts) < 2:
+                continue
+            ts_str = parts[1]
+            try:
+                ts = datetime.strptime(ts_str, "%Y%m%dT%H%M%SZ")
+            except ValueError:
+                continue  # Skip malformed filenames
+            stat = path.stat()
+            backups.append({
+                "name": path.name,
+                "size_bytes": stat.st_size,
+                "created_at": ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            })
+
+        backups.sort(key=lambda b: b["created_at"], reverse=True)
+        return backups
+
+    def backup_restore(self, backup_name: str) -> dict:
+        """Restore configuration from a backup file.
+
+        Args:
+            backup_name: The backup filename (e.g.
+                'ssh-mcp-config.20260823T120000Z.bak').
+
+        Returns:
+            The restored config dict (secrets stripped).
+
+        Raises:
+            FileNotFoundError: If the backup file does not exist.
+            ValueError: If the backup filename is invalid or contains
+                path traversal characters.
+            ConfigValidationError: If the backup content fails
+                validation.
+            json.JSONDecodeError: If the backup file contains invalid
+                JSON.
+        """
+        self._validate_backup_name(backup_name)
+
+        backup_path = self.config_dir / backup_name
+        if not backup_path.is_file():
+            raise FileNotFoundError(
+                f"Backup file not found: {backup_path}"
+            )
+
+        # Read and parse the backup
+        with backup_path.open("r", encoding="utf-8") as f:
+            backup_data = json.load(f)
+
+        # Validate the backup content
+        validated = self.validate_config(backup_data)
+
+        # Create a backup of the current config before overwriting
+        self._create_backup()
+
+        # Strip secrets and atomically write the restored config
+        clean = self._strip_secrets(validated)
+        self._atomic_write(clean)
+
+        return clean
+
+    def backup_delete(self, backup_name: str) -> None:
+        """Delete a single backup file.
+
+        Args:
+            backup_name: The backup filename to delete.
+
+        Raises:
+            FileNotFoundError: If the backup file does not exist.
+            ValueError: If the backup filename is invalid or contains
+                path traversal characters.
+        """
+        self._validate_backup_name(backup_name)
+
+        backup_path = self.config_dir / backup_name
+        if not backup_path.is_file():
+            raise FileNotFoundError(
+                f"Backup file not found: {backup_path}"
+            )
+        backup_path.unlink()
+
+    def cleanup_old_backups(self, max_age_days: int = 7) -> int:
+        """Delete backup files older than max_age_days.
+
+        Scans for ``ssh-mcp-config.*.bak`` files, parses the timestamp
+        from each filename, and deletes those older than the threshold.
+
+        Args:
+            max_age_days: Maximum age in days. Default 7.
+
+        Returns:
+            Number of backup files deleted.
+
+        Raises:
+            FileNotFoundError: If the config directory does not exist.
+        """
+        if not self.config_dir.is_dir():
+            raise FileNotFoundError(
+                f"Config directory does not exist: {self.config_dir}"
+            )
+
+        now = datetime.now(timezone.utc)
+        threshold = now - timedelta(days=max_age_days)
+        deleted = 0
+
+        for path in self.config_dir.glob("ssh-mcp-config.*.bak"):
+            stem = path.stem  # e.g. "ssh-mcp-config.20260823T120000Z"
+            parts = stem.split(".", 1)
+            if len(parts) < 2:
+                continue
+            ts_str = parts[1]
+            try:
+                ts = datetime.strptime(ts_str, "%Y%m%dT%H%M%SZ")
+            except ValueError:
+                continue  # Skip malformed filenames
+
+            # Make the naive datetime timezone-aware (UTC)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+
+            if ts < threshold:
+                logger.info("Deleting old backup: %s", path.name)
+                path.unlink()
+                deleted += 1
+
+        return deleted
+
+    @staticmethod
+    def _validate_backup_name(backup_name: str) -> None:
+        """Validate a backup filename for safety.
+
+        Ensures the name contains no path separators or traversal
+        sequences, and matches the expected backup pattern.
+
+        Args:
+            backup_name: The backup filename to validate.
+
+        Raises:
+            ValueError: If the name is invalid or contains path
+                traversal characters.
+        """
+        if "/" in backup_name or "\\" in backup_name:
+            raise ValueError(
+                f"Invalid backup name (contains path separator): "
+                f"{backup_name!r}"
+            )
+        if ".." in backup_name:
+            raise ValueError(
+                f"Invalid backup name (contains path traversal): "
+                f"{backup_name!r}"
+            )
+        if not re.fullmatch(
+            r"ssh-mcp-config\.\d{8}T\d{6}Z\.bak", backup_name
+        ):
+            raise ValueError(
+                f"Invalid backup name format: {backup_name!r}"
+            )
 
     def _atomic_write(self, config: dict) -> None:
         """Atomically write config dict to the config file.
