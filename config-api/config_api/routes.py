@@ -733,6 +733,9 @@ async def get_config_section(
     """
     try:
         data = svc.read_section(section)
+        # Strip secrets from ssh_targets section for API consumers
+        if section == "ssh_targets":
+            data = svc._strip_secrets({"ssh_targets": data})["ssh_targets"]
         return JSONResponse(
             content=ConfigSectionResponse(
                 section=section, data=data,

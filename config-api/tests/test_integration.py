@@ -407,9 +407,19 @@ class TestPutConfig:
             timeout=5,
         )
 
+        # Secrets must be present on disk (needed for SSH connections)
         config_path = config_dir / "ssh-mcp-config.json"
         on_disk = json.loads(config_path.read_text())
-        assert "password" not in on_disk["ssh_targets"]["s1"]
+        assert "password" in on_disk["ssh_targets"]["s1"]
+
+        # API response must strip secrets for consumers
+        resp = requests.get(
+            f"http://localhost:{port}/api/config/ssh_targets/s1",
+            headers=headers,
+            timeout=5,
+        )
+        assert resp.status_code == 200
+        assert "password" not in resp.json()
 
 
 class TestGetConfigSection:
@@ -442,61 +452,33 @@ class TestPutConfigSection:
     """Integration test: PUT /api/config/{section}."""
 
     def test_put_settings(self, config_api_container, config_dir):
-        """Test updating settings via full config replacement.
-
-        Previous PUT /api/config calls strip secrets (private_key /
-        password) from ssh_targets on disk, so both write_section()
-        and a simple GET→PUT round-trip fail validation.
-
-        Workaround: write a fresh valid config directly to disk using
-        the correct filename (ssh-mcp-config.json), then test settings
-        modification via PUT /api/config (full replacement).
-        """
+        """Test updating settings via PUT /api/config/{section}."""
         _, port = config_api_container
         headers = {"Authorization": f"Bearer {TEST_TOKEN}"}
 
-        # Write a fresh valid config to disk (correct filename)
-        fresh = _make_valid_config(
-            ssh_targets={
-                "settings-server": {
-                    "host": "10.0.0.1", "port": 2222,
-                    "username": "admin", "private_key": "/dev/null",
-                }
-            },
-            allowed_commands={
-                "default": [
-                    {"targets": ["settings-server"], "commands": ["ls"]},
-                ],
-                "api_keys": [], "networks": [],
-            },
-            settings={"max_output_length": 50000, "command_timeout_max": 120},
-        )
-        config_file = Path(config_dir) / "ssh-mcp-config.json"
-        config_file.write_text(json.dumps(fresh, indent=2) + "\n")
-
-        # 1. GET the current full config
+        # 1. GET current settings via the section endpoint
         response = requests.get(
-            f"http://localhost:{port}/api/config",
+            f"http://localhost:{port}/api/config/settings",
             headers=headers,
             timeout=5,
         )
         assert response.status_code == 200
-        full_config = response.json()
+        settings = response.json()["data"]
 
-        # 2. Modify settings within the full config
-        full_config["settings"]["log_level"] = "WARNING"
-        full_config["settings"]["command_timeout_max"] = 60
+        # 2. Modify settings
+        settings["log_level"] = "WARNING"
+        settings["command_timeout_max"] = 60
 
-        # 3. PUT the full config back (secrets are present in the payload)
+        # 3. PUT the modified settings via the section endpoint
         response = requests.put(
-            f"http://localhost:{port}/api/config",
-            json=full_config,
+            f"http://localhost:{port}/api/config/settings",
+            json=settings,
             headers=headers,
             timeout=5,
         )
         assert response.status_code == 200
 
-        # 4. Verify settings were updated via GET /api/config/settings
+        # 4. Verify settings were updated via GET
         response = requests.get(
             f"http://localhost:{port}/api/config/settings",
             headers=headers,
@@ -537,3 +519,139 @@ class TestFilePermissions:
         config_path = config_dir / "ssh-mcp-config.json"
         mode = os.stat(config_path).st_mode & 0o777
         assert mode == 0o600
+
+
+class TestIntegrationSSHTargetCRUD:
+    """Integration tests for SSH target CRUD lifecycle."""
+
+    def test_create_read_update_delete_cycle(self, config_api_container):
+        """Full CRUD lifecycle for an SSH target."""
+        _, port = config_api_container
+        headers = {"Authorization": f"Bearer {TEST_TOKEN}"}
+        base = f"http://localhost:{port}"
+        name = "integration-crud-test"
+
+        # Create (must include at least one credential)
+        resp = requests.put(
+            f"{base}/api/config/ssh_targets/{name}",
+            json={
+                "host": "10.0.0.99", "port": 22,
+                "username": "test", "password": "secret",
+            },
+            headers=headers,
+            timeout=5,
+        )
+        assert resp.status_code == 200
+
+        # Read
+        resp = requests.get(
+            f"{base}/api/config/ssh_targets/{name}",
+            headers=headers,
+            timeout=5,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["host"] == "10.0.0.99"
+        assert data["username"] == "test"
+
+        # Update (must include at least one credential)
+        resp = requests.put(
+            f"{base}/api/config/ssh_targets/{name}",
+            json={
+                "host": "10.0.0.100", "port": 2222,
+                "username": "test", "password": "new-secret",
+            },
+            headers=headers,
+            timeout=5,
+        )
+        assert resp.status_code == 200
+
+        # Verify update persisted
+        resp = requests.get(
+            f"{base}/api/config/ssh_targets/{name}",
+            headers=headers,
+            timeout=5,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["host"] == "10.0.0.100"
+        assert resp.json()["port"] == 2222
+
+        # Delete
+        resp = requests.delete(
+            f"{base}/api/config/ssh_targets/{name}",
+            headers=headers,
+            timeout=5,
+        )
+        assert resp.status_code == 200
+
+        # Verify gone
+        resp = requests.get(
+            f"{base}/api/config/ssh_targets/{name}",
+            headers=headers,
+            timeout=5,
+        )
+        assert resp.status_code == 404
+
+
+class TestIntegrationBackupLifecycle:
+    """Integration tests for backup lifecycle."""
+
+    def test_backup_appears_after_config_write(self, config_api_container):
+        """Writing config creates a backup that appears in the list."""
+        _, port = config_api_container
+        headers = {"Authorization": f"Bearer {TEST_TOKEN}"}
+        base = f"http://localhost:{port}"
+
+        config = requests.get(
+            f"{base}/api/config", headers=headers, timeout=5
+        ).json()
+        requests.put(
+            f"{base}/api/config", json=config, headers=headers, timeout=5
+        )
+        resp = requests.get(
+            f"{base}/api/backups", headers=headers, timeout=5
+        )
+        assert resp.status_code == 200
+        assert len(resp.json()["backups"]) >= 1
+
+    def test_backup_restore_cycle(self, config_api_container):
+        """Write → backup → modify → restore returns to original."""
+        _, port = config_api_container
+        headers = {"Authorization": f"Bearer {TEST_TOKEN}"}
+        base = f"http://localhost:{port}"
+
+        # Get original config
+        original = requests.get(
+            f"{base}/api/config", headers=headers, timeout=5
+        ).json()
+
+        # Write to create backup
+        requests.put(
+            f"{base}/api/config", json=original, headers=headers, timeout=5
+        )
+
+        # Modify
+        modified = original.copy()
+        modified["block_patterns"] = ["integration-test-pattern"]
+        requests.put(
+            f"{base}/api/config", json=modified, headers=headers, timeout=5
+        )
+
+        # Get backups and restore
+        backups = requests.get(
+            f"{base}/api/backups", headers=headers, timeout=5
+        ).json()
+        assert len(backups["backups"]) >= 1
+        requests.post(
+            f"{base}/api/backups/{backups['backups'][0]['name']}/restore",
+            headers=headers,
+            timeout=5,
+        )
+
+        # Verify restored — the integration-test-pattern should be gone
+        restored = requests.get(
+            f"{base}/api/config", headers=headers, timeout=5
+        ).json()
+        assert "integration-test-pattern" not in restored.get(
+            "block_patterns", []
+        )

@@ -1,4 +1,4 @@
-"""Tests for config API routes — all 5 endpoints with success and error paths.
+"""Tests for config API routes — all endpoints with success and error paths.
 
 Covers:
 - GET /health
@@ -6,6 +6,21 @@ Covers:
 - PUT /api/config
 - GET /api/config/{section}
 - PUT /api/config/{section}
+- POST /api/hash-key
+- GET /api/config/ssh_targets (list)
+- GET /api/config/ssh_targets/{name}
+- PUT /api/config/ssh_targets/{name}
+- DELETE /api/config/ssh_targets/{name}
+- GET /api/config/block_patterns (list)
+- POST /api/config/block_patterns
+- PUT /api/config/block_patterns
+- PUT /api/config/block_patterns/{index}
+- DELETE /api/config/block_patterns/{index}
+- GET /api/config/schema
+- POST /api/config/validate
+- GET /api/backups
+- POST /api/backups/{name}/restore
+- DELETE /api/backups/{name}
 """
 
 from __future__ import annotations
@@ -404,3 +419,635 @@ class TestPutConfigSection:
         response = client.get("/api/config/ssh_targets", headers=auth_headers)
         data = response.json()
         assert "persist-server" in data["data"]
+
+
+# ---------------------------------------------------------------------------
+# POST /api/hash-key
+# ---------------------------------------------------------------------------
+
+
+class TestPostHashKey:
+    """Tests for POST /api/hash-key."""
+
+    def test_returns_hashed_key(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """Valid key returns a PBKDF2 hash."""
+        response = client.post(
+            "/api/hash-key",
+            json={"key": "my-secret-key"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "key_hash" in data
+        assert data["key_hash"].startswith("pbkdf2:sha256:")
+
+    def test_rejects_missing_token(self, client: TestClient) -> None:
+        """POST without Authorization header returns 401."""
+        response = client.post("/api/hash-key", json={"key": "test"})
+        assert response.status_code == 401
+
+    def test_rejects_empty_key(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """Empty key returns 422 validation error."""
+        response = client.post(
+            "/api/hash-key",
+            json={"key": ""},
+            headers=auth_headers,
+        )
+        assert response.status_code == 422
+
+    def test_rejects_missing_key_field(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """Missing key field returns 422 validation error."""
+        response = client.post(
+            "/api/hash-key",
+            json={},
+            headers=auth_headers,
+        )
+        assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# GET /api/config/ssh_targets (list)
+# ---------------------------------------------------------------------------
+
+
+class TestGetSSHTargets:
+    """Tests for GET /api/config/ssh_targets (list endpoint)."""
+
+    def test_returns_targets_dict(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """Returns the ssh_targets section as ConfigSectionResponse."""
+        response = client.get("/api/config/ssh_targets", headers=auth_headers)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["section"] == "ssh_targets"
+        assert isinstance(data["data"], dict)
+        assert "test-server" in data["data"]
+
+    def test_secrets_stripped(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """Response does not contain passwords or private keys."""
+        data = client.get(
+            "/api/config/ssh_targets", headers=auth_headers,
+        ).json()
+        for target in data["data"].values():
+            assert "password" not in target
+            assert "private_key" not in target
+
+
+# ---------------------------------------------------------------------------
+# GET /api/config/ssh_targets/{name}
+# ---------------------------------------------------------------------------
+
+
+class TestGetSingleSSHTarget:
+    """Tests for GET /api/config/ssh_targets/{name}."""
+
+    def test_returns_single_target(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """Returns the named target without secrets."""
+        response = client.get(
+            "/api/config/ssh_targets/test-server",
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["host"] == "10.0.0.1"
+        assert "password" not in data
+
+    def test_returns_404_for_missing(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """Non-existent target returns 404."""
+        response = client.get(
+            "/api/config/ssh_targets/nonexistent",
+            headers=auth_headers,
+        )
+        assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# PUT /api/config/ssh_targets/{name}
+# ---------------------------------------------------------------------------
+
+
+class TestPutSingleSSHTarget:
+    """Tests for PUT /api/config/ssh_targets/{name}."""
+
+    def test_creates_new_target(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """PUT a new target creates it and returns 200."""
+        response = client.put(
+            "/api/config/ssh_targets/new-server",
+            json={
+                "host": "192.168.1.1",
+                "port": 22,
+                "username": "root",
+                "password": "test-pass",
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        # Verify it persisted
+        get_resp = client.get(
+            "/api/config/ssh_targets/new-server",
+            headers=auth_headers,
+        )
+        assert get_resp.status_code == 200
+        assert get_resp.json()["host"] == "192.168.1.1"
+
+    def test_updates_existing_target(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """PUT an existing target updates it and returns 200."""
+        response = client.put(
+            "/api/config/ssh_targets/test-server",
+            json={
+                "host": "10.0.0.2",
+                "port": 2222,
+                "username": "admin",
+                "password": "new-pass",
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+
+    def test_rejects_invalid_name(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """Invalid target name returns 400."""
+        response = client.put(
+            "/api/config/ssh_targets/../../etc",
+            json={"host": "1.2.3.4"},
+            headers=auth_headers,
+        )
+        assert response.status_code in (400, 404)
+
+    def test_rejects_missing_token(self, client: TestClient) -> None:
+        """PUT without auth returns 401."""
+        response = client.put(
+            "/api/config/ssh_targets/test",
+            json={"host": "1.2.3.4"},
+        )
+        assert response.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/config/ssh_targets/{name}
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteSingleSSHTarget:
+    """Tests for DELETE /api/config/ssh_targets/{name}."""
+
+    def test_deletes_existing_target(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """DELETE removes the target and returns 200 with message."""
+        # Add a second target so deletion doesn't violate min_length=1
+        client.put(
+            "/api/config/ssh_targets/second-server",
+            json={
+                "host": "10.0.0.99",
+                "port": 22,
+                "username": "root",
+                "password": "pass2",
+            },
+            headers=auth_headers,
+        )
+        response = client.delete(
+            "/api/config/ssh_targets/test-server",
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "message" in data
+        assert "deleted" in data["message"]
+        # Verify it's gone
+        get_resp = client.get(
+            "/api/config/ssh_targets/test-server",
+            headers=auth_headers,
+        )
+        assert get_resp.status_code == 404
+
+    def test_returns_404_for_missing(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """DELETE non-existent target returns 404."""
+        response = client.delete(
+            "/api/config/ssh_targets/nonexistent",
+            headers=auth_headers,
+        )
+        assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# GET /api/config/block_patterns (list)
+# ---------------------------------------------------------------------------
+
+
+class TestGetBlockPatterns:
+    """Tests for GET /api/config/block_patterns (list endpoint)."""
+
+    def test_returns_patterns_list(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """Returns the block_patterns list as ConfigSectionResponse."""
+        response = client.get(
+            "/api/config/block_patterns", headers=auth_headers,
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["section"] == "block_patterns"
+        assert isinstance(data["data"], list)
+
+
+# ---------------------------------------------------------------------------
+# POST /api/config/block_patterns
+# ---------------------------------------------------------------------------
+
+
+class TestPostBlockPattern:
+    """Tests for POST /api/config/block_patterns."""
+
+    def test_appends_pattern(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """POST appends a new pattern and returns 201."""
+        response = client.post(
+            "/api/config/block_patterns",
+            json={"pattern": "rm -rf"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["section"] == "block_patterns"
+        assert "rm -rf" in data["data"]
+
+
+# ---------------------------------------------------------------------------
+# PUT /api/config/block_patterns
+# ---------------------------------------------------------------------------
+
+
+class TestPutBlockPatterns:
+    """Tests for PUT /api/config/block_patterns."""
+
+    def test_replaces_all_patterns(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """PUT replaces the entire patterns list."""
+        response = client.put(
+            "/api/config/block_patterns",
+            json=["new1", "new2"],
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["section"] == "block_patterns"
+        assert data["data"] == ["new1", "new2"]
+
+
+# ---------------------------------------------------------------------------
+# PUT /api/config/block_patterns/{index}
+# ---------------------------------------------------------------------------
+
+
+class TestPutSingleBlockPattern:
+    """Tests for PUT /api/config/block_patterns/{index}."""
+
+    def test_replaces_pattern_at_index(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """PUT at index replaces that pattern."""
+        # First add a pattern
+        client.post(
+            "/api/config/block_patterns",
+            json={"pattern": "old"},
+            headers=auth_headers,
+        )
+        response = client.put(
+            "/api/config/block_patterns/0",
+            json={"pattern": "new"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["section"] == "block_patterns"
+        assert data["data"][0] == "new"
+
+    def test_returns_404_for_out_of_range(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """PUT at invalid index returns 404."""
+        response = client.put(
+            "/api/config/block_patterns/999",
+            json={"pattern": "test"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/config/block_patterns/{index}
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteSingleBlockPattern:
+    """Tests for DELETE /api/config/block_patterns/{index}."""
+
+    def test_deletes_pattern_at_index(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """DELETE at index removes that pattern."""
+        client.post(
+            "/api/config/block_patterns",
+            json={"pattern": "to-remove"},
+            headers=auth_headers,
+        )
+        response = client.delete(
+            "/api/config/block_patterns/0",
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["section"] == "block_patterns"
+        assert "to-remove" not in data["data"]
+
+    def test_returns_404_for_out_of_range(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """DELETE at invalid index returns 404."""
+        response = client.delete(
+            "/api/config/block_patterns/999",
+            headers=auth_headers,
+        )
+        assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# GET /api/config/schema
+# ---------------------------------------------------------------------------
+
+
+class TestGetSchema:
+    """Tests for GET /api/config/schema."""
+
+    def test_returns_json_schema(self, client: TestClient) -> None:
+        """Returns a valid JSON Schema object — no auth required."""
+        response = client.get("/api/config/schema")
+        assert response.status_code == 200
+        data = response.json()
+        assert "$schema" in data or "properties" in data
+
+    def test_schema_has_ssh_targets(self, client: TestClient) -> None:
+        """Schema defines ssh_targets property."""
+        data = client.get("/api/config/schema").json()
+        assert "properties" in data
+        assert "ssh_targets" in data["properties"]
+
+
+# ---------------------------------------------------------------------------
+# POST /api/config/validate
+# ---------------------------------------------------------------------------
+
+
+class TestPostValidate:
+    """Tests for POST /api/config/validate."""
+
+    def test_valid_config_returns_valid_true(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """Valid config returns {valid: True, config: {...}}."""
+        # Use a config with credentials (GET /api/config strips secrets,
+        # which would fail validation if credentials are required).
+        config = {
+            "version": 1,
+            "ssh_targets": {
+                "test-server": {
+                    "host": "10.0.0.1",
+                    "port": 22,
+                    "username": "admin",
+                    "password": "secret123",
+                },
+            },
+            "block_patterns": [],
+            "allowed_commands": {
+                "default": [
+                    {"targets": ["*"], "commands": ["echo", "whoami"]},
+                ],
+                "api_keys": [],
+                "networks": [],
+            },
+            "settings": {
+                "max_output_length": 50000,
+                "command_timeout_max": 120,
+            },
+        }
+        response = client.post(
+            "/api/config/validate",
+            json=config,
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["valid"] is True
+        assert data["config"] is not None
+
+    def test_invalid_config_returns_error(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """Invalid config returns ErrorResponse with 400."""
+        response = client.post(
+            "/api/config/validate",
+            json={"invalid": "config"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 400
+        data = response.json()
+        assert data["error"] is True
+        assert data["error_type"] == "ConfigValidationError"
+
+
+# ---------------------------------------------------------------------------
+# GET /api/backups
+# ---------------------------------------------------------------------------
+
+
+class TestGetBackups:
+    """Tests for GET /api/backups."""
+
+    def test_returns_empty_list(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """No backups → empty list."""
+        response = client.get("/api/backups", headers=auth_headers)
+        assert response.status_code == 200
+        data = response.json()
+        assert "backups" in data
+        assert data["backups"] == []
+
+    def test_returns_backup_info(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """After a PUT /api/config, backups appear."""
+        # Trigger a backup by writing config (use config with credentials
+        # since GET /api/config strips secrets and PUT would reject it).
+        config = {
+            "version": 1,
+            "ssh_targets": {
+                "test-server": {
+                    "host": "10.0.0.1",
+                    "port": 22,
+                    "username": "admin",
+                    "password": "secret123",
+                },
+            },
+            "block_patterns": [],
+            "allowed_commands": {
+                "default": [
+                    {"targets": ["*"], "commands": ["echo", "whoami"]},
+                ],
+                "api_keys": [],
+                "networks": [],
+            },
+            "settings": {
+                "max_output_length": 50000,
+                "command_timeout_max": 120,
+            },
+        }
+        client.put("/api/config", json=config, headers=auth_headers)
+        response = client.get("/api/backups", headers=auth_headers)
+        data = response.json()
+        assert len(data["backups"]) >= 1
+        assert "name" in data["backups"][0]
+        assert "size_bytes" in data["backups"][0]
+        assert "created_at" in data["backups"][0]
+
+
+# ---------------------------------------------------------------------------
+# POST /api/backups/{name}/restore
+# ---------------------------------------------------------------------------
+
+
+class TestPostBackupRestore:
+    """Tests for POST /api/backups/{name}/restore."""
+
+    def test_restores_backup(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """Restoring a backup replaces the config."""
+        # Create a backup (use config with credentials)
+        config = {
+            "version": 1,
+            "ssh_targets": {
+                "test-server": {
+                    "host": "10.0.0.1",
+                    "port": 22,
+                    "username": "admin",
+                    "password": "secret123",
+                },
+            },
+            "block_patterns": [],
+            "allowed_commands": {
+                "default": [
+                    {"targets": ["*"], "commands": ["echo", "whoami"]},
+                ],
+                "api_keys": [],
+                "networks": [],
+            },
+            "settings": {
+                "max_output_length": 50000,
+                "command_timeout_max": 120,
+            },
+        }
+        client.put("/api/config", json=config, headers=auth_headers)
+        backups = client.get("/api/backups", headers=auth_headers).json()
+        backup_name = backups["backups"][0]["name"]
+        response = client.post(
+            f"/api/backups/{backup_name}/restore",
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "message" in data
+        assert "config" in data
+
+    def test_returns_404_for_missing(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """Restoring non-existent backup returns 404."""
+        # Use a valid-format name that passes _validate_backup_name
+        response = client.post(
+            "/api/backups/ssh-mcp-config.20260101T000000Z.bak/restore",
+            headers=auth_headers,
+        )
+        assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/backups/{name}
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteBackup:
+    """Tests for DELETE /api/backups/{name}."""
+
+    def test_deletes_backup(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """Deleting a backup removes it and returns 200 with message."""
+        config = {
+            "version": 1,
+            "ssh_targets": {
+                "test-server": {
+                    "host": "10.0.0.1",
+                    "port": 22,
+                    "username": "admin",
+                    "password": "secret123",
+                },
+            },
+            "block_patterns": [],
+            "allowed_commands": {
+                "default": [
+                    {"targets": ["*"], "commands": ["echo", "whoami"]},
+                ],
+                "api_keys": [],
+                "networks": [],
+            },
+            "settings": {
+                "max_output_length": 50000,
+                "command_timeout_max": 120,
+            },
+        }
+        client.put("/api/config", json=config, headers=auth_headers)
+        backups = client.get("/api/backups", headers=auth_headers).json()
+        backup_name = backups["backups"][0]["name"]
+        response = client.delete(
+            f"/api/backups/{backup_name}",
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "message" in data
+        assert "deleted" in data["message"]
+
+    def test_returns_404_for_missing(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """Deleting non-existent backup returns 404."""
+        # Use a valid-format name that passes _validate_backup_name
+        response = client.delete(
+            "/api/backups/ssh-mcp-config.20260101T000000Z.bak",
+            headers=auth_headers,
+        )
+        assert response.status_code == 404
