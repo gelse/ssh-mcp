@@ -30,6 +30,7 @@ config-clean-test:  ## Remove leftover config-api test containers and network
 	-docker rm -f test-config-api 2>/dev/null || true
 	-docker network rm mcp-ssh-config-api-test-net 2>/dev/null || true
 
-clean-test:  ## Remove leftover test containers and network
+clean-test:  ## Remove leftover test containers, network, and log files
 	-docker rm -f mcp-ssh-test-app mcp-ssh-test-ssh 2>/dev/null || true
 	-docker network rm mcp-ssh-test-net 2>/dev/null || true
+	-rm -f logs/ssh-mcp.log
