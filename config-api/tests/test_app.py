@@ -164,6 +164,35 @@ class TestCreateApp:
         config_resp = client.get("/api/config")
         assert config_resp.status_code == 401
 
+    def test_ui_spa_served_at_slash_ui(self, tmp_path: Path) -> None:
+        """/ui/ serves the SPA index.html without requiring auth."""
+        _write_config(tmp_path, _minimal_config())
+        app = create_app(config_dir=str(tmp_path))
+        client = TestClient(app)
+        resp = client.get("/ui/")
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers["content-type"]
+        assert "<title>" in resp.text
+        assert "tailwindcss" in resp.text
+
+    def test_ui_index_html_direct(self, tmp_path: Path) -> None:
+        """/ui/index.html serves the same SPA content."""
+        _write_config(tmp_path, _minimal_config())
+        app = create_app(config_dir=str(tmp_path))
+        client = TestClient(app)
+        resp = client.get("/ui/index.html")
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers["content-type"]
+        assert "<title>" in resp.text
+
+    def test_api_routes_not_intercepted_by_ui(self, tmp_path: Path) -> None:
+        """/api/config still requires auth — the UI mount does not shadow it."""
+        _write_config(tmp_path, _minimal_config())
+        app = create_app(config_dir=str(tmp_path))
+        client = TestClient(app)
+        resp = client.get("/api/config")
+        assert resp.status_code == 401
+
 
 # ---------------------------------------------------------------------------
 # main() tests

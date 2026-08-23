@@ -1,0 +1,1715 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MCP SSH Config</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    /* Spinner animation */
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .animate-spin { animation: spin 1s linear infinite; }
+    /* Toast slide-in */
+    @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+    .toast-animate { animation: slideIn 0.3s ease-out; }
+    /* Modal overlay */
+    .modal-overlay { background: rgba(0,0,0,0.5); }
+    /* Active nav link */
+    .nav-link { opacity: 0.7; transition: opacity 0.15s; }
+    .nav-link:hover { opacity: 1; }
+    .nav-link.active { opacity: 1; border-bottom: 2px solid #60a5fa; }
+    /* Tab active */
+    .tab-btn { border-bottom: 2px solid transparent; transition: border-color 0.15s, color 0.15s; }
+    .tab-btn.active { border-bottom-color: #3b82f6; color: #1e40af; font-weight: 600; }
+  </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+
+  <!-- Toast container -->
+  <div id="toast-container" class="fixed top-4 right-4 z-50 flex flex-col gap-2"></div>
+
+  <!-- Navigation bar (hidden until logged in) -->
+  <nav id="navbar" class="bg-gray-800 text-white px-6 py-3 flex items-center justify-between hidden">
+    <div class="flex space-x-4">
+      <a href="#/targets"  class="nav-link py-1 px-2 rounded">SSH Targets</a>
+      <a href="#/patterns" class="nav-link py-1 px-2 rounded">Block Patterns</a>
+      <a href="#/rules"    class="nav-link py-1 px-2 rounded">Command Rules</a>
+      <a href="#/settings" class="nav-link py-1 px-2 rounded">Settings</a>
+      <a href="#/backups"  class="nav-link py-1 px-2 rounded">Backups</a>
+    </div>
+    <button id="logout-btn" class="text-red-400 hover:text-red-300 text-sm">Logout</button>
+  </nav>
+
+  <!-- Main content area -->
+  <div id="main-content"></div>
+
+  <!-- Modal container -->
+  <div id="modal-container"></div>
+
+<script>
+// ===========================================================================
+// API Client
+// ===========================================================================
+
+async function api(method, path, body = null) {
+  const token = sessionStorage.getItem('token');
+  const opts = {
+    method,
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+  };
+  if (body !== null) opts.body = JSON.stringify(body);
+  const res = await fetch(`/api${path}`, opts);
+  if (res.status === 401) {
+    sessionStorage.removeItem('token');
+    window.location.hash = '#/login';
+    throw new Error('Unauthorized');
+  }
+  return res;
+}
+
+// ===========================================================================
+// Toast Notifications
+// ===========================================================================
+
+function showToast(message, type = 'success') {
+  const container = document.getElementById('toast-container');
+  const toast = document.createElement('div');
+  const bgColor = type === 'success' ? 'bg-green-600' : type === 'error' ? 'bg-red-600' : 'bg-blue-600';
+  toast.className = `toast-animate ${bgColor} text-white px-4 py-3 rounded shadow-lg text-sm max-w-sm`;
+  toast.textContent = message;
+  container.appendChild(toast);
+  setTimeout(() => {
+    toast.style.transition = 'opacity 0.3s';
+    toast.style.opacity = '0';
+    setTimeout(() => toast.remove(), 300);
+  }, 3000);
+}
+
+// ===========================================================================
+// Loading State
+// ===========================================================================
+
+function showLoading(container) {
+  container.innerHTML = '';
+  const wrapper = document.createElement('div');
+  wrapper.className = 'flex justify-center py-8';
+  const spinner = document.createElement('div');
+  spinner.className = 'animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600';
+  wrapper.appendChild(spinner);
+  container.appendChild(wrapper);
+}
+
+// ===========================================================================
+// Modal Dialog
+// ===========================================================================
+
+function showModal(title, bodyHtml, onSave) {
+  const container = document.getElementById('modal-container');
+
+  // Overlay
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay fixed inset-0 z-40 flex items-center justify-center';
+
+  // Modal card
+  const card = document.createElement('div');
+  card.className = 'bg-white rounded-lg shadow-xl w-full max-w-lg mx-4 max-h-[90vh] flex flex-col';
+
+  // Header
+  const header = document.createElement('div');
+  header.className = 'flex items-center justify-between px-6 py-4 border-b';
+  const h2 = document.createElement('h3');
+  h2.className = 'text-lg font-semibold';
+  h2.textContent = title;
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'text-gray-400 hover:text-gray-600 text-xl';
+  closeBtn.textContent = '\u00d7';
+  header.appendChild(h2);
+  header.appendChild(closeBtn);
+  card.appendChild(header);
+
+  // Body
+  const body = document.createElement('div');
+  body.className = 'px-6 py-4 overflow-y-auto flex-1';
+  body.innerHTML = bodyHtml;
+  card.appendChild(body);
+
+  // Error area
+  const errorArea = document.createElement('div');
+  errorArea.className = 'px-6 pb-2 hidden';
+  const errorP = document.createElement('p');
+  errorP.className = 'text-red-600 text-sm';
+  errorArea.appendChild(errorP);
+  card.appendChild(errorArea);
+
+  // Footer
+  const footer = document.createElement('div');
+  footer.className = 'flex justify-end gap-3 px-6 py-4 border-t';
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'px-4 py-2 text-gray-700 bg-gray-200 rounded hover:bg-gray-300 text-sm';
+  cancelBtn.textContent = 'Cancel';
+  const saveBtn = document.createElement('button');
+  saveBtn.className = 'px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm';
+  saveBtn.textContent = 'Save';
+  footer.appendChild(cancelBtn);
+  footer.appendChild(saveBtn);
+  card.appendChild(footer);
+
+  overlay.appendChild(card);
+  container.appendChild(overlay);
+
+  function closeModal() {
+    overlay.remove();
+  }
+
+  closeBtn.addEventListener('click', closeModal);
+  cancelBtn.addEventListener('click', closeModal);
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) closeModal();
+  });
+
+  saveBtn.addEventListener('click', async () => {
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving...';
+    try {
+      await onSave(body, errorArea, errorP);
+      closeModal();
+    } catch (err) {
+      errorP.textContent = err.message || 'An error occurred';
+      errorArea.classList.remove('hidden');
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'Save';
+    }
+  });
+}
+
+// ===========================================================================
+// Confirmation Dialog
+// ===========================================================================
+
+function confirm(message) {
+  return new Promise((resolve) => {
+    const container = document.getElementById('modal-container');
+
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay fixed inset-0 z-40 flex items-center justify-center';
+
+    const card = document.createElement('div');
+    card.className = 'bg-white rounded-lg shadow-xl w-full max-w-sm mx-4';
+
+    const body = document.createElement('div');
+    body.className = 'px-6 py-6';
+    const p = document.createElement('p');
+    p.className = 'text-gray-700';
+    p.textContent = message;
+    body.appendChild(p);
+    card.appendChild(body);
+
+    const footer = document.createElement('div');
+    footer.className = 'flex justify-end gap-3 px-6 pb-4';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'px-4 py-2 text-gray-700 bg-gray-200 rounded hover:bg-gray-300 text-sm';
+    cancelBtn.textContent = 'Cancel';
+    const confirmBtn = document.createElement('button');
+    confirmBtn.className = 'px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700 text-sm';
+    confirmBtn.textContent = 'Confirm';
+    footer.appendChild(cancelBtn);
+    footer.appendChild(confirmBtn);
+    card.appendChild(footer);
+
+    overlay.appendChild(card);
+    container.appendChild(overlay);
+
+    function close(result) {
+      overlay.remove();
+      resolve(result);
+    }
+
+    cancelBtn.addEventListener('click', () => close(false));
+    confirmBtn.addEventListener('click', () => close(true));
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) close(false);
+    });
+  });
+}
+
+// ===========================================================================
+// Utility Helpers
+// ===========================================================================
+
+function formatBytes(bytes) {
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+// ===========================================================================
+// Router
+// ===========================================================================
+
+const routes = {
+  '#/login':    renderLogin,
+  '#/targets':  renderTargets,
+  '#/patterns': renderPatterns,
+  '#/rules':    renderRules,
+  '#/settings': renderSettings,
+  '#/backups':  renderBackups,
+};
+
+function navigate(hash) {
+  const navbar = document.getElementById('navbar');
+  if (!sessionStorage.getItem('token') && hash !== '#/login') {
+    window.location.hash = '#/login';
+    return;
+  }
+  if (sessionStorage.getItem('token')) {
+    navbar.classList.remove('hidden');
+  } else {
+    navbar.classList.add('hidden');
+  }
+  const render = routes[hash] || renderTargets;
+  render();
+  updateActiveNav(hash);
+}
+
+function updateActiveNav(hash) {
+  document.querySelectorAll('.nav-link').forEach((link) => {
+    link.classList.toggle('active', link.getAttribute('href') === hash);
+  });
+}
+
+window.addEventListener('hashchange', () => navigate(window.location.hash));
+
+// ===========================================================================
+// Page: Login
+// ===========================================================================
+
+function renderLogin() {
+  document.getElementById('navbar').classList.add('hidden');
+  const main = document.getElementById('main-content');
+  main.innerHTML = '';
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'min-h-screen flex items-center justify-center bg-gray-100';
+
+  const card = document.createElement('div');
+  card.className = 'bg-white p-8 rounded-lg shadow-md w-96';
+
+  const h1 = document.createElement('h1');
+  h1.className = 'text-2xl font-bold mb-6 text-center';
+  h1.textContent = 'MCP SSH Config';
+  card.appendChild(h1);
+
+  const input = document.createElement('input');
+  input.type = 'password';
+  input.id = 'token-input';
+  input.placeholder = 'API Token';
+  input.className = 'w-full px-3 py-2 border rounded mb-4';
+  card.appendChild(input);
+
+  const btn = document.createElement('button');
+  btn.id = 'connect-btn';
+  btn.className = 'w-full bg-blue-600 text-white py-2 rounded hover:bg-blue-700';
+  btn.textContent = 'Connect';
+  card.appendChild(btn);
+
+  const error = document.createElement('p');
+  error.id = 'login-error';
+  error.className = 'text-red-600 mt-2 hidden';
+  card.appendChild(error);
+
+  wrapper.appendChild(card);
+  main.appendChild(wrapper);
+
+  // Focus input
+  input.focus();
+
+  async function doLogin() {
+    const token = input.value.trim();
+    if (!token) {
+      error.textContent = 'Please enter a token';
+      error.classList.remove('hidden');
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = 'Connecting...';
+    error.classList.add('hidden');
+    try {
+      const res = await fetch('/api/config', {
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      if (res.ok) {
+        sessionStorage.setItem('token', token);
+        window.location.hash = '#/targets';
+      } else {
+        error.textContent = 'Invalid token';
+        error.classList.remove('hidden');
+      }
+    } catch (e) {
+      error.textContent = 'Connection failed';
+      error.classList.remove('hidden');
+    }
+    btn.disabled = false;
+    btn.textContent = 'Connect';
+  }
+
+  btn.addEventListener('click', doLogin);
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') doLogin(); });
+}
+
+// ===========================================================================
+// Page: SSH Targets
+// ===========================================================================
+
+async function renderTargets() {
+  const main = document.getElementById('main-content');
+  showLoading(main);
+
+  try {
+    const res = await api('GET', '/config');
+    if (!res.ok) throw new Error('Failed to load config');
+    const config = await res.json();
+    const targets = config.ssh_targets || {};
+
+    main.innerHTML = '';
+
+    // Container
+    const container = document.createElement('div');
+    container.className = 'container mx-auto px-4 py-6';
+
+    // Header row
+    const header = document.createElement('div');
+    header.className = 'flex items-center justify-between mb-4';
+    const title = document.createElement('h1');
+    title.className = 'text-2xl font-bold text-gray-800';
+    title.textContent = 'SSH Targets';
+    const addBtn = document.createElement('button');
+    addBtn.className = 'bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 text-sm';
+    addBtn.textContent = 'Add Target';
+    header.appendChild(title);
+    header.appendChild(addBtn);
+    container.appendChild(header);
+
+    // Table wrapper
+    const tableWrap = document.createElement('div');
+    tableWrap.className = 'overflow-x-auto';
+    const table = document.createElement('table');
+    table.className = 'min-w-full bg-white rounded-lg shadow';
+
+    // Thead
+    const thead = document.createElement('thead');
+    const headRow = document.createElement('tr');
+    headRow.className = 'bg-gray-50 text-left text-sm text-gray-600';
+    ['Name', 'Host', 'Port', 'Username', 'Actions'].forEach((h) => {
+      const th = document.createElement('th');
+      th.className = 'px-4 py-3 font-medium';
+      th.textContent = h;
+      headRow.appendChild(th);
+    });
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+
+    // Tbody
+    const tbody = document.createElement('tbody');
+    tbody.className = 'divide-y divide-gray-200';
+
+    const names = Object.keys(targets).sort();
+    if (names.length === 0) {
+      const emptyRow = document.createElement('tr');
+      const emptyCell = document.createElement('td');
+      emptyCell.colSpan = 5;
+      emptyCell.className = 'px-4 py-8 text-center text-gray-500';
+      emptyCell.textContent = 'No SSH targets configured. Click "Add Target" to create one.';
+      emptyRow.appendChild(emptyCell);
+      tbody.appendChild(emptyRow);
+    }
+
+    names.forEach((name) => {
+      const target = targets[name];
+      const row = document.createElement('tr');
+      row.className = 'hover:bg-gray-50';
+
+      const nameCell = document.createElement('td');
+      nameCell.className = 'px-4 py-3 font-medium text-gray-900';
+      nameCell.textContent = name;
+      row.appendChild(nameCell);
+
+      const hostCell = document.createElement('td');
+      hostCell.className = 'px-4 py-3 text-gray-700';
+      hostCell.textContent = target.host || '';
+      row.appendChild(hostCell);
+
+      const portCell = document.createElement('td');
+      portCell.className = 'px-4 py-3 text-gray-700';
+      portCell.textContent = String(target.port || 22);
+      row.appendChild(portCell);
+
+      const userCell = document.createElement('td');
+      userCell.className = 'px-4 py-3 text-gray-700';
+      userCell.textContent = target.username || '';
+      row.appendChild(userCell);
+
+      const actionsCell = document.createElement('td');
+      actionsCell.className = 'px-4 py-3';
+      const editBtn = document.createElement('button');
+      editBtn.className = 'text-blue-600 hover:text-blue-800 text-sm mr-3';
+      editBtn.textContent = 'Edit';
+      const deleteBtn = document.createElement('button');
+      deleteBtn.className = 'text-red-600 hover:text-red-800 text-sm';
+      deleteBtn.textContent = 'Delete';
+      actionsCell.appendChild(editBtn);
+      actionsCell.appendChild(deleteBtn);
+      row.appendChild(actionsCell);
+
+      // Edit handler
+      editBtn.addEventListener('click', () => {
+        const isEdit = true;
+        const modalBody = `
+          <div class="space-y-4">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Name</label>
+              <input type="text" id="m-name" value="${escapeHtml(name)}" class="w-full px-3 py-2 border rounded text-sm" ${isEdit ? 'disabled' : ''}>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Host</label>
+              <input type="text" id="m-host" value="${escapeHtml(target.host || '')}" class="w-full px-3 py-2 border rounded text-sm">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Port</label>
+              <input type="number" id="m-port" value="${target.port || 22}" class="w-full px-3 py-2 border rounded text-sm">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Username</label>
+              <input type="text" id="m-username" value="${escapeHtml(target.username || '')}" class="w-full px-3 py-2 border rounded text-sm">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Password</label>
+              <input type="password" id="m-password" placeholder="Leave empty to keep unchanged" class="w-full px-3 py-2 border rounded text-sm">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Private Key</label>
+              <textarea id="m-private-key" rows="3" placeholder="Leave empty to keep unchanged" class="w-full px-3 py-2 border rounded text-sm"></textarea>
+            </div>
+          </div>
+        `;
+        showModal('Edit Target', modalBody, async (body) => {
+          const host = body.querySelector('#m-host').value.trim();
+          const port = parseInt(body.querySelector('#m-port').value, 10) || 22;
+          const username = body.querySelector('#m-username').value.trim();
+          const password = body.querySelector('#m-password').value;
+          const privateKey = body.querySelector('#m-private-key').value;
+          if (!host) throw new Error('Host is required');
+          if (!username) throw new Error('Username is required');
+          const payload = { host, port, username };
+          if (password) payload.password = password;
+          if (privateKey) payload.private_key = privateKey;
+          const r = await api('PUT', `/config/ssh_targets/${encodeURIComponent(name)}`, payload);
+          if (!r.ok) {
+            const err = await r.json();
+            throw new Error(err.message || 'Failed to save target');
+          }
+          showToast('Target updated');
+          renderTargets();
+        });
+      });
+
+      // Delete handler
+      deleteBtn.addEventListener('click', async () => {
+        const ok = await confirm(`Delete target "${name}"?`);
+        if (!ok) return;
+        const r = await api('DELETE', `/config/ssh_targets/${encodeURIComponent(name)}`);
+        if (!r.ok) {
+          const err = await r.json();
+          showToast(err.message || 'Failed to delete', 'error');
+          return;
+        }
+        showToast('Target deleted');
+        renderTargets();
+      });
+
+      tbody.appendChild(row);
+    });
+
+    table.appendChild(tbody);
+    tableWrap.appendChild(table);
+    container.appendChild(tableWrap);
+    main.appendChild(container);
+
+    // Add Target handler
+    addBtn.addEventListener('click', () => {
+      const modalBody = `
+        <div class="space-y-4">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Name</label>
+            <input type="text" id="m-name" placeholder="e.g. my-server" class="w-full px-3 py-2 border rounded text-sm">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Host</label>
+            <input type="text" id="m-host" placeholder="e.g. 192.168.1.10" class="w-full px-3 py-2 border rounded text-sm">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Port</label>
+            <input type="number" id="m-port" value="22" class="w-full px-3 py-2 border rounded text-sm">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Username</label>
+            <input type="text" id="m-username" placeholder="e.g. root" class="w-full px-3 py-2 border rounded text-sm">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Password</label>
+            <input type="password" id="m-password" class="w-full px-3 py-2 border rounded text-sm">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Private Key</label>
+            <textarea id="m-private-key" rows="3" class="w-full px-3 py-2 border rounded text-sm"></textarea>
+          </div>
+        </div>
+      `;
+      showModal('Add Target', modalBody, async (body) => {
+        const targetName = body.querySelector('#m-name').value.trim();
+        const host = body.querySelector('#m-host').value.trim();
+        const port = parseInt(body.querySelector('#m-port').value, 10) || 22;
+        const username = body.querySelector('#m-username').value.trim();
+        const password = body.querySelector('#m-password').value;
+        const privateKey = body.querySelector('#m-private-key').value;
+        if (!targetName) throw new Error('Name is required');
+        if (!/^[a-zA-Z0-9._-]+$/.test(targetName)) throw new Error('Name must match [a-zA-Z0-9._-]+');
+        if (!host) throw new Error('Host is required');
+        if (!username) throw new Error('Username is required');
+        const payload = { host, port, username };
+        if (password) payload.password = password;
+        if (privateKey) payload.private_key = privateKey;
+        const r = await api('PUT', `/config/ssh_targets/${encodeURIComponent(targetName)}`, payload);
+        if (!r.ok) {
+          const err = await r.json();
+          throw new Error(err.message || 'Failed to save target');
+        }
+        showToast('Target created');
+        renderTargets();
+      });
+    });
+
+  } catch (err) {
+    main.innerHTML = `<div class="p-6 text-red-600">Error: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+// ===========================================================================
+// Page: Block Patterns
+// ===========================================================================
+
+async function renderPatterns() {
+  const main = document.getElementById('main-content');
+  showLoading(main);
+
+  try {
+    const res = await api('GET', '/config');
+    if (!res.ok) throw new Error('Failed to load config');
+    const config = await res.json();
+    const patterns = config.block_patterns || [];
+
+    main.innerHTML = '';
+
+    const container = document.createElement('div');
+    container.className = 'container mx-auto px-4 py-6';
+
+    // Header
+    const header = document.createElement('div');
+    header.className = 'flex items-center justify-between mb-4';
+    const title = document.createElement('h1');
+    title.className = 'text-2xl font-bold text-gray-800';
+    title.textContent = 'Block Patterns';
+    const addBtn = document.createElement('button');
+    addBtn.className = 'bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 text-sm';
+    addBtn.textContent = 'Add Pattern';
+    header.appendChild(title);
+    header.appendChild(addBtn);
+    container.appendChild(header);
+
+    // Table
+    const tableWrap = document.createElement('div');
+    tableWrap.className = 'overflow-x-auto';
+    const table = document.createElement('table');
+    table.className = 'min-w-full bg-white rounded-lg shadow';
+
+    const thead = document.createElement('thead');
+    const headRow = document.createElement('tr');
+    headRow.className = 'bg-gray-50 text-left text-sm text-gray-600';
+    ['#', 'Pattern', 'Actions'].forEach((h) => {
+      const th = document.createElement('th');
+      th.className = 'px-4 py-3 font-medium';
+      th.textContent = h;
+      headRow.appendChild(th);
+    });
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+
+    const tbody = document.createElement('tbody');
+    tbody.className = 'divide-y divide-gray-200';
+
+    if (patterns.length === 0) {
+      const emptyRow = document.createElement('tr');
+      const emptyCell = document.createElement('td');
+      emptyCell.colSpan = 3;
+      emptyCell.className = 'px-4 py-8 text-center text-gray-500';
+      emptyCell.textContent = 'No block patterns configured.';
+      emptyRow.appendChild(emptyCell);
+      tbody.appendChild(emptyRow);
+    }
+
+    patterns.forEach((pattern, idx) => {
+      const row = document.createElement('tr');
+      row.className = 'hover:bg-gray-50';
+
+      const idxCell = document.createElement('td');
+      idxCell.className = 'px-4 py-3 text-gray-500 text-sm';
+      idxCell.textContent = String(idx);
+      row.appendChild(idxCell);
+
+      const patCell = document.createElement('td');
+      patCell.className = 'px-4 py-3 font-mono text-sm text-gray-800';
+      patCell.textContent = pattern;
+      row.appendChild(patCell);
+
+      const actionsCell = document.createElement('td');
+      actionsCell.className = 'px-4 py-3';
+      const editBtn = document.createElement('button');
+      editBtn.className = 'text-blue-600 hover:text-blue-800 text-sm mr-3';
+      editBtn.textContent = 'Edit';
+      const deleteBtn = document.createElement('button');
+      deleteBtn.className = 'text-red-600 hover:text-red-800 text-sm';
+      deleteBtn.textContent = 'Delete';
+      actionsCell.appendChild(editBtn);
+      actionsCell.appendChild(deleteBtn);
+      row.appendChild(actionsCell);
+
+      editBtn.addEventListener('click', () => {
+        const modalBody = `
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Pattern (regex)</label>
+            <input type="text" id="m-pattern" value="${escapeHtml(pattern)}" class="w-full px-3 py-2 border rounded text-sm font-mono">
+            <p id="m-pattern-error" class="text-red-600 text-xs mt-1 hidden"></p>
+          </div>
+        `;
+        showModal('Edit Pattern', modalBody, async (body) => {
+          const newPattern = body.querySelector('#m-pattern').value.trim();
+          const errEl = body.querySelector('#m-pattern-error');
+          if (!newPattern) throw new Error('Pattern is required');
+          try { new RegExp(newPattern); } catch (e) {
+            errEl.textContent = 'Invalid regex: ' + e.message;
+            errEl.classList.remove('hidden');
+            throw new Error('Invalid regex');
+          }
+          // Replace all patterns with updated version at this index
+          const updated = [...patterns];
+          updated[idx] = newPattern;
+          const r = await api('PUT', '/config/block_patterns', updated);
+          if (!r.ok) {
+            const err = await r.json();
+            throw new Error(err.message || 'Failed to save');
+          }
+          showToast('Pattern updated');
+          renderPatterns();
+        });
+      });
+
+      deleteBtn.addEventListener('click', async () => {
+        const ok = await confirm(`Delete pattern at index ${idx}?`);
+        if (!ok) return;
+        const r = await api('DELETE', `/config/block_patterns/${idx}`);
+        if (!r.ok) {
+          const err = await r.json();
+          showToast(err.message || 'Failed to delete', 'error');
+          return;
+        }
+        showToast('Pattern deleted');
+        renderPatterns();
+      });
+
+      tbody.appendChild(row);
+    });
+
+    table.appendChild(tbody);
+    tableWrap.appendChild(table);
+    container.appendChild(tableWrap);
+    main.appendChild(container);
+
+    addBtn.addEventListener('click', () => {
+      const modalBody = `
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Pattern (regex)</label>
+          <input type="text" id="m-pattern" placeholder="e.g. rm\\s+-rf" class="w-full px-3 py-2 border rounded text-sm font-mono">
+          <p id="m-pattern-error" class="text-red-600 text-xs mt-1 hidden"></p>
+        </div>
+      `;
+      showModal('Add Pattern', modalBody, async (body) => {
+        const pattern = body.querySelector('#m-pattern').value.trim();
+        const errEl = body.querySelector('#m-pattern-error');
+        if (!pattern) throw new Error('Pattern is required');
+        try { new RegExp(pattern); } catch (e) {
+          errEl.textContent = 'Invalid regex: ' + e.message;
+          errEl.classList.remove('hidden');
+          throw new Error('Invalid regex');
+        }
+        const r = await api('POST', '/config/block_patterns', { pattern });
+        if (!r.ok) {
+          const err = await r.json();
+          throw new Error(err.message || 'Failed to add pattern');
+        }
+        showToast('Pattern added');
+        renderPatterns();
+      });
+    });
+
+  } catch (err) {
+    main.innerHTML = `<div class="p-6 text-red-600">Error: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+// ===========================================================================
+// Page: Command Rules
+// ===========================================================================
+
+let _rulesActiveTab = 'default';
+
+async function renderRules() {
+  const main = document.getElementById('main-content');
+  showLoading(main);
+
+  try {
+    const res = await api('GET', '/config');
+    if (!res.ok) throw new Error('Failed to load config');
+    const config = await res.json();
+    const ac = config.allowed_commands || {};
+    const defaultRules = ac.default || [];
+    const apiKeys = ac.api_keys || [];
+    const networks = ac.networks || [];
+
+    main.innerHTML = '';
+
+    const container = document.createElement('div');
+    container.className = 'container mx-auto px-4 py-6';
+
+    // Title
+    const title = document.createElement('h1');
+    title.className = 'text-2xl font-bold text-gray-800 mb-4';
+    title.textContent = 'Command Rules';
+    container.appendChild(title);
+
+    // Tabs
+    const tabs = document.createElement('div');
+    tabs.className = 'flex border-b mb-4';
+    ['default', 'api_keys', 'networks'].forEach((tab) => {
+      const btn = document.createElement('button');
+      btn.className = 'tab-btn px-4 py-2 text-sm text-gray-600 mr-2';
+      btn.dataset.tab = tab;
+      btn.textContent = tab === 'default' ? 'Default Rules' : tab === 'api_keys' ? 'API Key Rules' : 'Network Rules';
+      if (tab === _rulesActiveTab) btn.classList.add('active');
+      btn.addEventListener('click', () => {
+        _rulesActiveTab = tab;
+        renderRules();
+      });
+      tabs.appendChild(btn);
+    });
+    container.appendChild(tabs);
+
+    // Content area
+    const content = document.createElement('div');
+    container.appendChild(content);
+    main.appendChild(container);
+
+    if (_rulesActiveTab === 'default') {
+      renderDefaultRules(content, defaultRules);
+    } else if (_rulesActiveTab === 'api_keys') {
+      renderApiKeyRules(content, apiKeys, defaultRules);
+    } else {
+      renderNetworkRules(content, networks);
+    }
+
+  } catch (err) {
+    main.innerHTML = `<div class="p-6 text-red-600">Error: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function renderDefaultRules(container, rules) {
+  // Header
+  const header = document.createElement('div');
+  header.className = 'flex items-center justify-between mb-4';
+  const addBtn = document.createElement('button');
+  addBtn.className = 'bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 text-sm';
+  addBtn.textContent = 'Add Rule';
+  header.appendChild(addBtn);
+  container.appendChild(header);
+
+  // Table
+  const tableWrap = document.createElement('div');
+  tableWrap.className = 'overflow-x-auto';
+  const table = document.createElement('table');
+  table.className = 'min-w-full bg-white rounded-lg shadow';
+
+  const thead = document.createElement('thead');
+  const headRow = document.createElement('tr');
+  headRow.className = 'bg-gray-50 text-left text-sm text-gray-600';
+  ['Targets', 'Commands', 'Actions'].forEach((h) => {
+    const th = document.createElement('th');
+    th.className = 'px-4 py-3 font-medium';
+    th.textContent = h;
+    headRow.appendChild(th);
+  });
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  tbody.className = 'divide-y divide-gray-200';
+
+  if (rules.length === 0) {
+    const emptyRow = document.createElement('tr');
+    const emptyCell = document.createElement('td');
+    emptyCell.colSpan = 3;
+    emptyCell.className = 'px-4 py-8 text-center text-gray-500';
+    emptyCell.textContent = 'No default rules configured.';
+    emptyRow.appendChild(emptyCell);
+    tbody.appendChild(emptyRow);
+  }
+
+  rules.forEach((rule, idx) => {
+    const row = document.createElement('tr');
+    row.className = 'hover:bg-gray-50';
+
+    const targetsCell = document.createElement('td');
+    targetsCell.className = 'px-4 py-3 text-sm';
+    targetsCell.textContent = (rule.targets || []).join(', ');
+    row.appendChild(targetsCell);
+
+    const cmdsCell = document.createElement('td');
+    cmdsCell.className = 'px-4 py-3 text-sm font-mono';
+    cmdsCell.textContent = (rule.commands || []).join(', ');
+    row.appendChild(cmdsCell);
+
+    const actionsCell = document.createElement('td');
+    actionsCell.className = 'px-4 py-3';
+    const editBtn = document.createElement('button');
+    editBtn.className = 'text-blue-600 hover:text-blue-800 text-sm mr-3';
+    editBtn.textContent = 'Edit';
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'text-red-600 hover:text-red-800 text-sm';
+    deleteBtn.textContent = 'Delete';
+    actionsCell.appendChild(editBtn);
+    actionsCell.appendChild(deleteBtn);
+    row.appendChild(actionsCell);
+
+    editBtn.addEventListener('click', () => {
+      const modalBody = `
+        <div class="space-y-4">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Targets (comma-separated)</label>
+            <input type="text" id="m-targets" value="${escapeHtml((rule.targets || []).join(', '))}" class="w-full px-3 py-2 border rounded text-sm">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Commands (comma-separated, or * for all)</label>
+            <input type="text" id="m-commands" value="${escapeHtml((rule.commands || []).join(', '))}" class="w-full px-3 py-2 border rounded text-sm">
+          </div>
+        </div>
+      `;
+      showModal('Edit Rule', modalBody, async (body) => {
+        const targets = body.querySelector('#m-targets').value.split(',').map(s => s.trim()).filter(Boolean);
+        const commands = body.querySelector('#m-commands').value.split(',').map(s => s.trim()).filter(Boolean);
+        if (!targets.length) throw new Error('At least one target is required');
+        if (!commands.length) throw new Error('At least one command is required');
+        const updated = [...rules];
+        updated[idx] = { targets, commands };
+        const r = await api('PUT', '/config/allowed_commands', { default: updated });
+        if (!r.ok) {
+          const err = await r.json();
+          throw new Error(err.message || 'Failed to save');
+        }
+        showToast('Rule updated');
+        renderRules();
+      });
+    });
+
+    deleteBtn.addEventListener('click', async () => {
+      const ok = await confirm('Delete this rule?');
+      if (!ok) return;
+      const updated = rules.filter((_, i) => i !== idx);
+      const r = await api('PUT', '/config/allowed_commands', { default: updated });
+      if (!r.ok) {
+        const err = await r.json();
+        showToast(err.message || 'Failed to delete', 'error');
+        return;
+      }
+      showToast('Rule deleted');
+      renderRules();
+    });
+
+    tbody.appendChild(row);
+  });
+
+  table.appendChild(tbody);
+  tableWrap.appendChild(table);
+  container.appendChild(tableWrap);
+
+  addBtn.addEventListener('click', () => {
+    const modalBody = `
+      <div class="space-y-4">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Targets (comma-separated)</label>
+          <input type="text" id="m-targets" placeholder="e.g. server1, server2" class="w-full px-3 py-2 border rounded text-sm">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Commands (comma-separated, or * for all)</label>
+          <input type="text" id="m-commands" placeholder="e.g. ls, df -h, *" class="w-full px-3 py-2 border rounded text-sm">
+        </div>
+      </div>
+    `;
+    showModal('Add Rule', modalBody, async (body) => {
+      const targets = body.querySelector('#m-targets').value.split(',').map(s => s.trim()).filter(Boolean);
+      const commands = body.querySelector('#m-commands').value.split(',').map(s => s.trim()).filter(Boolean);
+      if (!targets.length) throw new Error('At least one target is required');
+      if (!commands.length) throw new Error('At least one command is required');
+      const updated = [...rules, { targets, commands }];
+      const r = await api('PUT', '/config/allowed_commands', { default: updated });
+      if (!r.ok) {
+        const err = await r.json();
+        throw new Error(err.message || 'Failed to save');
+      }
+      showToast('Rule added');
+      renderRules();
+    });
+  });
+}
+
+function renderApiKeyRules(container, apiKeys, defaultRules) {
+  // Header
+  const header = document.createElement('div');
+  header.className = 'flex items-center justify-between mb-4';
+  const addBtn = document.createElement('button');
+  addBtn.className = 'bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 text-sm';
+  addBtn.textContent = 'Add API Key';
+  header.appendChild(addBtn);
+  container.appendChild(header);
+
+  // Table
+  const tableWrap = document.createElement('div');
+  tableWrap.className = 'overflow-x-auto';
+  const table = document.createElement('table');
+  table.className = 'min-w-full bg-white rounded-lg shadow';
+
+  const thead = document.createElement('thead');
+  const headRow = document.createElement('tr');
+  headRow.className = 'bg-gray-50 text-left text-sm text-gray-600';
+  ['Name', 'Targets', 'Commands', 'Actions'].forEach((h) => {
+    const th = document.createElement('th');
+    th.className = 'px-4 py-3 font-medium';
+    th.textContent = h;
+    headRow.appendChild(th);
+  });
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  tbody.className = 'divide-y divide-gray-200';
+
+  if (apiKeys.length === 0) {
+    const emptyRow = document.createElement('tr');
+    const emptyCell = document.createElement('td');
+    emptyCell.colSpan = 4;
+    emptyCell.className = 'px-4 py-8 text-center text-gray-500';
+    emptyCell.textContent = 'No API keys configured.';
+    emptyRow.appendChild(emptyCell);
+    tbody.appendChild(emptyRow);
+  }
+
+  apiKeys.forEach((key, idx) => {
+    const row = document.createElement('tr');
+    row.className = 'hover:bg-gray-50';
+
+    const nameCell = document.createElement('td');
+    nameCell.className = 'px-4 py-3 font-medium text-sm';
+    nameCell.textContent = key.name || `Key ${idx}`;
+    row.appendChild(nameCell);
+
+    const rules = key.rules || [];
+    const allTargets = [...new Set(rules.flatMap(r => r.targets || []))];
+    const allCommands = [...new Set(rules.flatMap(r => r.commands || []))];
+
+    const targetsCell = document.createElement('td');
+    targetsCell.className = 'px-4 py-3 text-sm';
+    targetsCell.textContent = allTargets.join(', ') || '(none)';
+    row.appendChild(targetsCell);
+
+    const cmdsCell = document.createElement('td');
+    cmdsCell.className = 'px-4 py-3 text-sm font-mono';
+    cmdsCell.textContent = allCommands.join(', ') || '(none)';
+    row.appendChild(cmdsCell);
+
+    const actionsCell = document.createElement('td');
+    actionsCell.className = 'px-4 py-3';
+    const editBtn = document.createElement('button');
+    editBtn.className = 'text-blue-600 hover:text-blue-800 text-sm mr-3';
+    editBtn.textContent = 'Edit Rules';
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'text-red-600 hover:text-red-800 text-sm';
+    deleteBtn.textContent = 'Delete';
+    actionsCell.appendChild(editBtn);
+    actionsCell.appendChild(deleteBtn);
+    row.appendChild(actionsCell);
+
+    editBtn.addEventListener('click', () => {
+      const rulesJson = JSON.stringify(rules, null, 2);
+      const modalBody = `
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Rules (JSON array)</label>
+          <textarea id="m-rules" rows="8" class="w-full px-3 py-2 border rounded text-sm font-mono">${escapeHtml(rulesJson)}</textarea>
+          <p class="text-xs text-gray-500 mt-1">Format: [{"targets": ["..."], "commands": ["..."]}]</p>
+          <p id="m-rules-error" class="text-red-600 text-xs mt-1 hidden"></p>
+        </div>
+      `;
+      showModal(`Edit Rules: ${key.name || `Key ${idx}`}`, modalBody, async (body) => {
+        const errEl = body.querySelector('#m-rules-error');
+        let newRules;
+        try {
+          newRules = JSON.parse(body.querySelector('#m-rules').value);
+        } catch (e) {
+          errEl.textContent = 'Invalid JSON: ' + e.message;
+          errEl.classList.remove('hidden');
+          throw new Error('Invalid JSON');
+        }
+        if (!Array.isArray(newRules)) throw new Error('Rules must be a JSON array');
+        const updatedKeys = [...apiKeys];
+        updatedKeys[idx] = { ...key, rules: newRules };
+        const r = await api('PUT', '/config/allowed_commands', { api_keys: updatedKeys });
+        if (!r.ok) {
+          const err = await r.json();
+          throw new Error(err.message || 'Failed to save');
+        }
+        showToast('Rules updated');
+        renderRules();
+      });
+    });
+
+    deleteBtn.addEventListener('click', async () => {
+      const ok = await confirm(`Delete API key "${key.name || `Key ${idx}`}"?`);
+      if (!ok) return;
+      const updatedKeys = apiKeys.filter((_, i) => i !== idx);
+      const r = await api('PUT', '/config/allowed_commands', { api_keys: updatedKeys });
+      if (!r.ok) {
+        const err = await r.json();
+        showToast(err.message || 'Failed to delete', 'error');
+        return;
+      }
+      showToast('API key deleted');
+      renderRules();
+    });
+
+    tbody.appendChild(row);
+  });
+
+  table.appendChild(tbody);
+  tableWrap.appendChild(table);
+  container.appendChild(tableWrap);
+
+  // Add API Key
+  addBtn.addEventListener('click', () => {
+    const modalBody = `
+      <div class="space-y-4">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Name</label>
+          <input type="text" id="m-key-name" placeholder="e.g. deploy-key" class="w-full px-3 py-2 border rounded text-sm">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Plaintext Key</label>
+          <input type="text" id="m-key-plaintext" placeholder="The secret API key" class="w-full px-3 py-2 border rounded text-sm">
+        </div>
+      </div>
+    `;
+    showModal('Add API Key', modalBody, async (body) => {
+      const name = body.querySelector('#m-key-name').value.trim();
+      const plaintext = body.querySelector('#m-key-plaintext').value.trim();
+      if (!name) throw new Error('Name is required');
+      if (!plaintext) throw new Error('Key is required');
+      // Hash the key
+      const hashRes = await api('POST', '/hash-key', { key: plaintext });
+      if (!hashRes.ok) {
+        const err = await hashRes.json();
+        throw new Error(err.message || 'Failed to hash key');
+      }
+      const hashData = await hashRes.json();
+      const keyHash = hashData.key_hash;
+      // Add to api_keys
+      const newKey = { name, key_hash: keyHash, rules: [] };
+      const updatedKeys = [...apiKeys, newKey];
+      const r = await api('PUT', '/config/allowed_commands', { api_keys: updatedKeys });
+      if (!r.ok) {
+        const err = await r.json();
+        throw new Error(err.message || 'Failed to save');
+      }
+      // Show the plaintext key once
+      showModal('Key Created (save this now)', `
+        <div class="space-y-3">
+          <p class="text-sm text-gray-700">Your API key has been created. Copy it now — it will not be shown again.</p>
+          <div class="bg-gray-100 p-3 rounded font-mono text-sm break-all" id="m-created-key">${escapeHtml(plaintext)}</div>
+          <button id="m-copy-btn" class="text-blue-600 hover:text-blue-800 text-sm">Copy to clipboard</button>
+        </div>
+      `, async () => {
+        // Just close the modal
+      });
+      document.getElementById('m-copy-btn')?.addEventListener('click', () => {
+        navigator.clipboard.writeText(plaintext).then(() => showToast('Copied to clipboard'));
+      });
+      showToast('API key created');
+      renderRules();
+    });
+  });
+}
+
+function renderNetworkRules(container, networks) {
+  // Header
+  const header = document.createElement('div');
+  header.className = 'flex items-center justify-between mb-4';
+  const addBtn = document.createElement('button');
+  addBtn.className = 'bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 text-sm';
+  addBtn.textContent = 'Add Network Rule';
+  header.appendChild(addBtn);
+  container.appendChild(header);
+
+  // Table
+  const tableWrap = document.createElement('div');
+  tableWrap.className = 'overflow-x-auto';
+  const table = document.createElement('table');
+  table.className = 'min-w-full bg-white rounded-lg shadow';
+
+  const thead = document.createElement('thead');
+  const headRow = document.createElement('tr');
+  headRow.className = 'bg-gray-50 text-left text-sm text-gray-600';
+  ['Name', 'Range', 'Targets', 'Commands', 'Actions'].forEach((h) => {
+    const th = document.createElement('th');
+    th.className = 'px-4 py-3 font-medium';
+    th.textContent = h;
+    headRow.appendChild(th);
+  });
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  tbody.className = 'divide-y divide-gray-200';
+
+  if (networks.length === 0) {
+    const emptyRow = document.createElement('tr');
+    const emptyCell = document.createElement('td');
+    emptyCell.colSpan = 5;
+    emptyCell.className = 'px-4 py-8 text-center text-gray-500';
+    emptyCell.textContent = 'No network rules configured.';
+    emptyRow.appendChild(emptyCell);
+    tbody.appendChild(emptyRow);
+  }
+
+  networks.forEach((net, idx) => {
+    const row = document.createElement('tr');
+    row.className = 'hover:bg-gray-50';
+
+    const nameCell = document.createElement('td');
+    nameCell.className = 'px-4 py-3 font-medium text-sm';
+    nameCell.textContent = net.name || `Network ${idx}`;
+    row.appendChild(nameCell);
+
+    const rangeCell = document.createElement('td');
+    rangeCell.className = 'px-4 py-3 text-sm font-mono';
+    rangeCell.textContent = net.range || '';
+    row.appendChild(rangeCell);
+
+    const rules = net.rules || [];
+    const allTargets = [...new Set(rules.flatMap(r => r.targets || []))];
+    const allCommands = [...new Set(rules.flatMap(r => r.commands || []))];
+
+    const targetsCell = document.createElement('td');
+    targetsCell.className = 'px-4 py-3 text-sm';
+    targetsCell.textContent = allTargets.join(', ') || '(none)';
+    row.appendChild(targetsCell);
+
+    const cmdsCell = document.createElement('td');
+    cmdsCell.className = 'px-4 py-3 text-sm font-mono';
+    cmdsCell.textContent = allCommands.join(', ') || '(none)';
+    row.appendChild(cmdsCell);
+
+    const actionsCell = document.createElement('td');
+    actionsCell.className = 'px-4 py-3';
+    const editBtn = document.createElement('button');
+    editBtn.className = 'text-blue-600 hover:text-blue-800 text-sm mr-3';
+    editBtn.textContent = 'Edit';
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'text-red-600 hover:text-red-800 text-sm';
+    deleteBtn.textContent = 'Delete';
+    actionsCell.appendChild(editBtn);
+    actionsCell.appendChild(deleteBtn);
+    row.appendChild(actionsCell);
+
+    editBtn.addEventListener('click', () => {
+      const rulesJson = JSON.stringify(rules, null, 2);
+      const modalBody = `
+        <div class="space-y-4">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Name</label>
+            <input type="text" id="m-net-name" value="${escapeHtml(net.name || '')}" class="w-full px-3 py-2 border rounded text-sm">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">CIDR Range</label>
+            <input type="text" id="m-net-range" value="${escapeHtml(net.range || '')}" placeholder="e.g. 10.0.0.0/8" class="w-full px-3 py-2 border rounded text-sm font-mono">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Rules (JSON array)</label>
+            <textarea id="m-net-rules" rows="6" class="w-full px-3 py-2 border rounded text-sm font-mono">${escapeHtml(rulesJson)}</textarea>
+            <p class="text-xs text-gray-500 mt-1">Format: [{"targets": ["..."], "commands": ["..."]}]</p>
+            <p id="m-net-rules-error" class="text-red-600 text-xs mt-1 hidden"></p>
+          </div>
+        </div>
+      `;
+      showModal('Edit Network Rule', modalBody, async (body) => {
+        const errEl = body.querySelector('#m-net-rules-error');
+        const name = body.querySelector('#m-net-name').value.trim();
+        const range = body.querySelector('#m-net-range').value.trim();
+        let newRules;
+        try {
+          newRules = JSON.parse(body.querySelector('#m-net-rules').value);
+        } catch (e) {
+          errEl.textContent = 'Invalid JSON: ' + e.message;
+          errEl.classList.remove('hidden');
+          throw new Error('Invalid JSON');
+        }
+        if (!name) throw new Error('Name is required');
+        if (!range) throw new Error('Range is required');
+        if (!Array.isArray(newRules)) throw new Error('Rules must be a JSON array');
+        const updatedNetworks = [...networks];
+        updatedNetworks[idx] = { name, range, rules: newRules };
+        const r = await api('PUT', '/config/allowed_commands', { networks: updatedNetworks });
+        if (!r.ok) {
+          const err = await r.json();
+          throw new Error(err.message || 'Failed to save');
+        }
+        showToast('Network rule updated');
+        renderRules();
+      });
+    });
+
+    deleteBtn.addEventListener('click', async () => {
+      const ok = await confirm(`Delete network rule "${net.name || `Network ${idx}`}"?`);
+      if (!ok) return;
+      const updatedNetworks = networks.filter((_, i) => i !== idx);
+      const r = await api('PUT', '/config/allowed_commands', { networks: updatedNetworks });
+      if (!r.ok) {
+        const err = await r.json();
+        showToast(err.message || 'Failed to delete', 'error');
+        return;
+      }
+      showToast('Network rule deleted');
+      renderRules();
+    });
+
+    tbody.appendChild(row);
+  });
+
+  table.appendChild(tbody);
+  tableWrap.appendChild(table);
+  container.appendChild(tableWrap);
+
+  addBtn.addEventListener('click', () => {
+    const modalBody = `
+      <div class="space-y-4">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Name</label>
+          <input type="text" id="m-net-name" placeholder="e.g. office-network" class="w-full px-3 py-2 border rounded text-sm">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">CIDR Range</label>
+          <input type="text" id="m-net-range" placeholder="e.g. 10.0.0.0/8" class="w-full px-3 py-2 border rounded text-sm font-mono">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Rules (JSON array)</label>
+          <textarea id="m-net-rules" rows="6" placeholder='[{"targets": ["server1"], "commands": ["ls"]}]' class="w-full px-3 py-2 border rounded text-sm font-mono">[]</textarea>
+          <p class="text-xs text-gray-500 mt-1">Format: [{"targets": ["..."], "commands": ["..."]}]</p>
+          <p id="m-net-rules-error" class="text-red-600 text-xs mt-1 hidden"></p>
+        </div>
+      </div>
+    `;
+    showModal('Add Network Rule', modalBody, async (body) => {
+      const errEl = body.querySelector('#m-net-rules-error');
+      const name = body.querySelector('#m-net-name').value.trim();
+      const range = body.querySelector('#m-net-range').value.trim();
+      let newRules;
+      try {
+        newRules = JSON.parse(body.querySelector('#m-net-rules').value);
+      } catch (e) {
+        errEl.textContent = 'Invalid JSON: ' + e.message;
+        errEl.classList.remove('hidden');
+        throw new Error('Invalid JSON');
+      }
+      if (!name) throw new Error('Name is required');
+      if (!range) throw new Error('Range is required');
+      if (!Array.isArray(newRules)) throw new Error('Rules must be a JSON array');
+      const updatedNetworks = [...networks, { name, range, rules: newRules }];
+      const r = await api('PUT', '/config/allowed_commands', { networks: updatedNetworks });
+      if (!r.ok) {
+        const err = await r.json();
+        throw new Error(err.message || 'Failed to save');
+      }
+      showToast('Network rule added');
+      renderRules();
+    });
+  });
+}
+
+// ===========================================================================
+// Page: Settings
+// ===========================================================================
+
+async function renderSettings() {
+  const main = document.getElementById('main-content');
+  showLoading(main);
+
+  try {
+    const res = await api('GET', '/config/settings');
+    if (!res.ok) throw new Error('Failed to load settings');
+    const data = await res.json();
+    const settings = data.data || {};
+
+    main.innerHTML = '';
+
+    const container = document.createElement('div');
+    container.className = 'container mx-auto px-4 py-6 max-w-3xl';
+
+    const title = document.createElement('h1');
+    title.className = 'text-2xl font-bold text-gray-800 mb-6';
+    title.textContent = 'Settings';
+    container.appendChild(title);
+
+    // Settings form
+    const form = document.createElement('form');
+    form.id = 'settings-form';
+    form.className = 'space-y-6';
+
+    function addGroup(heading, fields) {
+      const group = document.createElement('div');
+      group.className = 'bg-white rounded-lg shadow p-6';
+      const h2 = document.createElement('h2');
+      h2.className = 'text-lg font-semibold text-gray-700 mb-4';
+      h2.textContent = heading;
+      group.appendChild(h2);
+
+      const grid = document.createElement('div');
+      grid.className = 'grid grid-cols-1 md:grid-cols-2 gap-4';
+
+      fields.forEach((f) => {
+        const fieldDiv = document.createElement('div');
+        const label = document.createElement('label');
+        label.className = 'block text-sm font-medium text-gray-700 mb-1';
+        label.textContent = f.label;
+        fieldDiv.appendChild(label);
+
+        let input;
+        if (f.type === 'toggle') {
+          input = document.createElement('input');
+          input.type = 'checkbox';
+          input.id = f.id;
+          input.checked = !!settings[f.key];
+          input.className = 'h-4 w-4 text-blue-600 rounded';
+        } else if (f.type === 'select') {
+          input = document.createElement('select');
+          input.id = f.id;
+          input.className = 'w-full px-3 py-2 border rounded text-sm';
+          f.options.forEach((opt) => {
+            const option = document.createElement('option');
+            option.value = opt;
+            option.textContent = opt;
+            if (settings[f.key] === opt) option.selected = true;
+            input.appendChild(option);
+          });
+        } else {
+          input = document.createElement('input');
+          input.type = f.type || 'text';
+          input.id = f.id;
+          input.value = settings[f.key] != null ? settings[f.key] : (f.default || '');
+          input.className = 'w-full px-3 py-2 border rounded text-sm';
+          if (f.placeholder) input.placeholder = f.placeholder;
+        }
+        fieldDiv.appendChild(input);
+
+        const errorP = document.createElement('p');
+        errorP.id = f.id + '-error';
+        errorP.className = 'text-red-600 text-xs mt-1 hidden';
+        fieldDiv.appendChild(errorP);
+
+        grid.appendChild(fieldDiv);
+      });
+
+      group.appendChild(grid);
+      form.appendChild(group);
+    }
+
+    addGroup('Output & Timeouts', [
+      { id: 's-max-output', key: 'max_output_length', label: 'Max Output Length', type: 'text', placeholder: 'e.g. 100KB', default: '' },
+      { id: 's-timeout', key: 'command_timeout_max', label: 'Command Timeout (s)', type: 'number', default: '' },
+    ]);
+
+    addGroup('Retry & Circuit Breaker', [
+      { id: 's-retry-max', key: 'retry_max_attempts', label: 'Max Retry Attempts', type: 'number', default: '' },
+      { id: 's-retry-backoff', key: 'retry_backoff_base_seconds', label: 'Retry Backoff (s)', type: 'number', default: '' },
+      { id: 's-cb-threshold', key: 'circuit_breaker_failure_threshold', label: 'CB Failure Threshold', type: 'number', default: '' },
+      { id: 's-cb-timeout', key: 'circuit_breaker_timeout_seconds', label: 'CB Recovery Timeout (s)', type: 'number', default: '' },
+    ]);
+
+    addGroup('Logging', [
+      { id: 's-log-level', key: 'log_level', label: 'Log Level', type: 'select', options: ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'] },
+      { id: 's-max-log', key: 'max_log_output', label: 'Max Log Output', type: 'number', default: '' },
+      { id: 's-compress', key: 'compress_rotated', label: 'Compress Rotated Logs', type: 'toggle' },
+    ]);
+
+    addGroup('Connection Pool', [
+      { id: 's-pool-max', key: 'pool_max_connections_per_target', label: 'Max Conn/Target', type: 'number', default: '' },
+      { id: 's-pool-idle', key: 'pool_idle_timeout_seconds', label: 'Pool Idle Timeout (s)', type: 'number', default: '' },
+      { id: 's-pool-cleanup', key: 'pool_cleanup_interval_seconds', label: 'Pool Cleanup Interval (s)', type: 'number', default: '' },
+      { id: 's-max-ssh', key: 'max_concurrent_ssh_connections', label: 'Max Concurrent SSH', type: 'number', default: '' },
+    ]);
+
+    addGroup('SFTP', [
+      { id: 's-sftp-root', key: 'sftp.sandbox_root', label: 'Sandbox Root', type: 'text', placeholder: 'e.g. /home', default: '' },
+      { id: 's-sftp-path', key: 'sftp.max_path_length', label: 'Max Path Length', type: 'number', default: '' },
+    ]);
+
+    addGroup('Other', [
+      { id: 's-debounce', key: 'watcher_debounce_seconds', label: 'Watcher Debounce (s)', type: 'number', default: '' },
+      { id: 's-proxies', key: 'trusted_proxies', label: 'Trusted Proxies (comma-separated)', type: 'text', placeholder: 'e.g. 10.0.0.0/8', default: '' },
+    ]);
+
+    // Save button
+    const saveWrap = document.createElement('div');
+    saveWrap.className = 'flex justify-end';
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'submit';
+    saveBtn.className = 'bg-blue-600 text-white px-6 py-2 rounded hover:bg-blue-700 text-sm font-medium';
+    saveBtn.textContent = 'Save Settings';
+    saveWrap.appendChild(saveBtn);
+    form.appendChild(saveWrap);
+
+    container.appendChild(form);
+    main.appendChild(container);
+
+    // Save handler
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      saveBtn.disabled = true;
+      saveBtn.textContent = 'Saving...';
+
+      try {
+        const payload = {};
+
+        // Simple fields
+        const simpleFields = [
+          { id: 's-max-output', key: 'max_output_length', parse: (v) => v || undefined },
+          { id: 's-timeout', key: 'command_timeout_max', parse: (v) => v ? parseInt(v, 10) : undefined },
+          { id: 's-retry-max', key: 'retry_max_attempts', parse: (v) => v ? parseInt(v, 10) : undefined },
+          { id: 's-retry-backoff', key: 'retry_backoff_base_seconds', parse: (v) => v ? parseFloat(v) : undefined },
+          { id: 's-cb-threshold', key: 'circuit_breaker_failure_threshold', parse: (v) => v ? parseInt(v, 10) : undefined },
+          { id: 's-cb-timeout', key: 'circuit_breaker_timeout_seconds', parse: (v) => v ? parseFloat(v) : undefined },
+          { id: 's-log-level', key: 'log_level', parse: (v) => v || undefined },
+          { id: 's-max-log', key: 'max_log_output', parse: (v) => v ? parseInt(v, 10) : undefined },
+          { id: 's-compress', key: 'compress_rotated', parse: (v, el) => el.checked || undefined },
+          { id: 's-pool-max', key: 'pool_max_connections_per_target', parse: (v) => v ? parseInt(v, 10) : undefined },
+          { id: 's-pool-idle', key: 'pool_idle_timeout_seconds', parse: (v) => v ? parseFloat(v) : undefined },
+          { id: 's-pool-cleanup', key: 'pool_cleanup_interval_seconds', parse: (v) => v ? parseFloat(v) : undefined },
+          { id: 's-max-ssh', key: 'max_concurrent_ssh_connections', parse: (v) => v ? parseInt(v, 10) : undefined },
+          { id: 's-debounce', key: 'watcher_debounce_seconds', parse: (v) => v ? parseFloat(v) : undefined },
+        ];
+
+        simpleFields.forEach(({ id, key, parse }) => {
+          const el = document.getElementById(id);
+          if (!el) return;
+          const val = el.type === 'checkbox' ? el.checked : el.value.trim();
+          const parsed = parse(val, el);
+          if (parsed !== undefined) payload[key] = parsed;
+        });
+
+        // Trusted proxies (comma-separated → array)
+        const proxiesEl = document.getElementById('s-proxies');
+        if (proxiesEl && proxiesEl.value.trim()) {
+          payload.trusted_proxies = proxiesEl.value.split(',').map(s => s.trim()).filter(Boolean);
+        }
+
+        // SFTP nested
+        const sftpRoot = document.getElementById('s-sftp-root');
+        const sftpPath = document.getElementById('s-sftp-path');
+        const sftp = {};
+        if (sftpRoot && sftpRoot.value.trim()) sftp.sandbox_root = sftpRoot.value.trim();
+        if (sftpPath && sftpPath.value) sftp.max_path_length = parseInt(sftpPath.value, 10);
+        if (Object.keys(sftp).length > 0) payload.sftp = sftp;
+
+        const r = await api('PUT', '/config/settings', payload);
+        if (!r.ok) {
+          const err = await r.json();
+          throw new Error(err.message || 'Failed to save settings');
+        }
+        showToast('Settings saved');
+      } catch (err) {
+        showToast(err.message || 'Failed to save', 'error');
+      }
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'Save Settings';
+    });
+
+  } catch (err) {
+    main.innerHTML = `<div class="p-6 text-red-600">Error: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+// ===========================================================================
+// Page: Backups
+// ===========================================================================
+
+async function renderBackups() {
+  const main = document.getElementById('main-content');
+  showLoading(main);
+
+  try {
+    const res = await api('GET', '/backups');
+    if (!res.ok) throw new Error('Failed to load backups');
+    const data = await res.json();
+    const backups = data.backups || [];
+
+    main.innerHTML = '';
+
+    const container = document.createElement('div');
+    container.className = 'container mx-auto px-4 py-6';
+
+    const title = document.createElement('h1');
+    title.className = 'text-2xl font-bold text-gray-800 mb-4';
+    title.textContent = 'Backups';
+    container.appendChild(title);
+
+    // Table
+    const tableWrap = document.createElement('div');
+    tableWrap.className = 'overflow-x-auto';
+    const table = document.createElement('table');
+    table.className = 'min-w-full bg-white rounded-lg shadow';
+
+    const thead = document.createElement('thead');
+    const headRow = document.createElement('tr');
+    headRow.className = 'bg-gray-50 text-left text-sm text-gray-600';
+    ['Filename', 'Size', 'Date', 'Actions'].forEach((h) => {
+      const th = document.createElement('th');
+      th.className = 'px-4 py-3 font-medium';
+      th.textContent = h;
+      headRow.appendChild(th);
+    });
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+
+    const tbody = document.createElement('tbody');
+    tbody.className = 'divide-y divide-gray-200';
+
+    if (backups.length === 0) {
+      const emptyRow = document.createElement('tr');
+      const emptyCell = document.createElement('td');
+      emptyCell.colSpan = 4;
+      emptyCell.className = 'px-4 py-8 text-center text-gray-500';
+      emptyCell.textContent = 'No backups found.';
+      emptyRow.appendChild(emptyCell);
+      tbody.appendChild(emptyRow);
+    }
+
+    backups.forEach((backup) => {
+      const row = document.createElement('tr');
+      row.className = 'hover:bg-gray-50';
+
+      const nameCell = document.createElement('td');
+      nameCell.className = 'px-4 py-3 text-sm font-mono';
+      nameCell.textContent = backup.name;
+      row.appendChild(nameCell);
+
+      const sizeCell = document.createElement('td');
+      sizeCell.className = 'px-4 py-3 text-sm';
+      sizeCell.textContent = formatBytes(backup.size_bytes || 0);
+      row.appendChild(sizeCell);
+
+      const dateCell = document.createElement('td');
+      dateCell.className = 'px-4 py-3 text-sm';
+      dateCell.textContent = backup.created_at || '';
+      row.appendChild(dateCell);
+
+      const actionsCell = document.createElement('td');
+      actionsCell.className = 'px-4 py-3';
+      const restoreBtn = document.createElement('button');
+      restoreBtn.className = 'text-green-600 hover:text-green-800 text-sm mr-3';
+      restoreBtn.textContent = 'Restore';
+      const deleteBtn = document.createElement('button');
+      deleteBtn.className = 'text-red-600 hover:text-red-800 text-sm';
+      deleteBtn.textContent = 'Delete';
+      actionsCell.appendChild(restoreBtn);
+      actionsCell.appendChild(deleteBtn);
+      row.appendChild(actionsCell);
+
+      restoreBtn.addEventListener('click', async () => {
+        const ok = await confirm(`Restore config from "${backup.name}"?`);
+        if (!ok) return;
+        const r = await api('POST', `/backups/${encodeURIComponent(backup.name)}/restore`);
+        if (!r.ok) {
+          const err = await r.json();
+          showToast(err.message || 'Failed to restore', 'error');
+          return;
+        }
+        showToast('Config restored');
+        renderBackups();
+      });
+
+      deleteBtn.addEventListener('click', async () => {
+        const ok = await confirm(`Delete backup "${backup.name}"?`);
+        if (!ok) return;
+        const r = await api('DELETE', `/backups/${encodeURIComponent(backup.name)}`);
+        if (!r.ok) {
+          const err = await r.json();
+          showToast(err.message || 'Failed to delete', 'error');
+          return;
+        }
+        showToast('Backup deleted');
+        renderBackups();
+      });
+
+      tbody.appendChild(row);
+    });
+
+    table.appendChild(tbody);
+    tableWrap.appendChild(table);
+    container.appendChild(tableWrap);
+    main.appendChild(container);
+
+  } catch (err) {
+    main.innerHTML = `<div class="p-6 text-red-600">Error: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+// ===========================================================================
+// Logout
+// ===========================================================================
+
+document.getElementById('logout-btn').addEventListener('click', () => {
+  sessionStorage.removeItem('token');
+  window.location.hash = '#/login';
+});
+
+// ===========================================================================
+// Init
+// ===========================================================================
+
+navigate(window.location.hash || '#/login');
+
+</script>
+</body>
+</html>
