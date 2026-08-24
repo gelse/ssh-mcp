@@ -15,28 +15,14 @@ services:
     environment:
       - CONFIG_DIR=/config
       - LOG_DIR=/logs
+      - CONFIG_API_ENABLED=${CONFIG_API_ENABLED:-false}
+      - CONFIG_API_TOKEN=${CONFIG_API_TOKEN:-}
+      - CONFIG_API_PORT=8081
     ports:
       - "9080:8080"
-
-  mcp-ssh-config-api:
-    build:
-      context: .
-      dockerfile: Dockerfile.config-api
-    image: ghcr.io/gelse/ssh-mcp-config-api:latest
-    container_name: mcp-ssh-config-api
-    restart: unless-stopped
-    environment:
-      - CONFIG_API_TOKEN=${CONFIG_API_TOKEN}
-      - CONFIG_DIR=/config
-      - CONFIG_API_PORT=8081
-      - CONFIG_API_HOST=0.0.0.0
-      - MCP_SERVER_URL=http://mcp-ssh:8080/mcp
-    volumes:
-      - ./config:/config:rw
-    ports:
-      - "9081:8081"
+      - "9081:8081"  # Config API (only active when CONFIG_API_ENABLED=true)
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8081/health"]
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/health"]
       interval: 30s
       timeout: 5s
       start_period: 5s
