@@ -16,6 +16,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from config_api.mcp_client import MCPClient, MCPClientError, MCPToolError
 from lib.config import ConfigManager
 from lib.constants import (
     DEFAULT_CONFIG_DIR,
@@ -134,14 +135,18 @@ class ConfigService:
         return clean
 
     def check_ssh_target(self, name: str, timeout: int = 10) -> dict:
-        """Execute the checkcommand on an SSH target and return the result.
+        """Execute the checkcommand on an SSH target via the MCP server.
+
+        Delegates to the MCP server's ``ssh_check_connection`` tool instead
+        of making a direct SSH connection.  Only the MCP server container
+        opens SSH connections.
 
         Args:
             name: The SSH target identifier.
             timeout: Connection/command timeout in seconds.
 
         Returns:
-            Dict with success, output, error, exit_code fields.
+            Dict with success, output, error, exit_code, checkcommand fields.
 
         Raises:
             KeyError: If the target does not exist.
@@ -149,29 +154,37 @@ class ConfigService:
         target = self.get_ssh_target(name)  # raises KeyError if missing
         checkcommand = target.get("checkcommand", "echo ping")
 
-        # Re-read full config (get_ssh_target strips secrets)
-        current = self.read_config()
-        full_target = current.get("ssh_targets", {}).get(name, {})
-
-        from config_api.ssh_checker import check_ssh_connection
-
-        result = check_ssh_connection(
-            host=full_target["host"],
-            port=full_target.get("port", 22),
-            username=full_target["username"],
-            password=full_target.get("password"),
-            private_key=full_target.get("private_key"),
-            checkcommand=checkcommand,
-            timeout=timeout,
-        )
-
-        return {
-            "success": result.success,
-            "output": result.output,
-            "error": result.error,
-            "exit_code": result.exit_code,
-            "checkcommand": checkcommand,
-        }
+        mcp_client = MCPClient()
+        try:
+            result = mcp_client.call_tool(
+                "ssh_check_connection",
+                arguments={"server_name": name, "timeout": timeout},
+                timeout=timeout + 5,  # Extra buffer for HTTP overhead
+            )
+            return {
+                "success": result.get("success", False),
+                "output": result.get("output", ""),
+                "error": result.get("error"),
+                "exit_code": result.get("exit_code", -1),
+                "checkcommand": result.get("checkcommand", checkcommand),
+            }
+        except MCPToolError as e:
+            # Tool returned an error response (e.g., target not found)
+            return {
+                "success": False,
+                "output": "",
+                "error": str(e),
+                "exit_code": -1,
+                "checkcommand": checkcommand,
+            }
+        except MCPClientError as e:
+            return {
+                "success": False,
+                "output": "",
+                "error": f"MCP server unreachable: {e}",
+                "exit_code": -1,
+                "checkcommand": checkcommand,
+            }
 
     def get_block_patterns(self) -> list[str]:
         """Read the block_patterns list from the config.

@@ -118,6 +118,7 @@ from lib.sanitize import (
 from lib.types import (
     AllowedCommand,
     AllowedCommandsResult,
+    CheckConnectionResult,
     CommandError,
     CommandResult,
     FileDownloadResult,
@@ -252,6 +253,7 @@ __all__ = [
     "ServerListResult",
     "AllowedCommand",
     "AllowedCommandsResult",
+    "CheckConnectionResult",
     "CommandResult",
     "CommandError",
     "FileDownloadResult",

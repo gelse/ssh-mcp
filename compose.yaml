@@ -30,6 +30,7 @@ services:
       - CONFIG_DIR=/config
       - CONFIG_API_PORT=8081
       - CONFIG_API_HOST=0.0.0.0
+      - MCP_SERVER_URL=http://mcp-ssh:8080/mcp
     volumes:
       - ./config:/config:rw
     ports:

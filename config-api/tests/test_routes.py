@@ -681,14 +681,18 @@ class TestCheckSSHTarget:
         _setup_target,
     ) -> None:
         """Successful check returns 200 with success=True."""
-        from config_api.ssh_checker import CheckResult
         from unittest.mock import patch
 
-        mock_result = CheckResult(success=True, output="ping", exit_code=0)
-        with patch(
-            "config_api.ssh_checker.check_ssh_connection",
-            return_value=mock_result,
-        ):
+        mock_mcp_result = {
+            "success": True,
+            "output": "ping",
+            "error": None,
+            "exit_code": 0,
+            "checkcommand": "echo ping",
+        }
+        with patch("config_api.config_service.MCPClient") as MockMCP:
+            mock_instance = MockMCP.return_value
+            mock_instance.call_tool.return_value = mock_mcp_result
             response = client.post(
                 "/api/config/ssh_targets/testbox/check",
                 headers=auth_headers,
@@ -722,16 +726,18 @@ class TestCheckSSHTarget:
         _setup_target,
     ) -> None:
         """SSH connection failure returns 500 error."""
-        from config_api.ssh_checker import CheckResult
         from unittest.mock import patch
 
-        mock_result = CheckResult(
-            success=False, output="", error="Connection failed", exit_code=-1,
-        )
-        with patch(
-            "config_api.ssh_checker.check_ssh_connection",
-            return_value=mock_result,
-        ):
+        mock_mcp_result = {
+            "success": False,
+            "output": "",
+            "error": "Connection failed",
+            "exit_code": -1,
+            "checkcommand": "echo ping",
+        }
+        with patch("config_api.config_service.MCPClient") as MockMCP:
+            mock_instance = MockMCP.return_value
+            mock_instance.call_tool.return_value = mock_mcp_result
             response = client.post(
                 "/api/config/ssh_targets/testbox/check",
                 headers=auth_headers,
@@ -761,14 +767,18 @@ class TestCheckSSHTarget:
         _setup_target,
     ) -> None:
         """Response includes the checkcommand that was used."""
-        from config_api.ssh_checker import CheckResult
         from unittest.mock import patch
 
-        mock_result = CheckResult(success=True, output="ok", exit_code=0)
-        with patch(
-            "config_api.ssh_checker.check_ssh_connection",
-            return_value=mock_result,
-        ):
+        mock_mcp_result = {
+            "success": True,
+            "output": "ok",
+            "error": None,
+            "exit_code": 0,
+            "checkcommand": "echo ping",
+        }
+        with patch("config_api.config_service.MCPClient") as MockMCP:
+            mock_instance = MockMCP.return_value
+            mock_instance.call_tool.return_value = mock_mcp_result
             response = client.post(
                 "/api/config/ssh_targets/testbox/check",
                 headers=auth_headers,
