@@ -30,6 +30,9 @@ COPY lib/ /app/lib/
 COPY default-config.json /app/
 COPY config.schema.json /app/
 
+# Copy config API code (enabled via CONFIG_API_ENABLED env var)
+COPY config-api/config_api/ /app/config-api/config_api/
+
 # Copy CycloneDX SBOM generated at build time
 COPY --from=sbom /tmp/sbom.json /app/sbom.json
 
@@ -41,6 +44,9 @@ USER mcpssh
 # Config directory can be overridden via environment variable
 ENV CONFIG_DIR=/config
 ENV LOG_DIR=/logs
+
+# Config API settings (disabled by default)
+ENV CONFIG_API_ENABLED=false
 
 EXPOSE 8080
 
