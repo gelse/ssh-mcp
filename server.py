@@ -170,9 +170,12 @@ def _run_server(
 ) -> None:
     """Run the MCP streamable-HTTP server and handle graceful shutdown.
 
-    Launches ``app.run_http_async(...)`` as an asyncio task and installs
-    SIGTERM/SIGINT handlers so the process shuts the app down cleanly via
-    :meth:`create_app().shutdown` (bounded drain, then resource release)
+    Creates the underlying Starlette ASGI app via ``app.http_app(...)``,
+    optionally mounts the config-api sub-application at ``/api`` when
+    ``CONFIG_API_ENABLED=true``, and runs the server with uvicorn.
+
+    SIGTERM/SIGINT handlers are installed so the process shuts down cleanly
+    via :meth:`create_app().shutdown` (bounded drain, then resource release)
     instead of being killed mid-request.
 
     Args:
@@ -188,6 +191,8 @@ def _run_server(
             manager so config changes take effect without a restart.  Takes
             precedence over the static *trusted_proxies* list.
     """
+    import uvicorn
+
     async def _serve() -> None:
         loop = asyncio.get_running_loop()
         shutdown_event = asyncio.Event()
@@ -203,35 +208,53 @@ def _run_server(
                 # Non-UNIX platforms without signal-handler support.
                 pass
 
-        serve_task = asyncio.create_task(
-            app.run_http_async(
-                host="0.0.0.0",
-                port=8080,
-                transport="streamable-http",
-                path="/mcp",
-                middleware=[
-                    Middleware(
-                        RequestContextMiddleware,
-                        rate_limiter=rate_limiter,
-                        trusted_proxies=trusted_proxies,
-                        trusted_proxies_provider=trusted_proxies_provider,
-                    ),
-                ],
-            )
+        # --- Build the Starlette ASGI app from FastMCP ----------------
+        starlette_app = app.http_app(
+            path="/mcp",
+            transport="streamable-http",
+            middleware=[
+                Middleware(
+                    RequestContextMiddleware,
+                    rate_limiter=rate_limiter,
+                    trusted_proxies=trusted_proxies,
+                    trusted_proxies_provider=trusted_proxies_provider,
+                ),
+            ],
         )
-        await shutdown_event.wait()
-        serve_task.cancel()
-        try:
-            await serve_task
-        except asyncio.CancelledError:
-            pass
-        finally:
-            timeout = getattr(
-                app.state,  # type: ignore[attr-defined]
-                "shutdown_timeout",
-                DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
-            )
-            app.shutdown()  # type: ignore[attr-defined]   # bounded + resource release
+
+        # --- Mount config-api sub-application at /api (if enabled) ----
+        config_api_app = getattr(app.state, "config_api_app", None)  # type: ignore[attr-defined]
+        if config_api_app is not None:
+            from starlette.routing import Mount
+
+            starlette_app.routes.insert(0, Mount("/api", app=config_api_app))
+
+        # --- Start uvicorn inside the FastMCP lifespan context --------
+        config = uvicorn.Config(
+            starlette_app,
+            host="0.0.0.0",
+            port=8080,
+            timeout_graceful_shutdown=2,
+            lifespan="on",
+            ws="websockets-sansio",
+        )
+        server = uvicorn.Server(config)
+
+        async with app._lifespan_manager():  # type: ignore[attr-defined]
+            serve_task = asyncio.create_task(server.serve())
+            await shutdown_event.wait()
+            serve_task.cancel()
+            try:
+                await serve_task
+            except asyncio.CancelledError:
+                pass
+            finally:
+                timeout = getattr(
+                    app.state,  # type: ignore[attr-defined]
+                    "shutdown_timeout",
+                    DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
+                )
+                app.shutdown()  # type: ignore[attr-defined]   # bounded + resource release
 
     asyncio.run(_serve())
 
@@ -486,6 +509,55 @@ def create_app(
         shutdown_timeout=shutdown_timeout,
         _shutdown_done=False,
     )
+
+    # --- Conditionally create config-api sub-application ---------------
+    # When CONFIG_API_ENABLED=true, the FastAPI config-api app is created
+    # and stored on mcp.state so that _run_server() can mount it at /api
+    # on the underlying Starlette ASGI app.
+    config_api_enabled = (
+        os.environ.get("CONFIG_API_ENABLED", "false").lower() == "true"
+    )
+    if config_api_enabled:
+        try:
+            from config_api.app import create_app as create_config_api_app
+
+            config_api_app = create_config_api_app()
+            mcp.state.config_api_app = config_api_app  # type: ignore[attr-defined]
+            stdlib_logger.info(
+                "Config API enabled — sub-application will be mounted at /api"
+            )
+            file_logger.log({
+                "timestamp": datetime.datetime.now(
+                    datetime.timezone.utc
+                ).isoformat(),
+                "event": "config_api.enabled",
+                "success": True,
+                "message": "Config API sub-application created and will be "
+                           "mounted at /api",
+                "request_id": get_request_id(),
+                "log_level": "INFO",
+                "log_format_version": LOG_FORMAT_VERSION,
+            })
+        except Exception as exc:
+            stdlib_logger.warning(
+                "Config API enabled but failed to initialize: %s", exc,
+                exc_info=True,
+            )
+            mcp.state.config_api_app = None  # type: ignore[attr-defined]
+            file_logger.log({
+                "timestamp": datetime.datetime.now(
+                    datetime.timezone.utc
+                ).isoformat(),
+                "event": "config_api.enabled",
+                "success": False,
+                "message": f"Config API failed to initialize: {exc}",
+                "request_id": get_request_id(),
+                "log_level": "WARNING",
+                "log_format_version": LOG_FORMAT_VERSION,
+            })
+    else:
+        mcp.state.config_api_app = None  # type: ignore[attr-defined]
+        stdlib_logger.info("Config API disabled")
 
     # --- Attach health-check endpoint (after pool creation so it can
     # report live connection-pool statistics) ---
