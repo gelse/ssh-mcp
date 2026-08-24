@@ -31,7 +31,7 @@ Five MCP tools (`ssh_list_servers`, `ssh_list_allowed_commands`, `ssh_execute_co
 ```
 mcp-ssh/
 ├── server.py                  # FastMCP app factory + CLI entry point
-├── lib/                       # 24 modules (plus __init__.py re-exports)
+├── lib/                       # 25 modules (plus __init__.py re-exports)
 │   ├── __init__.py            # Public re-exports
 │   ├── auth.py                # AuthorizationManager, layered allow-list chain
 │   ├── circuit_breaker.py     # Per-target failure threshold + recovery timeout
@@ -55,6 +55,7 @@ mcp-ssh/
 │   ├── secrets.py             # SecretsManager for secrets.json + MCP_SSH_SECRET_* env var merging
 │   ├── size_utils.py          # parse_size_bytes() for size-string settings (e.g. max_output_length)
 │   ├── ssh_client.py          # SSHClientManager — connect, retry, circuit-break, pool
+│   ├── ssh_operations.py      # Standalone SSH functions (check, connect, execute) used by MCP tools and config API
 │   ├── sudo.py                # SudoHandler — validate, wrap sudo command, password injection
 │   └── types.py               # TypedDict models for tool results
 ├── config-api/                 # Configuration API + Web Dashboard (GUI)
@@ -77,10 +78,9 @@ mcp-ssh/
 │       └── test_mcp_ssh_integration.py # Real Docker containers: SSH server + MCP server
 ├── docs/
 │   └── SECURITY.md            # Full security model and hardening guide
-├── Dockerfile                 # Multi-stage: SBOM → runtime (non-root, hash-pinned)
-├── Dockerfile.config-api      # Multi-stage: config-api runtime (non-root, hash-pinned)
-├── compose.yaml               # Docker Compose (mcp-ssh + config-api services)
-├── Makefile                   # build, up, down, test, config-test, integrationtest, config-integrationtest, clean-test
+├── Dockerfile                 # Multi-stage: SBOM → runtime (non-root, hash-pinned) — includes config-api when CONFIG_API_ENABLED=true
+├── compose.yaml               # Docker Compose (single mcp-ssh service with optional config API)
+├── Makefile                   # build, up, down, test, config-test, integrationtest, clean-test
 ├── requirements.in            # Direct deps (pip-compile input)
 ├── requirements.txt           # Hash-locked transitive deps (pip-compile output)
 ├── requirements-build.in      # SBOM/audit tool deps
@@ -310,6 +310,9 @@ Before considering a task complete, verify every applicable item:
 - Config at `/config/ssh-mcp-config.json` (mounted from host `./config`)
 - Logs at `/logs/` (mounted from host `./logs`)
 - SSH key at `/app/ssh_key` (mounted read-only)
+- Single container hosts both MCP server and optional config API
+- Config API enabled via `CONFIG_API_ENABLED=true` env var (default: `false`)
+- When enabled, config API is mounted at `/api` on the FastMCP Starlette app
 - Traefik labels in [`compose.yaml`](compose.yaml) — the server itself reads no `TRAEFIK_*` env vars
 - Health check: `wget --spider http://localhost:8080/health`
 
