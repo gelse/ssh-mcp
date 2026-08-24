@@ -1080,6 +1080,8 @@ class ConfigManager:
                 normalized["private_key"] = private_key
             if has_pw:
                 normalized["password"] = password
+            if "checkcommand" in tdef:
+                normalized["checkcommand"] = tdef["checkcommand"]
             ssh_targets[tid] = normalized
 
         # Collect ssh target IDs for cross-reference validation
