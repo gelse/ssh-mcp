@@ -54,6 +54,8 @@ from lib.constants import (
     RESTRICTED_FILE_MODE,
     SECRETS_FILE_MODE,
     SETTING_KEY_TYPES,
+    DEFAULT_SSH_CHECK_TIMEOUT_MAX,
+    DEFAULT_SSH_CHECK_TIMEOUT_MIN,
     DEFAULT_SSH_PORT,
     DEFAULT_SSH_TIMEOUT_SECONDS,
     DEFAULT_WATCHER_DEBOUNCE_SECONDS,
@@ -108,6 +110,11 @@ from lib.request_context import (
     RequestContextMiddleware,
 )
 from lib.ssh_client import SSHClientManager
+from lib.ssh_operations import (
+    build_auth_target,
+    check_ssh_connection,
+    execute_ssh_command,
+)
 from lib.sudo import SudoHandler
 from lib.sanitize import (
     sanitize_command,
@@ -220,6 +227,8 @@ __all__ = [
     "DEFAULT_SSH_PORT",
     "DEFAULT_SSH_TIMEOUT_SECONDS",
     "DEFAULT_CHECK_COMMAND",
+    "DEFAULT_SSH_CHECK_TIMEOUT_MAX",
+    "DEFAULT_SSH_CHECK_TIMEOUT_MIN",
     "DEFAULT_COMMAND_TIMEOUT_SECONDS",
     "DEFAULT_MAX_CONCURRENT_SSH_CONNECTIONS",
     "DEFAULT_MAX_OUTPUT_LENGTH",
@@ -248,6 +257,10 @@ __all__ = [
     "FALLBACK_CLIENT_IP",
     "DEFAULT_REQUEST_ID",
     "DEFAULT_TRUSTED_PROXIES",
+    # SSH operations
+    "build_auth_target",
+    "check_ssh_connection",
+    "execute_ssh_command",
     # Types
     "ServerInfo",
     "ServerListResult",

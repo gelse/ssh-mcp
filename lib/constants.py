@@ -164,6 +164,12 @@ DEFAULT_CHECK_COMMAND: str = "echo ping"
 """Default command executed to verify SSH connectivity when no
 per-target checkcommand is configured."""
 
+DEFAULT_SSH_CHECK_TIMEOUT_MIN: int = 1
+"""Minimum allowed timeout (seconds) for the SSH connectivity check."""
+
+DEFAULT_SSH_CHECK_TIMEOUT_MAX: int = 30
+"""Maximum allowed timeout (seconds) for the SSH connectivity check."""
+
 DEFAULT_COMMAND_TIMEOUT_SECONDS: int = 120
 """Default timeout (seconds) for remote command execution."""
 
