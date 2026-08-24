@@ -98,7 +98,7 @@ class MCPClient:
                     json=payload,
                     headers={
                         "Content-Type": "application/json",
-                        "Accept": "application/json",
+                        "Accept": "application/json, text/event-stream",
                     },
                 )
                 response.raise_for_status()
