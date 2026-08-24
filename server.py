@@ -24,6 +24,7 @@ from types import SimpleNamespace
 
 import paramiko
 from fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 from starlette.middleware import Middleware
 
 from lib.auth import AuthorizationManager, AuthResult
@@ -808,7 +809,12 @@ def _register_tools(
     # Tool definitions
     # ------------------------------------------------------------------
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ))
     def ssh_list_servers() -> str:
         """
         List all available SSH target servers.
@@ -826,7 +832,12 @@ def _register_tools(
             }
         return json.dumps(result, indent=2)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ))
     def ssh_list_allowed_commands(server_name: str) -> str:
         """
         List all commands the current client is allowed to execute on a
@@ -859,7 +870,12 @@ def _register_tools(
 
         return json.dumps(commands)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+        openWorldHint=True,
+    ))
     def ssh_execute_command(
         server_name: str,
         command: str,
@@ -1015,7 +1031,12 @@ def _register_tools(
                 )
             )
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    ))
     def ssh_check_connection(server_name: str, timeout: int = 10) -> str:
         """Check SSH connectivity to a remote server.
 
@@ -1111,7 +1132,12 @@ def _register_tools(
                 )
             )
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    ))
     def ssh_download_file(server_name: str, remote_path: str) -> str:
         """
         Download a file from a remote SSH server.
@@ -1220,7 +1246,12 @@ def _register_tools(
                 )
             )
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    ))
     def ssh_upload_file(
         server_name: str,
         remote_path: str,
