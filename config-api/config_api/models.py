@@ -22,6 +22,7 @@ class SSHTargetModel(BaseModel):
     username: str = Field(..., min_length=1, max_length=64)
     private_key: str | None = None
     password: str | None = None
+    checkcommand: str | None = Field(default=None, min_length=1, max_length=512)
 
 
 class RuleModel(BaseModel):

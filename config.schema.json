@@ -108,6 +108,12 @@
         "password": {
           "type": "string",
           "minLength": 1
+        },
+        "checkcommand": {
+          "type": "string",
+          "minLength": 1,
+          "default": "echo ping",
+          "description": "Command executed to verify SSH connectivity"
         }
       }
     },
