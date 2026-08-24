@@ -342,6 +342,51 @@ async def delete_ssh_target(
 
 
 # ---------------------------------------------------------------------------
+# POST /api/config/ssh_targets/{name}/check — test SSH connectivity
+# ---------------------------------------------------------------------------
+
+
+@router.post("/api/config/ssh_targets/{name}/check")
+async def check_ssh_target(
+    name: str,
+    token: str = Depends(verify_token),
+    svc: ConfigService = Depends(get_config_service),
+) -> JSONResponse:
+    """Execute the checkcommand on an SSH target to verify connectivity.
+
+    Returns a JSON object with success, output, error, exit_code,
+    and checkcommand fields.
+    """
+    try:
+        result = svc.check_ssh_target(name)
+        return JSONResponse(content=result)
+    except KeyError:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content=ErrorResponse(
+                error_type="KeyError",
+                message=f"SSH target '{name}' not found",
+            ).model_dump(),
+        )
+    except FileNotFoundError:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content=ErrorResponse(
+                error_type="FileNotFoundError",
+                message="Config file not found",
+            ).model_dump(),
+        )
+    except Exception as e:
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content=ErrorResponse(
+                error_type="SSHCheckError",
+                message=f"Connection check failed: {e}",
+            ).model_dump(),
+        )
+
+
+# ---------------------------------------------------------------------------
 # POST /api/config/block_patterns — append a block pattern
 # ---------------------------------------------------------------------------
 

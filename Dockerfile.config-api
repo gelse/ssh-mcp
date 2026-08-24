@@ -3,6 +3,9 @@
 # Build context must be the repo root so lib/ and config files are available.
 FROM python:3.13-alpine@sha256:399babc8b49529dabfd9c922f2b5eea81d611e4512e3ed250d75bd2e7683f4b0 AS builder
 
+# Build dependencies for paramiko (cryptography, bcrypt)
+RUN apk add --no-cache gcc musl-dev libffi-dev cargo rust
+
 WORKDIR /build
 
 COPY config-api/requirements.txt /tmp/requirements.txt
@@ -11,6 +14,9 @@ RUN pip install --no-cache-dir --require-hashes --prefix=/install -r /tmp/requir
 
 # ---------- Stage: runtime ----------
 FROM python:3.13-alpine@sha256:399babc8b49529dabfd9c922f2b5eea81d611e4512e3ed250d75bd2e7683f4b0
+
+# Runtime dependencies for paramiko
+RUN apk add --no-cache libffi
 
 # Security: run as non-root
 ARG UID=1000
@@ -30,7 +36,7 @@ COPY config-api/config_api/ /app/config_api/
 COPY lib/ /app/lib/
 
 # Replace lib/__init__.py with a minimal version that only imports
-# stdlib-only modules needed by the config API (no paramiko, prometheus_client,
+# stdlib-only modules needed by the config API (no prometheus_client,
 # fastmcp, watchdog, or other heavy dependencies).
 COPY config-api/stubs/lib_init_minimal.py /app/lib/__init__.py
 

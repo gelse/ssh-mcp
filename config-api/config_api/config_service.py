@@ -133,6 +133,46 @@ class ConfigService:
                 clean.pop(field, None)
         return clean
 
+    def check_ssh_target(self, name: str, timeout: int = 10) -> dict:
+        """Execute the checkcommand on an SSH target and return the result.
+
+        Args:
+            name: The SSH target identifier.
+            timeout: Connection/command timeout in seconds.
+
+        Returns:
+            Dict with success, output, error, exit_code fields.
+
+        Raises:
+            KeyError: If the target does not exist.
+        """
+        target = self.get_ssh_target(name)  # raises KeyError if missing
+        checkcommand = target.get("checkcommand", "echo ping")
+
+        # Re-read full config (get_ssh_target strips secrets)
+        current = self.read_config()
+        full_target = current.get("ssh_targets", {}).get(name, {})
+
+        from config_api.ssh_checker import check_ssh_connection
+
+        result = check_ssh_connection(
+            host=full_target["host"],
+            port=full_target.get("port", 22),
+            username=full_target["username"],
+            password=full_target.get("password"),
+            private_key=full_target.get("private_key"),
+            checkcommand=checkcommand,
+            timeout=timeout,
+        )
+
+        return {
+            "success": result.success,
+            "output": result.output,
+            "error": result.error,
+            "exit_code": result.exit_code,
+            "checkcommand": checkcommand,
+        }
+
     def get_block_patterns(self) -> list[str]:
         """Read the block_patterns list from the config.
 

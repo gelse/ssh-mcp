@@ -158,3 +158,22 @@ class ValidateResponse(BaseModel):
 
     config: dict | None = None
     """The validated config with defaults applied (only present when valid=true)."""
+
+
+class SSHCheckResponse(BaseModel):
+    """Response model for SSH connection check."""
+
+    success: bool
+    """Whether the connection check succeeded (exit code 0)."""
+
+    output: str
+    """Stdout output from the check command."""
+
+    error: str | None = None
+    """Stderr output or connection error message (null on success)."""
+
+    exit_code: int = -1
+    """Exit code from the check command (-1 if connection failed)."""
+
+    checkcommand: str
+    """The command that was executed."""
