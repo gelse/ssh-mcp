@@ -651,6 +651,136 @@ class TestDeleteSingleSSHTarget:
 
 
 # ---------------------------------------------------------------------------
+# POST /api/config/ssh_targets/{name}/check
+# ---------------------------------------------------------------------------
+
+
+class TestCheckSSHTarget:
+    """Tests for POST /api/config/ssh_targets/{name}/check."""
+
+    @pytest.fixture()
+    def _setup_target(self, tmp_config_dir):
+        """Create a test SSH target with a checkcommand in the config."""
+        from config_api.config_service import ConfigService
+
+        svc = ConfigService(config_dir=str(tmp_config_dir))
+        config = svc.read_config()
+        config["ssh_targets"]["testbox"] = {
+            "host": "192.168.1.100",
+            "port": 22,
+            "username": "testuser",
+            "password": "testpass",
+            "checkcommand": "echo ping",
+        }
+        svc.write_config(config)
+
+    def test_check_success(
+        self,
+        client: TestClient,
+        auth_headers: dict[str, str],
+        _setup_target,
+    ) -> None:
+        """Successful check returns 200 with success=True."""
+        from config_api.ssh_checker import CheckResult
+        from unittest.mock import patch
+
+        mock_result = CheckResult(success=True, output="ping", exit_code=0)
+        with patch(
+            "config_api.ssh_checker.check_ssh_connection",
+            return_value=mock_result,
+        ):
+            response = client.post(
+                "/api/config/ssh_targets/testbox/check",
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert data["output"] == "ping"
+        assert data["exit_code"] == 0
+        assert data["checkcommand"] == "echo ping"
+
+    def test_check_unknown_target(
+        self,
+        client: TestClient,
+        auth_headers: dict[str, str],
+        _setup_target,
+    ) -> None:
+        """Check for non-existent target returns 404."""
+        response = client.post(
+            "/api/config/ssh_targets/nonexistent/check",
+            headers=auth_headers,
+        )
+
+        assert response.status_code == 404
+
+    def test_check_ssh_failure(
+        self,
+        client: TestClient,
+        auth_headers: dict[str, str],
+        _setup_target,
+    ) -> None:
+        """SSH connection failure returns 500 error."""
+        from config_api.ssh_checker import CheckResult
+        from unittest.mock import patch
+
+        mock_result = CheckResult(
+            success=False, output="", error="Connection failed", exit_code=-1,
+        )
+        with patch(
+            "config_api.ssh_checker.check_ssh_connection",
+            return_value=mock_result,
+        ):
+            response = client.post(
+                "/api/config/ssh_targets/testbox/check",
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is False
+        assert data["error"] == "Connection failed"
+
+    def test_check_requires_auth(
+        self,
+        client: TestClient,
+        _setup_target,
+    ) -> None:
+        """Check endpoint requires a valid Bearer token."""
+        response = client.post(
+            "/api/config/ssh_targets/testbox/check",
+        )
+
+        assert response.status_code in (401, 403)
+
+    def test_check_returns_checkcommand(
+        self,
+        client: TestClient,
+        auth_headers: dict[str, str],
+        _setup_target,
+    ) -> None:
+        """Response includes the checkcommand that was used."""
+        from config_api.ssh_checker import CheckResult
+        from unittest.mock import patch
+
+        mock_result = CheckResult(success=True, output="ok", exit_code=0)
+        with patch(
+            "config_api.ssh_checker.check_ssh_connection",
+            return_value=mock_result,
+        ):
+            response = client.post(
+                "/api/config/ssh_targets/testbox/check",
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "checkcommand" in data
+        assert data["checkcommand"] == "echo ping"
+
+
+# ---------------------------------------------------------------------------
 # GET /api/config/block_patterns (list)
 # ---------------------------------------------------------------------------
 
