@@ -461,12 +461,20 @@ async function renderTargets() {
 
       const actionsCell = document.createElement('td');
       actionsCell.className = 'px-4 py-3';
+
+      const checkBtn = document.createElement('button');
+      checkBtn.className = 'text-green-600 hover:text-green-800 text-sm mr-3';
+      checkBtn.textContent = 'Check';
+
       const editBtn = document.createElement('button');
       editBtn.className = 'text-blue-600 hover:text-blue-800 text-sm mr-3';
       editBtn.textContent = 'Edit';
+
       const deleteBtn = document.createElement('button');
       deleteBtn.className = 'text-red-600 hover:text-red-800 text-sm';
       deleteBtn.textContent = 'Delete';
+
+      actionsCell.appendChild(checkBtn);
       actionsCell.appendChild(editBtn);
       actionsCell.appendChild(deleteBtn);
       row.appendChild(actionsCell);
@@ -500,6 +508,11 @@ async function renderTargets() {
               <label class="block text-sm font-medium text-gray-700 mb-1">Private Key</label>
               <textarea id="m-private-key" rows="3" placeholder="Leave empty to keep unchanged" class="w-full px-3 py-2 border rounded text-sm"></textarea>
             </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Check Command</label>
+              <input type="text" id="m-checkcommand" value="${escapeHtml(target.checkcommand || '')}"
+                     placeholder="echo ping" class="w-full px-3 py-2 border rounded text-sm">
+            </div>
           </div>
         `;
         showModal('Edit Target', modalBody, async (body) => {
@@ -508,11 +521,13 @@ async function renderTargets() {
           const username = body.querySelector('#m-username').value.trim();
           const password = body.querySelector('#m-password').value;
           const privateKey = body.querySelector('#m-private-key').value;
+          const checkcommand = body.querySelector('#m-checkcommand').value.trim();
           if (!host) throw new Error('Host is required');
           if (!username) throw new Error('Username is required');
           const payload = { host, port, username };
           if (password) payload.password = password;
           if (privateKey) payload.private_key = privateKey;
+          if (checkcommand) payload.checkcommand = checkcommand;
           const r = await api('PUT', `/config/ssh_targets/${encodeURIComponent(name)}`, payload);
           if (!r.ok) {
             const err = await r.json();
@@ -535,6 +550,26 @@ async function renderTargets() {
         }
         showToast('Target deleted');
         renderTargets();
+      });
+
+      // Check handler
+      checkBtn.addEventListener('click', async () => {
+        checkBtn.disabled = true;
+        checkBtn.textContent = 'Checking...';
+        try {
+          const r = await api('POST', `/config/ssh_targets/${encodeURIComponent(name)}/check`);
+          const result = await r.json();
+          if (result.success) {
+            showToast(`Connection OK: ${result.output || 'success'}`, 'success');
+          } else {
+            showToast(`Connection FAILED: ${result.error || result.output || 'unknown error'}`, 'error');
+          }
+        } catch (err) {
+          showToast(`Check failed: ${err.message}`, 'error');
+        } finally {
+          checkBtn.disabled = false;
+          checkBtn.textContent = 'Check';
+        }
       });
 
       tbody.appendChild(row);
@@ -573,6 +608,11 @@ async function renderTargets() {
             <label class="block text-sm font-medium text-gray-700 mb-1">Private Key</label>
             <textarea id="m-private-key" rows="3" class="w-full px-3 py-2 border rounded text-sm"></textarea>
           </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Check Command</label>
+            <input type="text" id="m-checkcommand" placeholder="echo ping"
+                   class="w-full px-3 py-2 border rounded text-sm">
+          </div>
         </div>
       `;
       showModal('Add Target', modalBody, async (body) => {
@@ -582,6 +622,7 @@ async function renderTargets() {
         const username = body.querySelector('#m-username').value.trim();
         const password = body.querySelector('#m-password').value;
         const privateKey = body.querySelector('#m-private-key').value;
+        const checkcommand = body.querySelector('#m-checkcommand').value.trim();
         if (!targetName) throw new Error('Name is required');
         if (!/^[a-zA-Z0-9._-]+$/.test(targetName)) throw new Error('Name must match [a-zA-Z0-9._-]+');
         if (!host) throw new Error('Host is required');
@@ -589,6 +630,7 @@ async function renderTargets() {
         const payload = { host, port, username };
         if (password) payload.password = password;
         if (privateKey) payload.private_key = privateKey;
+        if (checkcommand) payload.checkcommand = checkcommand;
         const r = await api('PUT', `/config/ssh_targets/${encodeURIComponent(targetName)}`, payload);
         if (!r.ok) {
           const err = await r.json();
