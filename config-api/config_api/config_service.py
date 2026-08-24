@@ -21,10 +21,18 @@ from lib.config import ConfigManager
 from lib.constants import (
     DEFAULT_CONFIG_DIR,
     DEFAULT_CONFIG_FILENAME,
+    DEFAULT_SSH_KEY_FILENAME,
     RESTRICTED_FILE_MODE,
     TARGET_NAME_PATTERN,
 )
 from lib.exceptions import ConfigValidationError
+
+# Attempt to import ssh_operations for direct SSH calls (unified mode).
+# In standalone mode, this import will fail and MCPClient is used instead.
+try:
+    import lib.ssh_operations as _ssh_operations_module
+except ImportError:
+    _ssh_operations_module = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +59,31 @@ class ConfigService:
         "settings",
     })
 
-    def __init__(self, config_dir: str | None = None) -> None:
+    def __init__(
+        self,
+        config_dir: str | None = None,
+        *,
+        ssh_client_manager: object | None = None,
+        ssh_config_manager: object | None = None,
+        ssh_key_path: str | None = None,
+    ) -> None:
+        """Initialise the config service.
+
+        Args:
+            config_dir: Path to the config directory.  Falls back to the
+                ``CONFIG_DIR`` environment variable or the compiled default.
+            ssh_client_manager: An
+                :class:`~lib.ssh_client.SSHClientManager` instance for
+                direct SSH calls (unified mode).  ``None`` falls back to
+                MCPClient (standalone mode).
+            ssh_config_manager: A :class:`~lib.config.ConfigManager`
+                instance whose :meth:`get_ssh_target` returns the *full*
+                (unstripped) target dict.  Required when
+                *ssh_client_manager* is provided.
+            ssh_key_path: Default path to the SSH private key used by
+                :func:`lib.ssh_operations.check_ssh_connection`.  Falls
+                back to ``DEFAULT_SSH_KEY_FILENAME`` when omitted.
+        """
         self.config_dir = Path(
             config_dir or os.environ.get("CONFIG_DIR", DEFAULT_CONFIG_DIR)
         )
@@ -63,6 +95,11 @@ class ConfigService:
         # expected and harmless.  The ConfigManager instance is used solely
         # for its _validate() method.
         self._validator = ConfigManager(str(self.config_dir))
+
+        # Direct SSH operation dependencies (unified mode).
+        self._ssh_client_manager = ssh_client_manager
+        self._ssh_config_manager = ssh_config_manager
+        self._ssh_key_path = ssh_key_path or DEFAULT_SSH_KEY_FILENAME
 
     # ------------------------------------------------------------------
     # Read operations
@@ -134,26 +171,72 @@ class ConfigService:
                 clean.pop(field, None)
         return clean
 
-    def check_ssh_target(self, name: str, timeout: int = 10) -> dict:
-        """Execute the checkcommand on an SSH target via the MCP server.
+    @property
+    def _use_direct_ssh(self) -> bool:
+        """Return ``True`` when direct SSH calls are available (unified mode)."""
+        return (
+            _ssh_operations_module is not None
+            and self._ssh_client_manager is not None
+            and self._ssh_config_manager is not None
+        )
 
-        Delegates to the MCP server's ``ssh_check_connection`` tool instead
-        of making a direct SSH connection.  Only the MCP server container
-        opens SSH connections.
+    def check_ssh_target(self, name: str, timeout: int = 10) -> dict:
+        """Execute the checkcommand on an SSH target to verify connectivity.
+
+        In **unified mode** (when ``lib.ssh_operations`` is importable and
+        the required managers have been injected), calls
+        :func:`lib.ssh_operations.check_ssh_connection` directly — no HTTP
+        round-trip required.
+
+        In **standalone mode** falls back to the MCP server's
+        ``ssh_check_connection`` tool via :class:`MCPClient`.
 
         Args:
             name: The SSH target identifier.
             timeout: Connection/command timeout in seconds.
 
         Returns:
-            Dict with success, output, error, exit_code, checkcommand fields.
+            Dict with ``success``, ``output``, ``error``, ``exit_code``,
+            and ``checkcommand`` fields.
 
         Raises:
             KeyError: If the target does not exist.
         """
-        target = self.get_ssh_target(name)  # raises KeyError if missing
+        # Retrieve target info (raises KeyError if missing).
+        # In standalone mode this also gets the checkcommand for the
+        # fallback error response.
+        target = self.get_ssh_target(name)
         checkcommand = target.get("checkcommand", "echo ping")
 
+        # ----- Unified mode: direct function call -----
+        if self._use_direct_ssh:
+            try:
+                result = _ssh_operations_module.check_ssh_connection(
+                    ssh_client_manager=self._ssh_client_manager,
+                    config_manager=self._ssh_config_manager,
+                    target_name=name,
+                    ssh_key_path=self._ssh_key_path,
+                    timeout=timeout,
+                )
+                return {
+                    "success": result.get("success", False),
+                    "output": result.get("output", ""),
+                    "error": result.get("error"),
+                    "exit_code": result.get("exit_code", -1),
+                    "checkcommand": result.get("checkcommand", checkcommand),
+                }
+            except Exception as exc:
+                # Translate any library exception into the standard
+                # error dict so the API contract is preserved.
+                return {
+                    "success": False,
+                    "output": "",
+                    "error": str(exc),
+                    "exit_code": -1,
+                    "checkcommand": checkcommand,
+                }
+
+        # ----- Standalone mode: MCPClient HTTP fallback -----
         mcp_client = MCPClient()
         try:
             result = mcp_client.call_tool(

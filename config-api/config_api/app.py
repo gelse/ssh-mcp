@@ -58,12 +58,21 @@ async def lifespan(app: FastAPI):  # type: ignore[type-arg]
         pass
 
 
-def create_app(config_dir: str | None = None) -> FastAPI:
+def create_app(
+    config_dir: str | None = None,
+    *,
+    ssh_client_manager: object | None = None,
+    ssh_config_manager: object | None = None,
+    ssh_key_path: str | None = None,
+) -> FastAPI:
     """Create and configure the FastAPI application.
 
     Args:
         config_dir: Path to the config directory.  If None, uses the
                     CONFIG_DIR env var or defaults to /config.
+        ssh_client_manager: Optional SSHClientManager for unified mode.
+        ssh_config_manager: Optional ConfigManager for unified mode.
+        ssh_key_path: Optional path to the SSH key for unified mode.
 
     Returns:
         Configured FastAPI application instance.
@@ -78,7 +87,12 @@ def create_app(config_dir: str | None = None) -> FastAPI:
     )
 
     # Initialize config service
-    svc = init_config_service(config_dir)
+    svc = init_config_service(
+        config_dir,
+        ssh_client_manager=ssh_client_manager,
+        ssh_config_manager=ssh_config_manager,
+        ssh_key_path=ssh_key_path,
+    )
 
     # Mount routes
     app.include_router(router)

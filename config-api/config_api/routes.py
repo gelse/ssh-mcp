@@ -39,10 +39,28 @@ router = APIRouter()
 _config_service: ConfigService | None = None
 
 
-def init_config_service(config_dir: str | None = None) -> ConfigService:
-    """Initialize the config service singleton.  Called once at startup."""
+def init_config_service(
+    config_dir: str | None = None,
+    *,
+    ssh_client_manager: object | None = None,
+    ssh_config_manager: object | None = None,
+    ssh_key_path: str | None = None,
+) -> ConfigService:
+    """Initialize the config service singleton.  Called once at startup.
+
+    Args:
+        config_dir: Path to the config directory.
+        ssh_client_manager: Optional SSHClientManager for unified mode.
+        ssh_config_manager: Optional ConfigManager for unified mode.
+        ssh_key_path: Optional path to the SSH key for unified mode.
+    """
     global _config_service
-    _config_service = ConfigService(config_dir)
+    _config_service = ConfigService(
+        config_dir,
+        ssh_client_manager=ssh_client_manager,
+        ssh_config_manager=ssh_config_manager,
+        ssh_key_path=ssh_key_path,
+    )
     return _config_service
 
 

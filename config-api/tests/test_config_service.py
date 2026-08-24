@@ -1564,3 +1564,271 @@ class TestValidateBackupName:
 
         with pytest.raises(ValueError, match="Invalid backup name format"):
             ConfigService._validate_backup_name("ssh-mcp-config.bak")
+
+
+# ---------------------------------------------------------------------------
+# check_ssh_target — dual-mode (unified / standalone)
+# ---------------------------------------------------------------------------
+
+
+def _config_with_checkcommand() -> dict:
+    """Return a minimal config that includes a checkcommand."""
+    cfg = _minimal_config()
+    cfg["ssh_targets"]["test-server"]["checkcommand"] = "echo ping"
+    return cfg
+
+
+class TestCheckSSHTarget:
+    """Tests for ConfigService.check_ssh_target() in both modes."""
+
+    # -- helpers -----------------------------------------------------------
+
+    @pytest.fixture()
+    def svc(self, tmp_path: Path) -> "ConfigService":
+        """ConfigService backed by a config with a checkcommand target."""
+        from config_api.config_service import ConfigService
+
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _config_with_checkcommand())
+        return ConfigService(config_dir=str(tmp_path))
+
+    # -- _use_direct_ssh property ------------------------------------------
+
+    def test_use_direct_ssh_false_when_no_deps(
+        self, tmp_path: Path
+    ) -> None:
+        """_use_direct_ssh is False when no SSH managers are injected."""
+        from config_api.config_service import ConfigService
+
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _config_with_checkcommand())
+        svc_inst = ConfigService(config_dir=str(tmp_path))
+        assert svc_inst._use_direct_ssh is False  # type: ignore[attr-defined]
+
+    def test_use_direct_ssh_false_when_partial_deps(
+        self, tmp_path: Path
+    ) -> None:
+        """_use_direct_ssh is False when only one manager is provided."""
+        from config_api.config_service import ConfigService
+
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _config_with_checkcommand())
+        svc_inst = ConfigService(
+            config_dir=str(tmp_path),
+            ssh_client_manager=object(),
+        )
+        assert svc_inst._use_direct_ssh is False  # type: ignore[attr-defined]
+
+    def test_use_direct_ssh_true_when_all_deps(self, tmp_path: Path) -> None:
+        """_use_direct_ssh is True when both managers are injected and
+        lib.ssh_operations is importable."""
+        from config_api.config_service import ConfigService, _ssh_operations_module
+
+        if _ssh_operations_module is None:
+            pytest.skip("lib.ssh_operations not importable in this env")
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _config_with_checkcommand())
+        svc_inst = ConfigService(
+            config_dir=str(tmp_path),
+            ssh_client_manager=object(),
+            ssh_config_manager=object(),
+        )
+        assert svc_inst._use_direct_ssh is True  # type: ignore[attr-defined]
+
+    # -- unified mode (direct SSH calls) -----------------------------------
+
+    def test_unified_mode_success(self, tmp_path: Path) -> None:
+        """Direct SSH call returns success result."""
+        from config_api.config_service import ConfigService, _ssh_operations_module
+
+        if _ssh_operations_module is None:
+            pytest.skip("lib.ssh_operations not importable in this env")
+
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _config_with_checkcommand())
+        mock_mgr = MagicMock()
+        mock_cfg = MagicMock()
+
+        svc = ConfigService(
+            config_dir=str(tmp_path),
+            ssh_client_manager=mock_mgr,
+            ssh_config_manager=mock_cfg,
+        )
+
+        mock_result = {
+            "success": True,
+            "output": "pong",
+            "error": None,
+            "exit_code": 0,
+            "checkcommand": "echo ping",
+        }
+        with patch(
+            "config_api.config_service._ssh_operations_module.check_ssh_connection",
+            return_value=mock_result,
+        ) as mock_check:
+            result = svc.check_ssh_target("test-server")
+
+        mock_check.assert_called_once_with(
+            ssh_client_manager=mock_mgr,
+            config_manager=mock_cfg,
+            target_name="test-server",
+            ssh_key_path=svc._ssh_key_path,
+            timeout=10,
+        )
+        assert result["success"] is True
+        assert result["output"] == "pong"
+        assert result["exit_code"] == 0
+
+    def test_unified_mode_failure(self, tmp_path: Path) -> None:
+        """Direct SSH call that raises returns error dict."""
+        from config_api.config_service import ConfigService, _ssh_operations_module
+
+        if _ssh_operations_module is None:
+            pytest.skip("lib.ssh_operations not importable in this env")
+
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _config_with_checkcommand())
+
+        svc = ConfigService(
+            config_dir=str(tmp_path),
+            ssh_client_manager=MagicMock(),
+            ssh_config_manager=MagicMock(),
+        )
+
+        with patch(
+            "config_api.config_service._ssh_operations_module.check_ssh_connection",
+            side_effect=ConnectionError("refused"),
+        ):
+            result = svc.check_ssh_target("test-server")
+
+        assert result["success"] is False
+        assert "refused" in result["error"]
+        assert result["exit_code"] == -1
+
+    def test_unified_mode_custom_timeout(self, tmp_path: Path) -> None:
+        """Direct SSH call forwards custom timeout."""
+        from config_api.config_service import ConfigService, _ssh_operations_module
+
+        if _ssh_operations_module is None:
+            pytest.skip("lib.ssh_operations not importable in this env")
+
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _config_with_checkcommand())
+
+        svc = ConfigService(
+            config_dir=str(tmp_path),
+            ssh_client_manager=MagicMock(),
+            ssh_config_manager=MagicMock(),
+        )
+
+        mock_result = {
+            "success": True,
+            "output": "",
+            "error": None,
+            "exit_code": 0,
+            "checkcommand": "echo ping",
+        }
+        with patch(
+            "config_api.config_service._ssh_operations_module.check_ssh_connection",
+            return_value=mock_result,
+        ) as mock_check:
+            svc.check_ssh_target("test-server", timeout=30)
+
+        call_kwargs = mock_check.call_args[1]
+        assert call_kwargs["timeout"] == 30
+
+    # -- standalone mode (MCPClient fallback) ------------------------------
+
+    def test_standalone_mode_falls_back_to_mcp(
+        self, tmp_path: Path
+    ) -> None:
+        """Without SSH managers, falls back to MCPClient."""
+        from config_api.config_service import ConfigService
+
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _config_with_checkcommand())
+        svc = ConfigService(config_dir=str(tmp_path))
+
+        mock_mcp_result = {
+            "success": True,
+            "output": "pong",
+            "error": None,
+            "exit_code": 0,
+            "checkcommand": "echo ping",
+        }
+        with patch("config_api.config_service.MCPClient") as MockMCP:
+            MockMCP.return_value.call_tool.return_value = mock_mcp_result
+            result = svc.check_ssh_target("test-server")
+
+        MockMCP.return_value.call_tool.assert_called_once_with(
+            "ssh_check_connection",
+            arguments={"server_name": "test-server", "timeout": 10},
+            timeout=15,
+        )
+        assert result["success"] is True
+        assert result["output"] == "pong"
+
+    def test_standalone_mode_mcp_tool_error(self, tmp_path: Path) -> None:
+        """MCPToolError is caught and returned as error dict."""
+        from config_api.config_service import ConfigService
+        from config_api.mcp_client import MCPToolError
+
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _config_with_checkcommand())
+        svc = ConfigService(config_dir=str(tmp_path))
+
+        with patch("config_api.config_service.MCPClient") as MockMCP:
+            MockMCP.return_value.call_tool.side_effect = MCPToolError(
+                "target not found", "ssh_check_connection"
+            )
+            result = svc.check_ssh_target("test-server")
+
+        assert result["success"] is False
+        assert "target not found" in result["error"]
+
+    def test_standalone_mode_mcp_client_error(self, tmp_path: Path) -> None:
+        """MCPClientError is caught and returned as error dict."""
+        from config_api.config_service import ConfigService
+        from config_api.mcp_client import MCPClientError
+
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _config_with_checkcommand())
+        svc = ConfigService(config_dir=str(tmp_path))
+
+        with patch("config_api.config_service.MCPClient") as MockMCP:
+            MockMCP.return_value.call_tool.side_effect = MCPClientError(
+                "connection refused"
+            )
+            result = svc.check_ssh_target("test-server")
+
+        assert result["success"] is False
+        assert "unreachable" in result["error"]
+
+    # -- common paths (both modes) -----------------------------------------
+
+    def test_nonexistent_target_raises_key_error(
+        self, tmp_path: Path
+    ) -> None:
+        """check_ssh_target raises KeyError for unknown target."""
+        from config_api.config_service import ConfigService
+
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _config_with_checkcommand())
+        svc = ConfigService(config_dir=str(tmp_path))
+
+        with pytest.raises(KeyError, match="nonexistent"):
+            svc.check_ssh_target("nonexistent")
+
+    def test_default_checkcommand_when_missing(
+        self, tmp_path: Path
+    ) -> None:
+        """Uses 'echo ping' as default checkcommand when not configured."""
+        from config_api.config_service import ConfigService
+
+        cfg = _minimal_config()
+        # Remove checkcommand if present
+        cfg["ssh_targets"]["test-server"].pop("checkcommand", None)
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, cfg)
+        svc = ConfigService(config_dir=str(tmp_path))
+
+        mock_mcp_result = {
+            "success": True,
+            "output": "ping",
+            "error": None,
+            "exit_code": 0,
+            "checkcommand": "echo ping",
+        }
+        with patch("config_api.config_service.MCPClient") as MockMCP:
+            MockMCP.return_value.call_tool.return_value = mock_mcp_result
+            result = svc.check_ssh_target("test-server")
+
+        assert result["checkcommand"] == "echo ping"
