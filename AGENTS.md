@@ -57,6 +57,20 @@ mcp-ssh/
 │   ├── ssh_client.py          # SSHClientManager — connect, retry, circuit-break, pool
 │   ├── sudo.py                # SudoHandler — validate, wrap sudo command, password injection
 │   └── types.py               # TypedDict models for tool results
+├── config-api/                 # Configuration API + Web Dashboard (GUI)
+│   ├── config_api/
+│   │   ├── __init__.py
+│   │   ├── app.py             # FastAPI app factory + CLI entry point
+│   │   ├── auth.py            # Bearer token authentication
+│   │   ├── config_service.py  # Config CRUD operations (wraps lib/config.py)
+│   │   ├── models.py          # Pydantic request/response models
+│   │   ├── routes.py          # REST API route handlers
+│   │   └── ui/
+│   │       └── index.html     # SPA dashboard (Tailwind CSS)
+│   ├── stubs/                 # Minimal lib/ stubs for config-api container
+│   ├── tests/                 # config-api unit + integration tests
+│   ├── requirements.in        # config-api direct deps
+│   └── requirements.txt       # Hash-locked config-api deps
 ├── tests/
 │   ├── test_*.py              # 29 unit-test files (24 covering lib modules, plus server/e2e/concurrency/schema/piping-chaining)
 │   └── integration/
@@ -64,8 +78,9 @@ mcp-ssh/
 ├── docs/
 │   └── SECURITY.md            # Full security model and hardening guide
 ├── Dockerfile                 # Multi-stage: SBOM → runtime (non-root, hash-pinned)
-├── compose.yaml               # Docker Compose with Traefik labels
-├── Makefile                   # build, up, down, test, integrationtest, clean-test
+├── Dockerfile.config-api      # Multi-stage: config-api runtime (non-root, hash-pinned)
+├── compose.yaml               # Docker Compose (mcp-ssh + config-api services)
+├── Makefile                   # build, up, down, test, config-test, integrationtest, config-integrationtest, clean-test
 ├── requirements.in            # Direct deps (pip-compile input)
 ├── requirements.txt           # Hash-locked transitive deps (pip-compile output)
 ├── requirements-build.in      # SBOM/audit tool deps

@@ -16,20 +16,27 @@ services:
       - CONFIG_DIR=/config
       - LOG_DIR=/logs
     ports:
-      - 8081:8080
-    networks:
-      - traefik
-    labels:
-      traefik.enable: "true"
-      traefik.http.routers.mcp-ssh.entrypoints: "https"
-      traefik.http.routers.mcp-ssh.tls: "true"
-      traefik.http.routers.mcp-ssh.rule: "Host(`ssh-mcp.example.com`)"
-      traefik.http.routers.mcp-ssh.service: "mcp-ssh"
-      traefik.http.routers.mcp-ssh.middlewares: "mcp-ssh-headers"
-      traefik.http.middlewares.mcp-ssh-headers.headers.customrequestheaders.X-Forwarded-For: ""
-      traefik.http.services.mcp-ssh.loadbalancer.server.port: "8080"
-      traefik.docker.network: "traefik"
+      - "9080:8080"
 
-networks:
-  traefik:
-    external: true
+  mcp-ssh-config-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.config-api
+    image: ghcr.io/gelse/ssh-mcp-config-api:latest
+    container_name: mcp-ssh-config-api
+    restart: unless-stopped
+    environment:
+      - CONFIG_API_TOKEN=${CONFIG_API_TOKEN}
+      - CONFIG_DIR=/config
+      - CONFIG_API_PORT=8081
+      - CONFIG_API_HOST=0.0.0.0
+    volumes:
+      - ./config:/config:rw
+    ports:
+      - "9081:8081"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8081/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 5s
+      retries: 3

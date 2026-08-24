@@ -386,6 +386,7 @@ All tool calls are JSON-RPC `tools/call` requests to [`/mcp`](#mcp-client-config
 | `ssh_execute_command` | `server_name` (str), `command` (str), `timeout` (int, default 30), `sudo` (bool, default false) | Execute a command over SSH; returns stdout (stderr appended as `[STDERR]`, exit code as `[EXIT: n]`) |
 | `ssh_download_file` | `server_name` (str), `remote_path` (str) | Download a file via SFTP; authorization equivalent to `cat <path>` |
 | `ssh_upload_file` | `server_name` (str), `remote_path` (str), `content` (str), `permissions` (str, default "0644") | Upload a file via SFTP; authorization equivalent to `tee <path>` |
+| `ssh_check_connection` | `server_name` (str), `timeout` (int, default 10) | Check SSH connectivity by running the target's `checkcommand`; returns success flag, output, and exit code |
 
 ### Examples
 
@@ -420,6 +421,13 @@ call_tool("ssh_upload_file", {
     "permissions": "0640",
 })
 # "OK: Uploaded 19 bytes to /tmp/backup.sql"
+
+# Check SSH connectivity
+call_tool("ssh_check_connection", {"server_name": "web-server"})
+# {"success": true, "output": "ping", "error": null, "exit_code": 0, "checkcommand": "echo ping"}
+
+# Check with custom timeout
+call_tool("ssh_check_connection", {"server_name": "web-server", "timeout": 5})
 ```
 
 > **Note on sudo:** There is no `sudo_password` parameter. If sudo requires a password, it comes from the target's `password` field in the config. The `sudo` flag wraps with `sudo -S -p ''` (password from config) or `sudo -n` (passwordless).
@@ -476,10 +484,22 @@ An object keyed by server identifier. Each target requires `host`, `port`, `user
     "host": "192.168.1.10",
     "port": 22,
     "username": "deploy",
-    "private_key": "/app/ssh_key"
+    "private_key": "/app/ssh_key",
+    "checkcommand": "echo ping"
   }
 }
 ```
+
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `host` | Yes | — | Hostname or IP address |
+| `port` | No | `22` | SSH port |
+| `username` | Yes | — | SSH username |
+| `private_key` | * | — | Path to SSH private key file on the server filesystem |
+| `password` | * | — | SSH password (can also be set via `secrets.json` or env vars) |
+| `checkcommand` | No | `"echo ping"` | Command executed by `ssh_check_connection` to verify connectivity |
+
+\* At least one of `private_key` or `password` is required.
 
 > `private_key` is a **path on the server's filesystem** (in Docker, mounted into the container), not an inline key.
 
@@ -629,7 +649,9 @@ Files rotate at 10 MB keeping 5 backups; rotated files are gzipped when `compres
 
 ### Docker Compose
 
-The [`compose.yaml`](compose.yaml) mounts:
+The [`compose.yaml`](compose.yaml) defines two services:
+
+#### `mcp-ssh` — MCP SSH Gateway
 
 | Host path | Container path | Mode |
 |---|---|---|
@@ -638,22 +660,39 @@ The [`compose.yaml`](compose.yaml) mounts:
 | `./ssh_key` | `/app/ssh_key` | ro |
 | `./ssh_key.pub` | `/app/ssh_key.pub` | ro |
 
-The runtime image is `python:3.13-alpine` with a hash-pinned digest. A non-root `mcpssh` user runs the process. A CycloneDX SBOM is generated at build time in the `sbom` stage.
+Exposed on host port `9080` (maps to container port `8080`). The runtime image is `python:3.13-alpine` with a hash-pinned digest. A non-root `mcpssh` user runs the process. A CycloneDX SBOM is generated at build time in the `sbom` stage.
 
-### Traefik Integration
+#### `mcp-ssh-config-api` — Configuration API & Web Dashboard
 
-The compose file ships with Traefik labels that route `ssh-mcp.example.com` over HTTPS to the container. The server reads no `TRAEFIK_*` environment variables — labels are compose-level configuration only. A headers middleware sets `X-Forwarded-For` so rate limiting sees the real client IP.
+| Host path | Container path | Mode |
+|---|---|---|
+| `./config` | `/config` | rw |
+
+Exposed on host port `9081` (maps to container port `8081`). The service provides:
+
+- **REST API** at `/api/...` — full CRUD for SSH targets, block patterns, command rules, backups, and settings
+- **Web Dashboard (GUI)** at `http://localhost:9081/ui/` — a single-page application for visual policy management (SSH targets, block patterns, command rules, settings, backups)
+- **API docs** at `http://localhost:9081/docs` (Swagger UI) and `http://localhost:9081/redoc` (ReDoc)
+
+Requires the `CONFIG_API_TOKEN` environment variable (set in `.env`). Generate a token with:
+
+```bash
+openssl rand -hex 32
+```
 
 ### Makefile
 
 | Command | Description |
 |---|---|
-| `make build` | Build the Docker image (`ghcr.io/gelse/ssh-mcp:latest`) |
+| `make dockercontainer` | Build the Docker image (`ghcr.io/gelse/ssh-mcp:latest`) |
 | `make up` | `docker compose up -d --build` |
 | `make down` | `docker compose down` |
 | `make test` | Run unit tests |
+| `make config-test` | Run config-api unit tests |
 | `make integrationtest` | Build test image, run integration tests |
+| `make config-integrationtest` | Build config-api test image, run integration tests |
 | `make clean-test` | Remove test artifacts and containers |
+| `make config-clean-test` | Remove config-api test artifacts and containers |
 
 ### Pull from GHCR
 
@@ -732,7 +771,7 @@ The project has no `ruff`, `mypy`, `pyright`, or `flake8` configuration. Formatt
 
 ## Roadmap
 
-- [ ] Configuration GUI for visual policy management
+- [x] Configuration GUI for visual policy management
 
 ---
 

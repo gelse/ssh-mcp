@@ -923,6 +923,7 @@ class TestMcpTools:
             "ssh_download_file",
             "ssh_upload_file",
             "ssh_list_allowed_commands",
+            "ssh_check_connection",
         }
         assert tool_names == expected
 
@@ -1895,6 +1896,153 @@ class TestSshKeyVariants:
         )
         assert "ERROR" not in text, f"Password auth failed: {text!r}"
         assert "testuser" in text
+
+
+def _make_check_config(servers: dict) -> dict:
+    """Build a valid config with a ``checkcommand`` field on each target."""
+    config = _make_valid_config(servers)
+    for target in config.get("ssh_targets", {}).values():
+        target["checkcommand"] = "echo ping"
+    return config
+
+
+class TestSshCheckConnection:
+    """Integration tests for the ssh_check_connection MCP tool."""
+
+    def test_ssh_check_connection_success(
+        self, mcp_url: str, switch_config
+    ):
+        """ssh_check_connection returns success=true for a reachable target."""
+        config = _make_check_config(
+            {
+                "testbox": {
+                    "host": SSH_CONTAINER,
+                    "port": SSH_PORT,
+                    "username": "testuser",
+                    "password": "testpass",
+                },
+            }
+        )
+        # Use a non-wildcard allowed set so _wait_for_allowed_commands
+        # actually detects the config reload (wildcard would match
+        # immediately and race with target config update).
+        config["allowed_commands"]["default"] = [
+            {"targets": ["*"], "commands": ["echo", "hostname"]}
+        ]
+        switch_config(config, {"echo", "hostname"})
+
+        text = _call_tool(
+            mcp_url,
+            "ssh_check_connection",
+            {"server_name": "testbox"},
+        )
+        data = json.loads(text)
+
+        assert data["success"] is True
+        assert "ping" in data["output"]
+        assert data["checkcommand"] == "echo ping"
+        assert data["exit_code"] == 0
+
+    def test_ssh_check_connection_default_command(
+        self, mcp_url: str, switch_config
+    ):
+        """ssh_check_connection uses DEFAULT_CHECK_COMMAND when none configured."""
+        config = _make_valid_config(
+            {
+                "testbox": {
+                    "host": SSH_CONTAINER,
+                    "port": SSH_PORT,
+                    "username": "testuser",
+                    "password": "testpass",
+                    # No checkcommand field — should fall back to default
+                },
+            }
+        )
+        config["allowed_commands"]["default"] = [
+            {"targets": ["*"], "commands": ["echo", "hostname"]}
+        ]
+        switch_config(config, {"echo", "hostname"})
+
+        text = _call_tool(
+            mcp_url,
+            "ssh_check_connection",
+            {"server_name": "testbox"},
+        )
+        data = json.loads(text)
+
+        assert data["success"] is True
+        assert data["checkcommand"] == "echo ping"
+
+    def test_ssh_check_connection_unknown_target(self, mcp_url: str):
+        """ssh_check_connection returns error for an unknown target."""
+        text = _call_tool(
+            mcp_url,
+            "ssh_check_connection",
+            {"server_name": "nonexistent-server"},
+        )
+        data = json.loads(text)
+
+        assert data["error"] is True
+        assert "not found" in data["message"].lower()
+
+    def test_ssh_check_connection_custom_command(
+        self, mcp_url: str, switch_config
+    ):
+        """ssh_check_connection executes the configured checkcommand."""
+        config = _make_valid_config(
+            {
+                "testbox": {
+                    "host": SSH_CONTAINER,
+                    "port": SSH_PORT,
+                    "username": "testuser",
+                    "password": "testpass",
+                    "checkcommand": "hostname",
+                },
+            }
+        )
+        config["allowed_commands"]["default"] = [
+            {"targets": ["*"], "commands": ["echo", "hostname"]}
+        ]
+        switch_config(config, {"echo", "hostname"})
+
+        text = _call_tool(
+            mcp_url,
+            "ssh_check_connection",
+            {"server_name": "testbox"},
+        )
+        data = json.loads(text)
+
+        assert data["success"] is True
+        assert data["checkcommand"] == "hostname"
+        assert len(data["output"]) > 0
+
+    def test_ssh_check_connection_with_timeout(
+        self, mcp_url: str, switch_config
+    ):
+        """ssh_check_connection respects the timeout parameter."""
+        config = _make_check_config(
+            {
+                "testbox": {
+                    "host": SSH_CONTAINER,
+                    "port": SSH_PORT,
+                    "username": "testuser",
+                    "password": "testpass",
+                },
+            }
+        )
+        config["allowed_commands"]["default"] = [
+            {"targets": ["*"], "commands": ["echo", "hostname"]}
+        ]
+        switch_config(config, {"echo", "hostname"})
+
+        text = _call_tool(
+            mcp_url,
+            "ssh_check_connection",
+            {"server_name": "testbox", "timeout": 5},
+        )
+        data = json.loads(text)
+
+        assert data["success"] is True
 
 
 def test_large_output_truncation(mcp_url: str, switch_config):

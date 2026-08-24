@@ -6,13 +6,15 @@
       "host": "server1.example.com",
       "port": 22,
       "username": "admin",
-      "private_key": "/app/ssh_key"
+      "private_key": "/app/ssh_key",
+      "checkcommand": "echo ping"
     },
     "example-server-2": {
       "host": "192.168.1.100",
       "port": 22,
       "username": "root",
-      "private_key": "/app/ssh_key"
+      "private_key": "/app/ssh_key",
+      "checkcommand": "echo ping"
     }
   },
   "block_patterns": [

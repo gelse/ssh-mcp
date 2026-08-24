@@ -994,7 +994,7 @@ class ConfigManager:
             )
 
         ssh_targets = {}
-        ALLOWED_TARGET_KEYS = {"host", "port", "username", "private_key", "password"}
+        ALLOWED_TARGET_KEYS = {"host", "port", "username", "private_key", "password", "checkcommand"}
         for tid, tdef in ssh_targets_raw.items():
             # Validate server name format -- the value is never logged so an
             # invalid/poisoned name cannot leak into logs or error messages.
@@ -1080,6 +1080,8 @@ class ConfigManager:
                 normalized["private_key"] = private_key
             if has_pw:
                 normalized["password"] = password
+            if "checkcommand" in tdef:
+                normalized["checkcommand"] = tdef["checkcommand"]
             ssh_targets[tid] = normalized
 
         # Collect ssh target IDs for cross-reference validation

@@ -23,6 +23,7 @@ import server
 from lib.auth import AuthorizationManager
 from lib.config import build_default_config
 from lib.constants import (
+    DEFAULT_CHECK_COMMAND,
     DEFAULT_CONFIG_DIR,
     DEFAULT_LOG_DIR,
     DEFAULT_SSH_KEY_FILENAME,
@@ -34,7 +35,12 @@ from lib.constants import (
     SUDO_NO_PASSWORD_FLAG,
     SUDO_PASSWORD_PROMPT_FLAGS,
 )
-from lib.exceptions import FileTransferError
+from lib.exceptions import (
+    FileTransferError,
+    SSHAuthenticationError,
+    SSHConnectionError,
+    SSHTimeoutError,
+)
 from lib.file_transfer import FileTransferService
 from lib.request_context import RequestContextMiddleware
 from lib.ssh_client import SSHClientManager
@@ -1576,3 +1582,145 @@ class TestSftpConfigWiring:
         payload = json.loads(result)
         # Must NOT contain the old weak-path-check error
         assert "Upload only allowed to /tmp/ or /home/ paths" not in str(payload)
+
+
+# ---------------------------------------------------------------------------
+# ssh_check_connection MCP tool
+# ---------------------------------------------------------------------------
+
+
+class TestSshCheckConnection:
+    """Tests for the ssh_check_connection MCP tool."""
+
+    @staticmethod
+    def _make_check_config(**target_overrides):
+        """Create a config dict with a target that has a checkcommand."""
+        return _make_minimal_config(
+            **{
+                "ssh_targets": {
+                    "testbox": {
+                        "host": "192.168.1.100",
+                        "port": 22,
+                        "username": "testuser",
+                        "password": "testpass",
+                        "checkcommand": "echo ping",
+                        **target_overrides,
+                    }
+                },
+            }
+        )
+
+    @staticmethod
+    def _wire_tool(tmp_path, config, monkeypatch, ssh_client_manager=None):
+        """Wire up the ssh_check_connection tool for testing."""
+        mgr = _make_config_manager(tmp_path, config)
+        auth_mgr = AuthorizationManager(mgr)
+
+        mcp = FastMCP("test")
+        file_logger = MagicMock()
+        stdlib_logger = MagicMock()
+        file_transfer = MagicMock()
+        executor = _SyncExecutor()
+        ssh_cm = ssh_client_manager or MagicMock()
+
+        server._register_tools(
+            mcp,
+            mgr,
+            auth_mgr,
+            file_logger,
+            stdlib_logger,
+            ssh_cm,
+            file_transfer,
+            "",  # ssh_key_path
+            50000,  # max_command_output
+            executor,
+        )
+        tool = asyncio.run(mcp.get_tool("ssh_check_connection"))
+        return tool.fn, file_logger
+
+    def test_check_connection_success(self, tmp_path, monkeypatch):
+        """Successful check returns success=True, output, exit_code, checkcommand."""
+        config = self._make_check_config()
+        ssh_cm, _client = _make_mock_ssh_client_manager(b"ping\n")
+        fn, _logger = self._wire_tool(tmp_path, config, monkeypatch, ssh_cm)
+
+        result = fn(server_name="testbox")
+        payload = json.loads(result)
+
+        assert payload["success"] is True
+        assert payload["output"] == "ping"
+        assert payload["exit_code"] == 0
+        assert payload["checkcommand"] == "echo ping"
+
+    def test_check_connection_auth_failure(self, tmp_path, monkeypatch):
+        """Auth failure returns error with SSHAuthenticationError type."""
+        config = self._make_check_config()
+        ssh_cm = MagicMock()
+        ssh_cm.connect.side_effect = SSHAuthenticationError("Auth failed")
+        fn, _logger = self._wire_tool(tmp_path, config, monkeypatch, ssh_cm)
+
+        result = fn(server_name="testbox")
+        payload = json.loads(result)
+
+        assert payload["error"] is True
+        assert "SSHAuthenticationError" in payload["error_type"]
+
+    def test_check_connection_timeout(self, tmp_path, monkeypatch):
+        """Timeout returns error with SSHTimeoutError type."""
+        config = self._make_check_config()
+        ssh_cm = MagicMock()
+        ssh_cm.connect.side_effect = SSHTimeoutError("Timed out")
+        fn, _logger = self._wire_tool(tmp_path, config, monkeypatch, ssh_cm)
+
+        result = fn(server_name="testbox")
+        payload = json.loads(result)
+
+        assert payload["error"] is True
+        assert "SSHTimeoutError" in payload["error_type"]
+
+    def test_check_connection_target_not_found(self, tmp_path, monkeypatch):
+        """Unknown target name returns error with 'not found' message."""
+        config = self._make_check_config()
+        fn, _logger = self._wire_tool(tmp_path, config, monkeypatch)
+
+        result = fn(server_name="nonexistent")
+        payload = json.loads(result)
+
+        assert payload["error"] is True
+        assert "not found" in payload["message"].lower()
+
+    def test_check_connection_default_checkcommand(self, tmp_path, monkeypatch):
+        """Target without checkcommand uses DEFAULT_CHECK_COMMAND."""
+        config = self._make_check_config()
+        # Remove the checkcommand from the target
+        del config["ssh_targets"]["testbox"]["checkcommand"]
+        ssh_cm, _client = _make_mock_ssh_client_manager(b"pong\n")
+        fn, _logger = self._wire_tool(tmp_path, config, monkeypatch, ssh_cm)
+
+        result = fn(server_name="testbox")
+        payload = json.loads(result)
+
+        # Should use the default checkcommand
+        assert payload["checkcommand"] == DEFAULT_CHECK_COMMAND
+
+    def test_check_connection_log_entry(self, tmp_path, monkeypatch):
+        """Log entry includes 'event': 'connection.check' and request metadata."""
+        config = self._make_check_config()
+        ssh_cm, _client = _make_mock_ssh_client_manager(b"pong\n")
+        fn, file_logger = self._wire_tool(tmp_path, config, monkeypatch, ssh_cm)
+
+        fn(server_name="testbox")
+
+        # Find the connection.check log entry
+        log_calls = [c for c in file_logger.log.call_args_list]
+        check_entries = [
+            c[0][0] for c in log_calls
+            if isinstance(c[0][0], dict) and c[0][0].get("event") == "connection.check"
+        ]
+        assert len(check_entries) == 1
+        entry = check_entries[0]
+        assert entry["event"] == "connection.check"
+        assert entry["target_name"] == "testbox"
+        assert entry["command"] == "echo ping"
+        assert "request_id" in entry
+        assert "source_ip" in entry

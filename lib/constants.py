@@ -160,6 +160,10 @@ DEFAULT_SSH_PORT: int = 22
 DEFAULT_SSH_TIMEOUT_SECONDS: int = 30
 """Default SSH connection timeout in seconds."""
 
+DEFAULT_CHECK_COMMAND: str = "echo ping"
+"""Default command executed to verify SSH connectivity when no
+per-target checkcommand is configured."""
+
 DEFAULT_COMMAND_TIMEOUT_SECONDS: int = 120
 """Default timeout (seconds) for remote command execution."""
 

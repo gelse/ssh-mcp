@@ -134,3 +134,6 @@ class SSHTarget(TypedDict, total=False):
 
     private_key: str
     """Optional path to the private key for key-based authentication."""
+
+    checkcommand: str
+    """Optional command executed to verify SSH connectivity."""
