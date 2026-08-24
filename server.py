@@ -813,7 +813,7 @@ def _register_tools(
         readOnlyHint=True,
         destructiveHint=False,
         idempotentHint=True,
-        openWorldHint=True,
+        openWorldHint=False,
     ))
     def ssh_list_servers() -> str:
         """
