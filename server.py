@@ -32,6 +32,7 @@ from lib.config import build_default_config, ConfigManager
 from lib.connection_pool import SSHConnectionPool
 from lib.constants import (
     APP_NAME,
+    DEFAULT_CHECK_COMMAND,
     DEFAULT_CIRCUIT_BREAKER_FAILURE_THRESHOLD,
     DEFAULT_CIRCUIT_BREAKER_TIMEOUT_SECONDS,
     DEFAULT_COMMAND_TIMEOUT_SECONDS,
@@ -1008,6 +1009,102 @@ def _register_tools(
             return json.dumps(_format_error(e))
         except Exception as e:
             _finish_log_entry(log_entry, start_time, -1, "ssh_execute_command")
+            return json.dumps(
+                _format_error(
+                    MCPSSHError(f"Internal server error: {e}")
+                )
+            )
+
+    @mcp.tool()
+    def ssh_check_connection(server_name: str, timeout: int = 10) -> str:
+        """Check SSH connectivity to a remote server.
+
+        Executes the target's configured checkcommand (default: 'echo ping')
+        to verify that SSH authentication and connectivity work.  This is a
+        lightweight diagnostic tool — it does NOT go through the full
+        authorization chain for the checkcommand itself, but it DOES require
+        the target to exist and the SSH credentials to be valid.
+
+        Args:
+            server_name: The identifier of the SSH server (as configured)
+            timeout: Connection and command timeout in seconds (1-30)
+
+        Returns:
+            JSON with success, output, error, exit_code, and checkcommand
+        """
+        target_name = sanitize_target_name(server_name)
+
+        # Resolve timeout
+        timeout = max(1, min(timeout, 30))
+
+        # Read the checkcommand from config
+        target = config_manager.get_ssh_target(target_name)
+        if target is None:
+            available = ", ".join(config_manager.list_ssh_targets())
+            return json.dumps(
+                _format_error(
+                    SSHConnectionError(
+                        f"Server '{target_name}' not found. Available: {available}"
+                    )
+                )
+            )
+
+        checkcommand = target.get("checkcommand", DEFAULT_CHECK_COMMAND)
+
+        # Build log entry (no full auth check — this is a connectivity test)
+        source_ip = get_client_ip()
+        api_key = get_api_key()
+        api_key_name = _lookup_api_key_name(api_key)
+        log_entry = {
+            "timestamp": datetime.datetime.now(
+                datetime.timezone.utc
+            ).isoformat(),
+            "event": "connection.check",
+            "source_ip": source_ip,
+            "api_key_name": api_key_name,
+            "command": sanitize_log_string(checkcommand),
+            "target_name": sanitize_log_string(target_name),
+            "request_id": get_request_id(),
+            "log_level": "INFO",
+            "log_format_version": LOG_FORMAT_VERSION,
+        }
+
+        start_time = time.monotonic()
+        try:
+            def _ssh_operation() -> str:
+                auth_target, _ = _build_auth_target(target_name)
+                with ssh_client_manager.connect(auth_target) as client:
+                    out, err, exit_code = _execute_ssh_command(
+                        client, checkcommand, timeout,
+                        max_command_output, sudo=False, sudo_password=None,
+                    )
+                    _finish_log_entry(
+                        log_entry, start_time, exit_code,
+                        "ssh_check_connection", output=out,
+                    )
+                    result = {
+                        "success": exit_code == 0,
+                        "output": out.strip(),
+                        "error": err.strip() if err else None,
+                        "exit_code": exit_code,
+                        "checkcommand": checkcommand,
+                    }
+                    return json.dumps(result)
+            return ssh_executor.submit(_ssh_operation).result()
+        except SSHAuthenticationError as e:
+            _finish_log_entry(log_entry, start_time, -1, "ssh_check_connection")
+            return json.dumps(_format_error(e))
+        except SSHTimeoutError as e:
+            _finish_log_entry(log_entry, start_time, -1, "ssh_check_connection")
+            return json.dumps(_format_error(e))
+        except SSHConnectionError as e:
+            _finish_log_entry(log_entry, start_time, -1, "ssh_check_connection")
+            return json.dumps(_format_error(e))
+        except MCPSSHError as e:
+            _finish_log_entry(log_entry, start_time, -1, "ssh_check_connection")
+            return json.dumps(_format_error(e))
+        except Exception as e:
+            _finish_log_entry(log_entry, start_time, -1, "ssh_check_connection")
             return json.dumps(
                 _format_error(
                     MCPSSHError(f"Internal server error: {e}")
