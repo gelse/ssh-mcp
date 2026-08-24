@@ -386,6 +386,7 @@ All tool calls are JSON-RPC `tools/call` requests to [`/mcp`](#mcp-client-config
 | `ssh_execute_command` | `server_name` (str), `command` (str), `timeout` (int, default 30), `sudo` (bool, default false) | Execute a command over SSH; returns stdout (stderr appended as `[STDERR]`, exit code as `[EXIT: n]`) |
 | `ssh_download_file` | `server_name` (str), `remote_path` (str) | Download a file via SFTP; authorization equivalent to `cat <path>` |
 | `ssh_upload_file` | `server_name` (str), `remote_path` (str), `content` (str), `permissions` (str, default "0644") | Upload a file via SFTP; authorization equivalent to `tee <path>` |
+| `ssh_check_connection` | `server_name` (str), `timeout` (int, default 10) | Check SSH connectivity by running the target's `checkcommand`; returns success flag, output, and exit code |
 
 ### Examples
 
@@ -420,6 +421,13 @@ call_tool("ssh_upload_file", {
     "permissions": "0640",
 })
 # "OK: Uploaded 19 bytes to /tmp/backup.sql"
+
+# Check SSH connectivity
+call_tool("ssh_check_connection", {"server_name": "web-server"})
+# {"success": true, "output": "ping", "error": null, "exit_code": 0, "checkcommand": "echo ping"}
+
+# Check with custom timeout
+call_tool("ssh_check_connection", {"server_name": "web-server", "timeout": 5})
 ```
 
 > **Note on sudo:** There is no `sudo_password` parameter. If sudo requires a password, it comes from the target's `password` field in the config. The `sudo` flag wraps with `sudo -S -p ''` (password from config) or `sudo -n` (passwordless).
@@ -476,10 +484,22 @@ An object keyed by server identifier. Each target requires `host`, `port`, `user
     "host": "192.168.1.10",
     "port": 22,
     "username": "deploy",
-    "private_key": "/app/ssh_key"
+    "private_key": "/app/ssh_key",
+    "checkcommand": "echo ping"
   }
 }
 ```
+
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `host` | Yes | — | Hostname or IP address |
+| `port` | No | `22` | SSH port |
+| `username` | Yes | — | SSH username |
+| `private_key` | * | — | Path to SSH private key file on the server filesystem |
+| `password` | * | — | SSH password (can also be set via `secrets.json` or env vars) |
+| `checkcommand` | No | `"echo ping"` | Command executed by `ssh_check_connection` to verify connectivity |
+
+\* At least one of `private_key` or `password` is required.
 
 > `private_key` is a **path on the server's filesystem** (in Docker, mounted into the container), not an inline key.
 
