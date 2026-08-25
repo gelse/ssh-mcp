@@ -597,7 +597,6 @@ environment variables  >  secrets.json  >  ssh-mcp-config.json
 | `MAX_OUTPUT_LENGTH` | `--max-output` | `50000` | — |
 | `CONFIG_API_ENABLED` | — | `false` | — |
 | `CONFIG_API_TOKEN` | — | *(required when API enabled)* | — |
-| `CONFIG_API_PORT` | — | `8081` | — |
 | — | `--fix-permissions` | `False` | — |
 | — | `--print-default-config` | — | — |
 
@@ -661,7 +660,6 @@ Set these environment variables in your `compose.yaml` or `.env` file:
 |---|---|---|
 | `CONFIG_API_ENABLED` | `false` | Set to `true` to enable the Configuration API |
 | `CONFIG_API_TOKEN` | *(required when enabled)* | Bearer token for authenticating API requests |
-| `CONFIG_API_PORT` | `9081` | Internal port the config API listens on (mapped externally to `9081`) |
 
 ```yaml
 services:
@@ -701,7 +699,7 @@ All endpoints are mounted at `/api` on the same Starlette ASGI application as th
 All API requests require a `Bearer` token in the `Authorization` header:
 
 ```bash
-curl -H "Authorization: Bearer your-secret-token-here" http://localhost:9081/api/config
+curl -H "Authorization: Bearer your-secret-token-here" http://localhost:9080/api/config
 ```
 
 ### Web Dashboard
@@ -734,7 +732,7 @@ The [`compose.yaml`](compose.yaml) defines a single `mcp-ssh` service that hosts
 | `./ssh_key` | `/app/ssh_key` | ro |
 | `./ssh_key.pub` | `/app/ssh_key.pub` | ro |
 
-Exposed on host port `9080` (maps to container port `8080`). When the config API is enabled, port `9081` (container `8081`) is also active. The runtime image is `python:3.13-alpine` with a hash-pinned digest. A non-root `mcpssh` user runs the process. A CycloneDX SBOM is generated at build time in the `sbom` stage.
+Exposed on host port `9080` (maps to container port `8080`). The runtime image is `python:3.13-alpine` with a hash-pinned digest. A non-root `mcpssh` user runs the process. A CycloneDX SBOM is generated at build time in the `sbom` stage.
 
 #### Configuration API & Web Dashboard (optional)
 
@@ -752,9 +750,9 @@ CONFIG_API_TOKEN=<your-token>
 
 When enabled, the config API is mounted at `/api` on the same HTTP server as the MCP gateway. It provides:
 
-- **REST API** at `http://localhost:9081/api/...` — full CRUD for SSH targets, block patterns, command rules, backups, and settings
-- **Web Dashboard (GUI)** at `http://localhost:9081/ui/` — a single-page application for visual policy management (SSH targets, block patterns, command rules, settings, backups)
-- **API docs** at `http://localhost:9081/docs` (Swagger UI) and `http://localhost:9081/redoc` (ReDoc)
+- **REST API** at `http://localhost:9080/api/...` — full CRUD for SSH targets, block patterns, command rules, backups, and settings
+- **Web Dashboard (GUI)** at `http://localhost:9080/ui/` — a single-page application for visual policy management (SSH targets, block patterns, command rules, settings, backups)
+- **API docs** at `http://localhost:9080/docs` (Swagger UI) and `http://localhost:9080/redoc` (ReDoc)
 
 ### Makefile
 
