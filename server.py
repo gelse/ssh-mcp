@@ -64,6 +64,7 @@ from lib.constants import (
     LOG_FORMAT_VERSION,
     MCP_SSH_CONFIG_PATH,
     MCP_SSH_LOG_DIR,
+    MCP_SSH_LOG_LEVEL,
     MCP_SSH_SSH_KEY,
     RATE_LIMIT_CLEANUP_INTERVAL_SECONDS,
 )
@@ -87,7 +88,8 @@ from lib.metrics import (
     attach_metrics_endpoint,
 )
 from lib.log_handler import JSONLHandler
-from lib.loggers import FileLogger, BaseLogger
+from lib.log_manager import LoggingManager
+from lib.loggers import BaseLogger
 from lib.rate_limiter import RateLimiter
 from lib.request_context import (
     get_api_key,
@@ -164,6 +166,11 @@ def _graceful_shutdown(state: SimpleNamespace, timeout: float) -> None:
     file_logger = getattr(state, "file_logger", None)
     if file_logger is not None:
         file_logger.close()
+
+    # Also close the logging manager if present
+    logging_manager = getattr(state, "logging_manager", None)
+    if logging_manager is not None:
+        logging_manager.close()
 
 
 def _run_server(
@@ -315,16 +322,14 @@ def create_app(
         ),
     )
 
-    # --- Initialize structured logger ---
-    file_logger = FileLogger(log_dir)
-    stdlib_logger = logging.getLogger(__name__)
-    stdlib_logger.debug("create_app: logger initialized")
-
     # --- Initialize configuration manager with graceful fallback ---
+    # ConfigManager is created first (before the structured logger) so that
+    # its settings can drive LoggingManager.  ConfigManager uses stdlib
+    # logging, not the structured file_logger, so this ordering is safe.
+    config_manager = ConfigManager(
+        config_dir, fix_permissions=fix_permissions
+    )
     try:
-        config_manager = ConfigManager(
-            config_dir, logger=file_logger, fix_permissions=fix_permissions
-        )
         # Start hot-reload watcher (15-second polling)
         config_manager.start_watcher(polling_interval=DEFAULT_WATCHER_INTERVAL_SECONDS)
     except Exception:
@@ -336,42 +341,33 @@ def create_app(
             config_dir,
             exc_info=True,
         )
-        file_logger.log({
-            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "event": "config.fallback",
-            "success": False,
-            "message": (
-                "Cannot initialize ConfigManager from primary config dir — "
-                "falling back to bundled default config (read-only, no hot-reload)"
-            ),
-            "config_dir": config_dir,
-            "request_id": get_request_id(),
-            "log_level": "WARNING",
-            "log_format_version": LOG_FORMAT_VERSION,
-        })
         # Fallback: load bundled default-config.json via ConfigManager
         # pointed at the project root (which is always readable).
         _fallback_config_dir = str(BASE_DIR)
         config_manager = ConfigManager(
             _fallback_config_dir,
-            logger=file_logger,
             fix_permissions=fix_permissions,
         )
         _fallback_log.info(
             "Config loaded from fallback path: %s",
             config_manager.config_path,
         )
-        file_logger.log({
-            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "event": "config.fallback",
-            "success": True,
-            "message": "Config loaded from fallback bundled default",
-            "config_dir": config_dir,
-            "config_path": str(config_manager.config_path),
-            "request_id": get_request_id(),
-            "log_level": "WARNING",
-            "log_format_version": LOG_FORMAT_VERSION,
-        })
+
+    # --- Initialize structured logger via LoggingManager ---
+    settings = config_manager.data.get("settings", {})
+
+    # Determine MCP_SSH_LOG_LEVEL env var override
+    log_level_env = os.environ.get(MCP_SSH_LOG_LEVEL)
+
+    logging_manager = LoggingManager(
+        config_settings=settings,
+        log_dir=log_dir,
+        log_level_env_override=log_level_env,
+    )
+    file_logger = logging_manager.logger  # CompositeLogger
+
+    stdlib_logger = logging.getLogger(__name__)
+    stdlib_logger.debug("create_app: logger initialized")
 
     # --- Route standard-library logging through JSONLHandler ---
     # Attach a JSONLHandler to the root logger so logs from this module,
@@ -382,6 +378,9 @@ def create_app(
     log_level_name = config_manager.data.get("settings", {}).get(
         "log_level", DEFAULT_LOG_LEVEL
     )
+    # Apply env var override if present
+    if log_level_env:
+        log_level_name = log_level_env
     root_logger.setLevel(log_level_name.upper())
     for handler in list(root_logger.handlers):
         root_logger.removeHandler(handler)
@@ -419,8 +418,7 @@ def create_app(
         )
 
     # --- Initialize remaining services ---
-    settings = config_manager.data.get("settings", {})
-    # Apply log truncation / rotation-compression settings from config.
+    # Forward configure to composite logger (which delegates to all targets)
     file_logger.configure(
         max_log_output=settings.get(
             "max_log_output", DEFAULT_MAX_LOG_OUTPUT
@@ -531,6 +529,7 @@ def create_app(
         ssh_connection_pool=ssh_connection_pool,
         config_manager=config_manager,
         file_logger=file_logger,
+        logging_manager=logging_manager,
         shutdown_timeout=shutdown_timeout,
         _shutdown_done=False,
     )
@@ -1663,7 +1662,10 @@ def main() -> None:
         default=os.environ.get(
             MCP_SSH_LOG_DIR, os.environ.get("LOG_DIR", DEFAULT_LOG_DIR)
         ),
-        help=f"Directory for log files (default: {DEFAULT_LOG_DIR})",
+        help=(
+            f"Directory for log files (default: {DEFAULT_LOG_DIR}). "
+            f"Env: MCP_SSH_LOG_DIR"
+        ),
     )
     parser.add_argument(
         "--max-output",
