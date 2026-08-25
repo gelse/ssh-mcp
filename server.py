@@ -48,6 +48,7 @@ from lib.constants import (
     DEFAULT_POOL_CLEANUP_INTERVAL_SECONDS,
     DEFAULT_POOL_IDLE_TIMEOUT_SECONDS,
     DEFAULT_POOL_MAX_CONNECTIONS_PER_TARGET,
+    DEFAULT_RATE_LIMIT_ENABLED,
     DEFAULT_RATE_LIMIT_REQUESTS,
     DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
     DEFAULT_RETRY_BACKOFF_BASE_SECONDS,
@@ -397,18 +398,25 @@ def create_app(
     attach_metrics_endpoint(mcp)
 
     # --- Initialize rate limiter (configurable from settings) ---
+    # The limiter is built ONCE at startup from the initial config and wired
+    # into the request middleware.  ``settings.rate_limit.enabled=false``
+    # disables per-IP rate limiting entirely (passing ``None`` skips the
+    # check in RequestContextMiddleware).
     rate_limit_settings = config_manager.data.get("settings", {}).get("rate_limit", {})
-    rate_limiter = RateLimiter(
-        max_requests=rate_limit_settings.get(
-            "max_requests_per_minute", DEFAULT_RATE_LIMIT_REQUESTS
-        ),
-        window_seconds=rate_limit_settings.get(
-            "window_seconds", DEFAULT_RATE_LIMIT_WINDOW_SECONDS
-        ),
-        cleanup_interval=rate_limit_settings.get(
-            "cleanup_interval_seconds", RATE_LIMIT_CLEANUP_INTERVAL_SECONDS
-        ),
-    )
+    if rate_limit_settings.get("enabled", DEFAULT_RATE_LIMIT_ENABLED) is False:
+        rate_limiter = None
+    else:
+        rate_limiter = RateLimiter(
+            max_requests=rate_limit_settings.get(
+                "max_requests_per_minute", DEFAULT_RATE_LIMIT_REQUESTS
+            ),
+            window_seconds=rate_limit_settings.get(
+                "window_seconds", DEFAULT_RATE_LIMIT_WINDOW_SECONDS
+            ),
+            cleanup_interval=rate_limit_settings.get(
+                "cleanup_interval_seconds", RATE_LIMIT_CLEANUP_INTERVAL_SECONDS
+            ),
+        )
 
     # --- Initialize remaining services ---
     settings = config_manager.data.get("settings", {})

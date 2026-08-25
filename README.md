@@ -205,6 +205,21 @@ SFTP transfers go through 8-layer path validation including null-byte checks, co
 
 Sliding-window rate limiter per client IP (60 requests / 60 seconds, `/health` exempt). Violations return HTTP 429 with `Retry-After`.
 
+Rate limiting is configurable under `settings.rate_limit`:
+
+```jsonc
+"settings": {
+  "rate_limit": {
+    "enabled": true,                        // set false to disable entirely
+    "max_requests_per_minute": 60,          // max requests per client IP in the window
+    "window_seconds": 60.0,                 // sliding-window duration
+    "cleanup_interval_seconds": 300.0       // expired-entry GC interval
+  }
+}
+```
+
+> **Note:** the rate limiter is built **once at container startup** from the initial config and is **not** rebuilt on config hot-reload. To disable rate limiting you must set `settings.rate_limit.enabled` to `false` in the config present at boot (e.g. `config/ssh-mcp-config.json` in the mounted volume). This is useful for high-volume clients or test suites that issue many requests from a single IP.
+
 ---
 
 ## Quick Start

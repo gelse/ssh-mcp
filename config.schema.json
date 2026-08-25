@@ -293,6 +293,36 @@
             "type": "string"
           }
         },
+        "rate_limit": {
+          "description": "Per-IP rate-limiting settings. Set enabled to false to disable rate limiting entirely (e.g. for test suites issuing a high request volume from a single client IP).",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "Whether per-IP rate limiting is active. When false, the rate-limiter is disabled at startup.",
+              "type": "boolean",
+              "default": true
+            },
+            "max_requests_per_minute": {
+              "description": "Maximum requests allowed per client IP within the sliding window.",
+              "type": "integer",
+              "default": 60,
+              "minimum": 1
+            },
+            "window_seconds": {
+              "description": "Sliding-window duration (seconds) for rate limiting.",
+              "type": "number",
+              "default": 60,
+              "minimum": 0
+            },
+            "cleanup_interval_seconds": {
+              "description": "Minimum interval (seconds) between expired-entry garbage collections.",
+              "type": "number",
+              "default": 300,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        },
         "sftp": {
           "description": "SFTP file-transfer settings.",
           "type": "object",

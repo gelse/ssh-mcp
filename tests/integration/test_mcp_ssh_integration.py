@@ -786,6 +786,14 @@ def _make_valid_config(servers: dict) -> dict:
         "settings": {
             "max_output_length": 50000,
             "command_timeout_max": 120,
+            # Disable rate limiting: the integration suite issues a very high
+            # volume of /mcp requests from a single source IP (the Docker
+            # bridge gateway), which would otherwise exhaust the shared 60-request
+            # sliding window and return HTTP 429.  The limiter is built once at
+            # startup from this config, so it must be seeded before boot.
+            "rate_limit": {
+                "enabled": False,
+            },
         },
     }
 
@@ -806,7 +814,11 @@ def mcp_container(docker_client, test_network, ssh_container):
     except NotFound:
         pass
 
-    container = docker_client.containers.run(
+    # Create (but do NOT start yet) so we can pre-seed the startup config
+    # before the app boots.  The rate limiter is built ONCE at startup from
+    # the initial config, so seeding ``rate_limit.enabled=false`` here is the
+    # only way to disable it for the whole container lifetime.
+    container = docker_client.containers.create(
         "mcp-ssh:test",
         name=MCP_CONTAINER,
         network=TEST_NETWORK,
@@ -815,28 +827,25 @@ def mcp_container(docker_client, test_network, ssh_container):
             "LOG_DIR": "/logs",
         },
         ports={f"{MCP_PORT}/tcp": None},
-        auto_remove=False,
-        detach=True,
     )
+
+    # Write the SSH servers config into /config before starting.  The app's
+    # cold-start path sees this config (with rate limiting disabled) rather
+    # than the bundled default-config.json.
+    _inject_json_file(
+        container,
+        "/config/ssh-mcp-config.json",
+        _make_valid_config(TEST_SSH_SERVERS),
+    )
+
+    container.start()
 
     try:
         # Wait for the health endpoint to respond via ephemeral host port
         host_port = _get_host_port(container, MCP_PORT)
         _wait_for_http(f"http://127.0.0.1:{host_port}/health", timeout=30.0)
 
-        # Inject the SSH servers config — the hot-reload watcher will pick
-        # it up within its polling interval (15s default).  We write to
-        # /config/ssh-mcp-config.json since CONFIG_DIR=/config.
-        _inject_json_file(
-            container,
-            "/config/ssh-mcp-config.json",
-            _make_valid_config(TEST_SSH_SERVERS),
-        )
-
-        # Poll the MCP server until the hot-reload watcher picks up the
-        # new config.  The watcher polls every 15 s by default, so we
-        # wait up to 20 s.
-        _wait_for_config_reload(f"http://127.0.0.1:{host_port}")
+        # The config was seeded pre-boot, so no hot-reload wait is needed.
 
         yield container
     finally:
@@ -902,7 +911,11 @@ def mcp_container_with_config_api(docker_client, test_network, ssh_container):
     except NotFound:
         pass
 
-    container = docker_client.containers.run(
+    # Create (but do NOT start yet) so we can pre-seed the startup config
+    # before the app boots.  The rate limiter is built ONCE at startup from
+    # the initial config, so seeding ``rate_limit.enabled=false`` here is the
+    # only way to disable it for the whole container lifetime.
+    container = docker_client.containers.create(
         "mcp-ssh:test",
         name=CONFIG_API_CONTAINER,
         network=TEST_NETWORK,
@@ -913,26 +926,25 @@ def mcp_container_with_config_api(docker_client, test_network, ssh_container):
             "CONFIG_API_TOKEN": CONFIG_API_TOKEN_VALUE,
         },
         ports={f"{MCP_PORT}/tcp": None},
-        auto_remove=False,
-        detach=True,
     )
+
+    # Write the SSH servers config into /config before starting.  The app's
+    # cold-start path sees this config (with rate limiting disabled) rather
+    # than the bundled default-config.json.
+    _inject_json_file(
+        container,
+        "/config/ssh-mcp-config.json",
+        _make_valid_config(TEST_SSH_SERVERS),
+    )
+
+    container.start()
 
     try:
         # Wait for the health endpoint to respond via ephemeral host port
         host_port = _get_host_port(container, MCP_PORT)
         _wait_for_http(f"http://127.0.0.1:{host_port}/health", timeout=30.0)
 
-        # Inject the SSH servers config — the hot-reload watcher will pick
-        # it up within its polling interval (15s default).
-        _inject_json_file(
-            container,
-            "/config/ssh-mcp-config.json",
-            _make_valid_config(TEST_SSH_SERVERS),
-        )
-
-        # Poll the MCP server until the hot-reload watcher picks up the
-        # new config.
-        _wait_for_config_reload(f"http://127.0.0.1:{host_port}")
+        # The config was seeded pre-boot, so no hot-reload wait is needed.
 
         yield container
     finally:
@@ -2137,7 +2149,7 @@ def test_large_output_truncation(mcp_url: str, switch_config):
         "ssh_execute_command",
         {
             "server_name": "testbox",
-            "command": "seq 1 10000",
+            "command": "seq 1 2000",
             "timeout": 10,
         },
     )

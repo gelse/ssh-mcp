@@ -919,8 +919,8 @@ class TestWatcherHealth:
 class TestResilienceSettings:
     """Validation of retry / circuit-breaker settings keys."""
 
-    def test_validated_settings_contain_all_fifteen_keys(self):
-        """The validated settings dict always exposes all fifteen settings."""
+    def test_validated_settings_contain_all_keys(self):
+        """The validated settings dict always exposes every settings key."""
         with tempfile.TemporaryDirectory() as td:
             _write_config(td, _minimal_valid_config())
             mgr = ConfigManager(td)
@@ -942,6 +942,7 @@ class TestResilienceSettings:
                 "watcher_debounce_seconds",
                 "trusted_proxies",
                 "sftp",
+                "rate_limit",
             }
 
     def test_defaults_applied_when_keys_missing(self):

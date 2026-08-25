@@ -65,6 +65,12 @@
     "max_concurrent_ssh_connections": 20,
     "watcher_debounce_seconds": 2.0,
     "trusted_proxies": [],
+    "rate_limit": {
+      "enabled": true,
+      "max_requests_per_minute": 60,
+      "window_seconds": 60.0,
+      "cleanup_interval_seconds": 300.0
+    },
     "sftp": {
       "sandbox_root": "/",
       "max_path_length": 4096

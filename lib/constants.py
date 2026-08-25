@@ -432,6 +432,14 @@ SUDO_NO_PASSWORD_FLAG: str = "sudo -n"
 # Rate-Limiting Defaults
 # =============================================================================
 
+DEFAULT_RATE_LIMIT_ENABLED: bool = True
+"""Whether per-IP rate limiting is enabled by default.
+
+Set ``settings.rate_limit.enabled`` to ``false`` in the config file to
+disable rate limiting entirely (e.g. for integration test suites that
+issue a high volume of requests from a single client IP).
+"""
+
 DEFAULT_RATE_LIMIT_REQUESTS: int = 60
 """Default maximum requests per client IP within the rate-limit window."""
 

@@ -37,6 +37,10 @@ from lib.constants import (
     DEFAULT_POOL_CLEANUP_INTERVAL_SECONDS,
     DEFAULT_POOL_IDLE_TIMEOUT_SECONDS,
     DEFAULT_POOL_MAX_CONNECTIONS_PER_TARGET,
+    DEFAULT_RATE_LIMIT_ENABLED,
+    DEFAULT_RATE_LIMIT_REQUESTS,
+    DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
+    RATE_LIMIT_CLEANUP_INTERVAL_SECONDS,
     DEFAULT_RETRY_BACKOFF_BASE_SECONDS,
     DEFAULT_RETRY_MAX_ATTEMPTS,
     DEFAULT_SSH_PORT,
@@ -1282,6 +1286,7 @@ class ConfigManager:
             "watcher_debounce_seconds",
             "trusted_proxies",
             "sftp",
+            "rate_limit",
         }
         for sk in settings_raw:
             if sk not in ALLOWED_SETTINGS:
@@ -1457,6 +1462,46 @@ class ConfigManager:
                 )
             trusted_proxies.append(normalized)
 
+        # --- Rate-limiting settings ---
+        rate_limit_raw = settings_raw.get("rate_limit", {})
+        if not isinstance(rate_limit_raw, dict):
+            raise ConfigValidationError(
+                "'settings.rate_limit' must be an object",
+                field="settings.rate_limit",
+            )
+        rate_limit_enabled = rate_limit_raw.get(
+            "enabled", DEFAULT_RATE_LIMIT_ENABLED
+        )
+        if not isinstance(rate_limit_enabled, bool):
+            raise ConfigValidationError(
+                "'settings.rate_limit.enabled' must be a boolean",
+                field="settings.rate_limit.enabled",
+            )
+        rate_limit_max_requests = rate_limit_raw.get(
+            "max_requests_per_minute", DEFAULT_RATE_LIMIT_REQUESTS
+        )
+        if not isinstance(rate_limit_max_requests, int) or rate_limit_max_requests < 1:
+            raise ConfigValidationError(
+                "'settings.rate_limit.max_requests_per_minute' must be an integer >= 1",
+                field="settings.rate_limit.max_requests_per_minute",
+            )
+        rate_limit_window = rate_limit_raw.get(
+            "window_seconds", DEFAULT_RATE_LIMIT_WINDOW_SECONDS
+        )
+        if not isinstance(rate_limit_window, (int, float)) or rate_limit_window <= 0:
+            raise ConfigValidationError(
+                "'settings.rate_limit.window_seconds' must be a number > 0",
+                field="settings.rate_limit.window_seconds",
+            )
+        rate_limit_cleanup = rate_limit_raw.get(
+            "cleanup_interval_seconds", RATE_LIMIT_CLEANUP_INTERVAL_SECONDS
+        )
+        if not isinstance(rate_limit_cleanup, (int, float)) or rate_limit_cleanup <= 0:
+            raise ConfigValidationError(
+                "'settings.rate_limit.cleanup_interval_seconds' must be a number > 0",
+                field="settings.rate_limit.cleanup_interval_seconds",
+            )
+
         # --- SFTP settings ---
         sftp_raw = settings_raw.get("sftp", {})
         if not isinstance(sftp_raw, dict):
@@ -1505,6 +1550,12 @@ class ConfigManager:
                 "sftp": {
                     "sandbox_root": sandbox_root,
                     "max_path_length": max_path_length,
+                },
+                "rate_limit": {
+                    "enabled": rate_limit_enabled,
+                    "max_requests_per_minute": rate_limit_max_requests,
+                    "window_seconds": float(rate_limit_window),
+                    "cleanup_interval_seconds": float(rate_limit_cleanup),
                 },
             },
         }
