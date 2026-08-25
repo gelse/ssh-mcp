@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from unittest.mock import patch
 
 import pytest
@@ -72,6 +73,40 @@ class TestStdoutLoggerFormatting:
         result = StdoutLogger._format_entry(entry)
         assert "ERROR" in result
         assert "test_event" in result
+
+    def test_missing_event_field(self, capsys):
+        """Entry with NO 'event' key uses empty-string fallback and keeps ': ' separator."""
+        logger = StdoutLogger()
+        try:
+            logger.log({
+                "timestamp": "2025-01-15T10:30:00Z",
+                "log_level": "INFO",
+                "message": "some message",
+            })
+            captured = capsys.readouterr()
+            assert ": " in captured.out
+            assert "some message" in captured.out
+            # The event field should be an empty string fallback
+            assert "INFO : some message" in captured.out
+        finally:
+            logger.close()
+
+    def test_missing_message_field(self, capsys):
+        """Entry with NO 'message' key uses empty-string fallback and renders correctly."""
+        logger = StdoutLogger()
+        try:
+            logger.log({
+                "timestamp": "2025-01-15T10:30:00Z",
+                "log_level": "WARNING",
+                "event": "test_event",
+            })
+            captured = capsys.readouterr()
+            assert "WARNING" in captured.out
+            assert "test_event" in captured.out
+            # The message field should be an empty string fallback
+            assert "test_event: " in captured.out
+        finally:
+            logger.close()
 
 
 class TestStdoutLoggerLogMethod:
@@ -244,5 +279,47 @@ class TestStdoutLoggerConcurrency:
             captured = capsys.readouterr()
             lines = [line for line in captured.out.strip().split("\n") if line]
             assert len(lines) == 40
+        finally:
+            logger.close()
+
+    def test_thread_safety(self, capsys):
+        """4 threads × 10 unique messages produce all 40 expected lines."""
+        logger = StdoutLogger()
+        try:
+            results: list[str] = []
+            barrier = threading.Barrier(4)
+
+            def write_entries(thread_id: int) -> None:
+                barrier.wait()
+                for i in range(10):
+                    msg = f"thread_{thread_id}_msg_{i}"
+                    logger.log({
+                        "timestamp": "2025-01-15T10:30:00Z",
+                        "log_level": "INFO",
+                        "event": "test",
+                        "message": msg,
+                    })
+
+            threads = [
+                threading.Thread(target=write_entries, args=(tid,))
+                for tid in range(4)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+            captured = capsys.readouterr()
+            lines = [line for line in captured.out.strip().split("\n") if line]
+            assert len(lines) == 40
+
+            # Verify every unique message appears exactly once
+            for tid in range(4):
+                for i in range(10):
+                    expected = f"thread_{tid}_msg_{i}"
+                    matching = [ln for ln in lines if expected in ln]
+                    assert len(matching) == 1, (
+                        f"Expected exactly 1 line for {expected}, got {len(matching)}"
+                    )
         finally:
             logger.close()
