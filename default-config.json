@@ -57,6 +57,7 @@
     "circuit_breaker_failure_threshold": 5,
     "circuit_breaker_timeout_seconds": 60.0,
     "log_level": "INFO",
+    "logging": null,
     "max_log_output": 4096,
     "compress_rotated": true,
     "pool_max_connections_per_target": 5,

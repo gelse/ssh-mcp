@@ -251,6 +251,28 @@
             "CRITICAL"
           ]
         },
+        "logging": {
+          "description": "Optional logging configuration. When null (default), the built-in JSONL file logger is used. Provide an object with 'log_targets' to configure custom log output targets.",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "log_targets": {
+                  "description": "List of log output targets.",
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "object"
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
+        },
         "max_log_output": {
           "description": "Maximum number of output characters stored in a log entry.",
           "type": "integer",
