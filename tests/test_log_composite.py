@@ -300,3 +300,47 @@ class TestCompositeLoggerTargetsProperty:
         assert len(targets) == 2
         assert targets[0] is t1
         assert targets[1] is t2
+
+
+class TestCompositeLoggerThreadSafety:
+    """Tests for CompositeLogger thread safety under concurrent log() calls."""
+
+    def test_thread_safety(self):
+        """Concurrent log() calls deliver all entries to all targets."""
+        import threading
+
+        num_threads = 4
+        calls_per_thread = 10
+        total_calls = num_threads * calls_per_thread
+
+        t1 = StubLogger("t1")
+        t2 = StubLogger("t2")
+        composite = CompositeLogger([t1, t2])
+
+        barrier = threading.Barrier(num_threads)
+        expected_messages: list[str] = []
+
+        def worker(thread_idx: int) -> None:
+            barrier.wait()
+            for call_idx in range(calls_per_thread):
+                msg = f"thread_{thread_idx}_msg_{call_idx}"
+                expected_messages.append(msg)
+                composite.log({"event": "threaded", "message": msg})
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(num_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # Each target must have received exactly total_calls entries
+        assert len(t1.log_calls) == total_calls
+        assert len(t2.log_calls) == total_calls
+
+        # Every unique message must appear in each target's log_calls
+        t1_messages = [entry["message"] for entry in t1.log_calls]
+        t2_messages = [entry["message"] for entry in t2.log_calls]
+
+        for msg in expected_messages:
+            assert msg in t1_messages, f"{msg!r} missing from t1"
+            assert msg in t2_messages, f"{msg!r} missing from t2"

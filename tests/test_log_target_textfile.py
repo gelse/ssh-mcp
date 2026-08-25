@@ -312,3 +312,113 @@ class TestTextFileLoggerParseLevel:
     def test_parse_unknown_defaults_to_debug(self):
         """Unknown levels default to DEBUG (10)."""
         assert TextFileLogger._parse_level("UNKNOWN") == 10
+
+
+class TestTextFileLoggerAdditional:
+    """Additional tests for text format, compression, and concurrency."""
+
+    def test_text_format_in_file(self, tmp_path: Path):
+        """Written entry matches the human-readable text format."""
+        import re
+
+        filepath = str(tmp_path / "test.log")
+        logger = TextFileLogger(filepath)
+        try:
+            logger.log({
+                "timestamp": "2025-01-15T10:30:00Z",
+                "log_level": "INFO",
+                "event": "ssh_execute_command",
+                "message": "Hello world message",
+            })
+        finally:
+            logger.close()
+
+        content = Path(filepath).read_text().strip()
+        # Full line matches: YYYY-MM-DD HH:MM:SS LEVEL event: message
+        assert re.search(
+            r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} INFO ssh_execute_command: Hello world message$",
+            content,
+        )
+        # Assert specific substrings
+        assert "2025-01-15 10:30:00" in content
+        assert "INFO" in content
+        assert "ssh_execute_command" in content
+        assert "Hello world message" in content
+
+    def test_gzip_compression(self, tmp_path: Path):
+        """Rotated backup is valid gzip and contains expected text."""
+        filepath = str(tmp_path / "test.log")
+        logger = TextFileLogger(
+            filepath,
+            max_file_size_mb=0,
+            backup_count=3,
+            compress_rotated=True,
+        )
+        try:
+            for i in range(5):
+                logger.log({
+                    "timestamp": f"2025-01-15T10:30:0{i}Z",
+                    "log_level": "INFO",
+                    "event": "test",
+                    "message": f"gzip-entry-{i}",
+                })
+        finally:
+            logger.close()
+
+        gz_path = Path(filepath + ".1.gz")
+        assert gz_path.exists()
+        # Must be valid gzip
+        with gzip.open(str(gz_path), "rt", encoding="utf-8") as f:
+            content = f.read()
+        assert "gzip-entry-" in content
+        assert "test" in content
+
+    def test_concurrent_writes(self, tmp_path: Path):
+        """Multiple threads writing concurrently produce complete, non-interleaved lines."""
+        import threading
+
+        filepath = str(tmp_path / "test.log")
+        logger = TextFileLogger(filepath)
+        try:
+            num_threads = 4
+            writes_per_thread = 10
+            threads = []
+
+            def writer(thread_id: int):
+                for j in range(writes_per_thread):
+                    logger.log({
+                        "timestamp": "2025-01-15T10:30:00Z",
+                        "log_level": "INFO",
+                        "event": "concurrent_test",
+                        "message": f"thread-{thread_id}-entry-{j}",
+                    })
+
+            for tid in range(num_threads):
+                t = threading.Thread(target=writer, args=(tid,))
+                threads.append(t)
+                t.start()
+
+            for t in threads:
+                t.join()
+        finally:
+            logger.close()
+
+        lines = Path(filepath).read_text().strip().split("\n")
+        # Every thread × writes_per_thread line must be present
+        assert len(lines) == num_threads * writes_per_thread
+
+        # Each line is a complete, non-interleaved entry
+        expected = {
+            f"thread-{tid}-entry-{j}"
+            for tid in range(num_threads)
+            for j in range(writes_per_thread)
+        }
+        found = set()
+        for line in lines:
+            # Each line must match the expected format — no partial writes
+            assert line.startswith("2025-01-15 10:30:00 INFO concurrent_test: thread-")
+            # Extract the message portion after the prefix
+            msg = line.split("concurrent_test: ", 1)[1]
+            found.add(msg)
+
+        assert found == expected
