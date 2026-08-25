@@ -2,18 +2,15 @@
 
 Creates and configures the FastAPI application with all routes,
 middleware, and dependencies.  No module-level side effects —
-everything is initialized inside create_app() or main().
+everything is initialized inside create_app().
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-import os
-import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-import uvicorn
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
@@ -87,7 +84,6 @@ def create_app(
     )
 
     # Load Bearer token from environment (required for auth).
-    # In standalone mode this is called by main(); in unified mode
     # create_app() is the entry point so we must load here.
     from config_api.auth import load_token  # noqa: PLC0415
 
@@ -118,52 +114,3 @@ def create_app(
         app.mount("/ui", StaticFiles(directory=str(_ui_dir), html=True), name="ui")
 
     return app
-
-
-def main() -> None:
-    """CLI entry point for the config API server.
-
-    Environment variables:
-        CONFIG_API_TOKEN: Required. Bearer token for API authentication.
-        CONFIG_DIR: Config directory path (default: /config).
-        CONFIG_API_PORT: Port to listen on (default: 8081).
-        CONFIG_API_HOST: Bind address (default: 0.0.0.0).
-    """
-    # Configure logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        stream=sys.stdout,
-    )
-    logger = logging.getLogger("config_api")
-
-    # Load token (raises RuntimeError if not set)
-    try:
-        load_token()
-    except RuntimeError as e:
-        logger.error("Startup failed: %s", e)
-        sys.exit(1)
-
-    # Read settings from environment
-    config_dir = os.environ.get("CONFIG_DIR", "/config")
-    host = os.environ.get("CONFIG_API_HOST", "0.0.0.0")
-    port = int(os.environ.get("CONFIG_API_PORT", "8081"))
-
-    logger.info("Starting config API on %s:%d", host, port)
-    logger.info("Config directory: %s", config_dir)
-
-    # Create app
-    app = create_app(config_dir)
-
-    # Run with uvicorn
-    uvicorn.run(
-        app,
-        host=host,
-        port=port,
-        log_level="info",
-        access_log=True,
-    )
-
-
-if __name__ == "__main__":
-    main()

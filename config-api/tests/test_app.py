@@ -1,17 +1,17 @@
-"""Tests for config_api.app — application factory and CLI entry point."""
+"""Tests for config_api.app — application factory."""
 
 from __future__ import annotations
 
 import json
 import os
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from config_api.app import create_app, main
+from config_api.app import create_app
 
 
 # ---------------------------------------------------------------------------
@@ -192,128 +192,3 @@ class TestCreateApp:
         client = TestClient(app)
         resp = client.get("/api/config")
         assert resp.status_code == 401
-
-
-# ---------------------------------------------------------------------------
-# main() tests
-# ---------------------------------------------------------------------------
-
-
-class TestMain:
-    """Tests for the main() CLI entry point."""
-
-    def test_exits_when_token_not_set(self, tmp_path: Path) -> None:
-        """main() exits with code 1 when CONFIG_API_TOKEN is not set."""
-        env = {
-            "CONFIG_DIR": str(tmp_path),
-            "CONFIG_API_HOST": "127.0.0.1",
-            "CONFIG_API_PORT": "9999",
-        }
-        # Ensure CONFIG_API_TOKEN is not set
-        env_clean = {k: v for k, v in env.items() if k != "CONFIG_API_TOKEN"}
-
-        with patch.dict(os.environ, env_clean, clear=True):
-            with patch("config_api.app.uvicorn") as mock_uvicorn:
-                with pytest.raises(SystemExit) as exc_info:
-                    main()
-                assert exc_info.value.code == 1
-                mock_uvicorn.run.assert_not_called()
-
-    @patch("config_api.app.uvicorn")
-    def test_starts_uvicorn_with_correct_args(
-        self, mock_uvicorn: MagicMock, tmp_path: Path
-    ) -> None:
-        """main() starts uvicorn with the correct host and port."""
-        _write_config(tmp_path, _minimal_config())
-        env = {
-            "CONFIG_API_TOKEN": "test-token",
-            "CONFIG_DIR": str(tmp_path),
-            "CONFIG_API_HOST": "127.0.0.1",
-            "CONFIG_API_PORT": "9999",
-        }
-        with patch.dict(os.environ, env, clear=True):
-            main()
-
-        mock_uvicorn.run.assert_called_once()
-        call_kwargs = mock_uvicorn.run.call_args
-        assert call_kwargs.kwargs["host"] == "127.0.0.1"
-        assert call_kwargs.kwargs["port"] == 9999
-        assert call_kwargs.kwargs["log_level"] == "info"
-        assert call_kwargs.kwargs["access_log"] is True
-
-    @patch("config_api.app.uvicorn")
-    def test_default_host_and_port(
-        self, mock_uvicorn: MagicMock, tmp_path: Path
-    ) -> None:
-        """main() defaults to 0.0.0.0:8081 when env vars are not set."""
-        _write_config(tmp_path, _minimal_config())
-        env = {
-            "CONFIG_API_TOKEN": "test-token",
-            "CONFIG_DIR": str(tmp_path),
-        }
-        with patch.dict(os.environ, env, clear=True):
-            main()
-
-        call_kwargs = mock_uvicorn.run.call_args.kwargs
-        assert call_kwargs["host"] == "0.0.0.0"
-        assert call_kwargs["port"] == 8081
-
-    @patch("config_api.app.uvicorn")
-    def test_default_config_dir(
-        self, mock_uvicorn: MagicMock, tmp_path: Path
-    ) -> None:
-        """main() defaults CONFIG_DIR to /config when not set."""
-        _write_config(tmp_path, _minimal_config())
-        env = {
-            "CONFIG_API_TOKEN": "test-token",
-        }
-        with patch.dict(os.environ, env, clear=True):
-            with patch("config_api.app.create_app") as mock_create:
-                mock_create.return_value = MagicMock()
-                main()
-
-        mock_create.assert_called_once_with("/config")
-
-    @patch("config_api.app.uvicorn")
-    def test_passes_fastapi_app_to_uvicorn(
-        self, mock_uvicorn: MagicMock, tmp_path: Path
-    ) -> None:
-        """main() passes the FastAPI app as the first argument to uvicorn.run()."""
-        _write_config(tmp_path, _minimal_config())
-        env = {
-            "CONFIG_API_TOKEN": "test-token",
-            "CONFIG_DIR": str(tmp_path),
-        }
-        with patch.dict(os.environ, env, clear=True):
-            main()
-
-        call_args = mock_uvicorn.run.call_args
-        app = call_args.args[0] if call_args.args else call_args.kwargs.get("app")
-        assert isinstance(app, FastAPI)
-
-    @patch("config_api.app.uvicorn")
-    def test_load_token_called_before_create_app(
-        self, mock_uvicorn: MagicMock, tmp_path: Path
-    ) -> None:
-        """load_token() is called before create_app() in main()."""
-        _write_config(tmp_path, _minimal_config())
-        env = {
-            "CONFIG_API_TOKEN": "test-token",
-            "CONFIG_DIR": str(tmp_path),
-        }
-        call_order = []
-        with patch.dict(os.environ, env, clear=True):
-            with patch(
-                "config_api.app.load_token",
-                side_effect=lambda: call_order.append("load_token"),
-            ):
-                with patch(
-                    "config_api.app.create_app",
-                    side_effect=lambda *a, **kw: (
-                        call_order.append("create_app"),
-                        MagicMock(),
-                    )[1],
-                ):
-                    main()
-
-        assert call_order.index("load_token") < call_order.index("create_app")

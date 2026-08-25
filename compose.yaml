@@ -17,10 +17,8 @@ services:
       - LOG_DIR=/logs
       - CONFIG_API_ENABLED=${CONFIG_API_ENABLED:-false}
       - CONFIG_API_TOKEN=${CONFIG_API_TOKEN:-}
-      - CONFIG_API_PORT=8081
     ports:
       - "9080:8080"
-      - "9081:8081"  # Config API (only active when CONFIG_API_ENABLED=true)
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/health"]
       interval: 30s
