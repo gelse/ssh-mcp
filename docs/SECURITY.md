@@ -15,6 +15,7 @@ threats it mitigates, and how to configure and operate it securely.
 - [Rate Limiting](#rate-limiting)
 - [Network Authorization](#network-authorization)
 - [Secure Defaults](#secure-defaults)
+- [Log Target Security](#log-target-security)
 - [Configuration Hardening](#configuration-hardening)
 - [Client IP Extraction](#client-ip-extraction)
 - [Vulnerability Reporting](#vulnerability-reporting)
@@ -381,6 +382,15 @@ The server ships with conservative defaults designed for production safety:
 | Max concurrent SSH connections | 20                     | Global cap; excess gets HTTP 503     |
 | Non-root container user        | `mcpssh`               | Limits impact of container escape      |
 | `--no-cache-dir` in Dockerfile | Enabled                | Reduces image size and attack surface  |
+
+---
+
+### Log Target Security
+
+- **Stdout target:** Log entries are written to stdout. In Docker environments, ensure container logs are not exposed to untrusted parties.
+- **File targets:** Log files are created with standard file permissions. Ensure the log directory has appropriate permissions (e.g., `chmod 750`).
+- **Log level override:** The `MCP_SSH_LOG_LEVEL` environment variable can increase verbosity. Ensure this is not set to `DEBUG` in production, as it may expose sensitive information.
+- **Per-target log levels:** Individual targets can have their own log levels. Be cautious when setting a file target to `DEBUG` — it may log sensitive request details.
 
 ---
 
