@@ -429,6 +429,12 @@ class ConfigService:
         Reads the current config, replaces or adds the target, validates
         the full config, and atomically writes.
 
+        When editing an existing target, empty or missing ``password`` /
+        ``private_key`` fields in *target_data* are treated as "keep
+        unchanged" — the existing secret values are preserved.  On
+        creation (new target), at least one credential is still required
+        by the config-schema validation in ``lib/config.py``.
+
         Args:
             name: The SSH target identifier.
             target_data: The target config dict (may include
@@ -445,7 +451,21 @@ class ConfigService:
             raise ValueError(f"Invalid target name: {name!r}")
 
         current = self.read_config()
-        current.setdefault("ssh_targets", {})[name] = target_data
+        targets = current.setdefault("ssh_targets", {})
+
+        if name in targets:
+            # --- editing an existing target ---
+            # Preserve existing secrets when the caller sends empty
+            # or omitted password / private_key fields.
+            existing = targets[name]
+            for field in self._SECRET_FIELDS:
+                new_value = target_data.get(field)
+                if not new_value or (isinstance(new_value, str) and not new_value.strip()):
+                    # Keep the existing secret if present
+                    if field in existing:
+                        target_data[field] = existing[field]
+
+        targets[name] = target_data
         written = self.write_config(current)
         target = written["ssh_targets"][name]
         clean = copy.deepcopy(target)

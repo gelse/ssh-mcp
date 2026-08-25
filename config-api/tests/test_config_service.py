@@ -999,6 +999,112 @@ class TestPutSshTarget:
         )
         assert raw["ssh_targets"]["secrets-server"]["password"] == "p"
 
+    def test_preserves_existing_password_on_edit_when_empty(
+        self, service: "ConfigService"
+    ) -> None:
+        """Editing a target with empty password preserves the existing one."""
+        # The existing test-server target has password="secret123"
+        result = service.put_ssh_target(
+            "test-server",
+            {"host": "10.0.0.1", "port": 22, "username": "admin", "password": ""},
+        )
+        assert result["host"] == "10.0.0.1"
+        assert "password" not in result  # stripped from return
+        # Verify the secret is preserved on disk
+        raw = service.read_config()
+        assert raw["ssh_targets"]["test-server"]["password"] == "secret123"
+
+    def test_preserves_existing_password_on_edit_when_absent(
+        self, service: "ConfigService"
+    ) -> None:
+        """Editing a target without password field preserves the existing one."""
+        result = service.put_ssh_target(
+            "test-server",
+            {"host": "10.0.0.1", "port": 22, "username": "admin"},
+        )
+        assert result["host"] == "10.0.0.1"
+        raw = service.read_config()
+        assert raw["ssh_targets"]["test-server"]["password"] == "secret123"
+
+    def test_preserves_existing_password_when_whitespace_only(
+        self, service: "ConfigService"
+    ) -> None:
+        """Editing with whitespace-only password preserves the existing one."""
+        result = service.put_ssh_target(
+            "test-server",
+            {"host": "10.0.0.1", "port": 22, "username": "admin", "password": "   "},
+        )
+        raw = service.read_config()
+        assert raw["ssh_targets"]["test-server"]["password"] == "secret123"
+
+    def test_replaces_password_when_new_value_provided(
+        self, service: "ConfigService"
+    ) -> None:
+        """Providing a new non-empty password replaces the existing one."""
+        result = service.put_ssh_target(
+            "test-server",
+            {"host": "10.0.0.1", "port": 22, "username": "admin", "password": "new-secret"},
+        )
+        assert result["host"] == "10.0.0.1"
+        raw = service.read_config()
+        assert raw["ssh_targets"]["test-server"]["password"] == "new-secret"
+
+    def test_preserves_existing_private_key_on_edit_when_empty(
+        self, service: "ConfigService"
+    ) -> None:
+        """Editing with empty private_key preserves the existing one."""
+        # Set up a target with private_key
+        config = service.read_config()
+        config["ssh_targets"]["test-server"]["private_key"] = "my-private-key"
+        service.write_config(config)
+
+        # Now edit with empty private_key
+        result = service.put_ssh_target(
+            "test-server",
+            {
+                "host": "10.0.0.1",
+                "port": 22,
+                "username": "admin",
+                "password": "secret123",
+                "private_key": "",
+            },
+        )
+        raw = service.read_config()
+        assert raw["ssh_targets"]["test-server"]["private_key"] == "my-private-key"
+
+    def test_replaces_private_key_when_new_value_provided(
+        self, service: "ConfigService"
+    ) -> None:
+        """Providing a new non-empty private_key replaces the existing one."""
+        config = service.read_config()
+        config["ssh_targets"]["test-server"]["private_key"] = "old-key"
+        service.write_config(config)
+
+        result = service.put_ssh_target(
+            "test-server",
+            {
+                "host": "10.0.0.1",
+                "port": 22,
+                "username": "admin",
+                "password": "secret123",
+                "private_key": "new-key",
+            },
+        )
+        raw = service.read_config()
+        assert raw["ssh_targets"]["test-server"]["private_key"] == "new-key"
+
+    def test_create_new_target_requires_credentials(
+        self, service: "ConfigService"
+    ) -> None:
+        """Creating a new target without credentials fails validation."""
+        from lib.exceptions import ConfigValidationError
+
+        with pytest.raises(ConfigValidationError):
+            service.put_ssh_target(
+                "new-no-creds",
+                {"host": "10.0.0.5", "port": 22, "username": "user"},
+            )
+
 
 # ---------------------------------------------------------------------------
 # delete_ssh_target()

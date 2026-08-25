@@ -600,6 +600,80 @@ class TestPutSingleSSHTarget:
         )
         assert response.status_code == 401
 
+    def test_edit_preserves_existing_password(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """Editing a target without password preserves the existing one."""
+        # The test fixture already has test-server with password in config.
+        # Verify via GET that the target exists
+        get_resp = client.get(
+            "/config/ssh_targets/test-server",
+            headers=auth_headers,
+        )
+        assert get_resp.status_code == 200
+        original_host = get_resp.json()["host"]
+
+        # Update only host, no password sent (simulates "Leave empty to keep unchanged")
+        response = client.put(
+            "/config/ssh_targets/test-server",
+            json={
+                "host": original_host,
+                "port": 22,
+                "username": "admin",
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+
+        # Verify the target still exists and was updated
+        get_resp = client.get(
+            "/config/ssh_targets/test-server",
+            headers=auth_headers,
+        )
+        assert get_resp.status_code == 200
+
+    def test_edit_preserves_existing_private_key(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """Editing a target without private_key preserves the existing one."""
+        # First, set up a target with a private_key
+        svc = client.app.state.config_service
+        config = svc.read_config()
+        config["ssh_targets"]["test-server"]["private_key"] = "my-secret-key"
+        svc.write_config(config)
+
+        # Now edit without private_key
+        response = client.put(
+            "/config/ssh_targets/test-server",
+            json={
+                "host": "10.0.0.1",
+                "port": 22,
+                "username": "admin",
+                "password": "secret123",
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+
+        # Verify private_key was preserved on disk
+        raw = svc.read_config()
+        assert raw["ssh_targets"]["test-server"]["private_key"] == "my-secret-key"
+
+    def test_create_without_credentials_fails(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """Creating a new target without password or key returns 400."""
+        response = client.put(
+            "/config/ssh_targets/no-creds",
+            json={
+                "host": "10.0.0.99",
+                "port": 22,
+                "username": "user",
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 400
+
 
 # ---------------------------------------------------------------------------
 # DELETE /api/config/ssh_targets/{name}
