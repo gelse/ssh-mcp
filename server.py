@@ -521,7 +521,11 @@ def create_app(
         try:
             from config_api.app import create_app as create_config_api_app
 
-            config_api_app = create_config_api_app()
+            config_api_app = create_config_api_app(
+                ssh_client_manager=ssh_client_manager,
+                ssh_config_manager=config_manager,
+                ssh_key_path=ssh_key_path,
+            )
             mcp.state.config_api_app = config_api_app  # type: ignore[attr-defined]
             stdlib_logger.info(
                 "Config API enabled — sub-application will be mounted at /api"
