@@ -487,11 +487,11 @@ async function renderTargets() {
           <div class="space-y-4">
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">Name</label>
-              <input type="text" id="m-name" value="${escapeHtml(name)}" class="w-full px-3 py-2 border rounded text-sm" ${isEdit ? 'disabled' : ''}>
+              <input type="text" id="m-name" class="w-full px-3 py-2 border rounded text-sm" ${isEdit ? 'disabled' : ''}>
             </div>
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">Host</label>
-              <input type="text" id="m-host" value="${escapeHtml(target.host || '')}" class="w-full px-3 py-2 border rounded text-sm">
+              <input type="text" id="m-host" class="w-full px-3 py-2 border rounded text-sm">
             </div>
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">Port</label>
@@ -499,7 +499,7 @@ async function renderTargets() {
             </div>
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">Username</label>
-              <input type="text" id="m-username" value="${escapeHtml(target.username || '')}" class="w-full px-3 py-2 border rounded text-sm">
+              <input type="text" id="m-username" class="w-full px-3 py-2 border rounded text-sm">
             </div>
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">Password</label>
@@ -541,6 +541,9 @@ async function renderTargets() {
           renderTargets();
         },
           (body) => {
+            body.querySelector('#m-name').value = name;
+            body.querySelector('#m-host').value = target.host || '';
+            body.querySelector('#m-username').value = target.username || '';
             body.querySelector('#m-checkcommand').value = target.checkcommand || '';
           }
         );
@@ -747,7 +750,7 @@ async function renderPatterns() {
         const modalBody = `
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Pattern (regex)</label>
-            <input type="text" id="m-pattern" value="${escapeHtml(pattern)}" class="w-full px-3 py-2 border rounded text-sm font-mono">
+            <input type="text" id="m-pattern" class="w-full px-3 py-2 border rounded text-sm font-mono">
             <p id="m-pattern-error" class="text-red-600 text-xs mt-1 hidden"></p>
           </div>
         `;
@@ -770,7 +773,11 @@ async function renderPatterns() {
           }
           showToast('Pattern updated');
           renderPatterns();
-        });
+        },
+          (body) => {
+            body.querySelector('#m-pattern').value = pattern;
+          }
+        );
       });
 
       deleteBtn.addEventListener('click', async () => {
@@ -963,11 +970,11 @@ function renderDefaultRules(container, rules) {
         <div class="space-y-4">
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Targets (comma-separated)</label>
-            <input type="text" id="m-targets" value="${escapeHtml((rule.targets || []).join(', '))}" class="w-full px-3 py-2 border rounded text-sm">
+            <input type="text" id="m-targets" class="w-full px-3 py-2 border rounded text-sm">
           </div>
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Commands (comma-separated, or * for all)</label>
-            <input type="text" id="m-commands" value="${escapeHtml((rule.commands || []).join(', '))}" class="w-full px-3 py-2 border rounded text-sm">
+            <input type="text" id="m-commands" class="w-full px-3 py-2 border rounded text-sm">
           </div>
         </div>
       `;
@@ -985,7 +992,12 @@ function renderDefaultRules(container, rules) {
         }
         showToast('Rule updated');
         renderRules();
-      });
+      },
+        (body) => {
+          body.querySelector('#m-targets').value = (rule.targets || []).join(', ');
+          body.querySelector('#m-commands').value = (rule.commands || []).join(', ');
+        }
+      );
     });
 
     deleteBtn.addEventListener('click', async () => {
@@ -1310,11 +1322,11 @@ function renderNetworkRules(container, networks) {
         <div class="space-y-4">
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Name</label>
-            <input type="text" id="m-net-name" value="${escapeHtml(net.name || '')}" class="w-full px-3 py-2 border rounded text-sm">
+            <input type="text" id="m-net-name" class="w-full px-3 py-2 border rounded text-sm">
           </div>
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">CIDR Range</label>
-            <input type="text" id="m-net-range" value="${escapeHtml(net.range || '')}" placeholder="e.g. 10.0.0.0/8" class="w-full px-3 py-2 border rounded text-sm font-mono">
+            <input type="text" id="m-net-range" placeholder="e.g. 10.0.0.0/8" class="w-full px-3 py-2 border rounded text-sm font-mono">
           </div>
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Rules (JSON array)</label>
@@ -1348,7 +1360,12 @@ function renderNetworkRules(container, networks) {
         }
         showToast('Network rule updated');
         renderRules();
-      });
+      },
+        (body) => {
+          body.querySelector('#m-net-name').value = net.name || '';
+          body.querySelector('#m-net-range').value = net.range || '';
+        }
+      );
     });
 
     deleteBtn.addEventListener('click', async () => {
