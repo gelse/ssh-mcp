@@ -193,3 +193,70 @@ class TestJsonFileLoggerPathValidation:
         """Filepath with null bytes raises ConfigValidationError."""
         with pytest.raises(ConfigValidationError):
             JsonFileLogger("/tmp/test\x00.log")
+
+
+class TestJsonFileLoggerRotation:
+    """Tests for file rotation behaviour."""
+
+    def test_rotation(self, tmp_path: Path):
+        """Rotated backup files are created as valid gzip JSONL."""
+        import gzip
+
+        filepath = str(tmp_path / "test.log")
+        logger = JsonFileLogger(
+            filepath,
+            max_file_size_mb=0,
+            backup_count=3,
+            compress_rotated=True,
+        )
+        try:
+            for i in range(5):
+                logger.log({"event": "rotation_test", "n": i})
+        finally:
+            logger.close()
+
+        # FileLogger writes to ssh-mcp.log in the parent directory
+        log_dir = Path(filepath).parent
+        log_file = log_dir / "ssh-mcp.log"
+        gz_backup = log_file.parent / (log_file.name + ".1.gz")
+
+        assert gz_backup.exists(), "Rotated gzip backup should exist"
+
+        # Verify the backup is valid gzip and contains JSON lines
+        with gzip.open(gz_backup, "rt", encoding="utf-8") as fh:
+            lines = [line.strip() for line in fh if line.strip()]
+
+        assert len(lines) > 0, "Backup should contain at least one JSON line"
+        for line in lines:
+            parsed = json.loads(line)
+            assert "event" in parsed
+
+
+class TestJsonFileLoggerLogLevelFiltering:
+    """Tests documenting that log-level filtering is NOT implemented in log()."""
+
+    def test_log_level_filtering(self, tmp_path: Path):
+        """All levels are written regardless of configured log_level."""
+        filepath = str(tmp_path / "test.log")
+        logger = JsonFileLogger(filepath, log_level="ERROR")
+        try:
+            logger.log({"event": "debug_msg", "log_level": "DEBUG"})
+            logger.log({"event": "info_msg", "log_level": "INFO"})
+            logger.log({"event": "warning_msg", "log_level": "WARNING"})
+            logger.log({"event": "error_msg", "log_level": "ERROR"})
+        finally:
+            logger.close()
+
+        log_dir = Path(filepath).parent
+        log_file = log_dir / "ssh-mcp.log"
+        content = log_file.read_text().strip()
+        lines = content.split("\n")
+        assert len(lines) == 4, "All four entries should be present"
+
+        events = {json.loads(line)["event"] for line in lines}
+        assert events == {
+            "debug_msg",
+            "info_msg",
+            "warning_msg",
+            "error_msg",
+        }, "No level filtering is applied — all entries are written"
