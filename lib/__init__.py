@@ -9,9 +9,11 @@ from lib.command_security import (
     split_command_segments as segment_command_chunks,
     strip_redirects,
 )
+from lib.log_composite import CompositeLogger
 from lib.log_target_stdout import StdoutLogger
 from lib.log_target_textfile import TextFileLogger
 from lib.log_target_jsonfile import JsonFileLogger
+from lib.log_manager import LoggingManager
 from lib.constants import (
     ACTIVE_LOG_FILENAME,
     API_KEY_HASH_PREFIX,
@@ -60,6 +62,7 @@ from lib.constants import (
     DEFAULT_SSH_CHECK_TIMEOUT_MIN,
     DEFAULT_SSH_PORT,
     DEFAULT_SSH_TIMEOUT_SECONDS,
+    MCP_SSH_LOG_LEVEL,
     DEFAULT_WATCHER_DEBOUNCE_SECONDS,
     DEFAULT_WATCHER_INTERVAL_SECONDS,
     PBKDF2_ALGO,
@@ -146,6 +149,8 @@ from lib.types import (
 
 __all__ = [
     # Log targets
+    "CompositeLogger",
+    "LoggingManager",
     "StdoutLogger",
     "TextFileLogger",
     "JsonFileLogger",
@@ -275,6 +280,7 @@ __all__ = [
     "LOG_TARGET_TEXTFILE",
     "SUPPORTED_LOG_TARGETS",
     "DEFAULT_TEXT_LOG_FORMAT",
+    "MCP_SSH_LOG_LEVEL",
     # SSH operations
     "build_auth_target",
     "check_ssh_connection",

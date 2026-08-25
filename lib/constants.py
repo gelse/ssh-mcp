@@ -66,6 +66,14 @@ MCP_SSH_CONFIG_PATH: str = "MCP_SSH_CONFIG_PATH"
 MCP_SSH_LOG_DIR: str = "MCP_SSH_LOG_DIR"
 """Environment variable that overrides the log output directory."""
 
+MCP_SSH_LOG_LEVEL: str = "MCP_SSH_LOG_LEVEL"
+"""Environment variable that overrides the default log level.
+
+When set, this value replaces ``DEFAULT_LOG_LEVEL`` for the default
+target level.  Per-target ``log_level`` overrides in the config file
+take precedence over this env var.
+"""
+
 MCP_SSH_SSH_KEY: str = "MCP_SSH_SSH_KEY"
 """Environment variable that overrides the private SSH key path."""
 
