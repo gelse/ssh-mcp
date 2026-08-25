@@ -476,3 +476,29 @@ the ``X-Forwarded-For`` header when the direct connection peer is in
 this list.  An empty list means no proxy is trusted and the header is
 ignored entirely, preventing header spoofing by untrusted clients.
 """
+
+# =============================================================================
+# Pluggable Log Target Defaults
+# =============================================================================
+
+DEFAULT_LOG_TARGETS: list[dict] = [{"target": "stdout"}]
+"""Default log targets when ``settings.logging.log_targets`` is absent."""
+
+LOG_TARGET_STDOUT: str = "stdout"
+"""Identifier for the stdout log target type."""
+
+LOG_TARGET_JSONFILE: str = "jsonfile"
+"""Identifier for the JSONL file log target type."""
+
+LOG_TARGET_TEXTFILE: str = "file"
+"""Identifier for the text file log target type."""
+
+SUPPORTED_LOG_TARGETS: tuple[str, ...] = (
+    LOG_TARGET_STDOUT,
+    LOG_TARGET_JSONFILE,
+    LOG_TARGET_TEXTFILE,
+)
+"""All supported log target type identifiers."""
+
+DEFAULT_TEXT_LOG_FORMAT: str = "{timestamp} {level} {event}: {message}"
+"""Default text format string for stdout and text-file targets."""

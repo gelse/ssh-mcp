@@ -9,8 +9,10 @@ from lib.command_security import (
     split_command_segments as segment_command_chunks,
     strip_redirects,
 )
+from lib.log_target_stdout import StdoutLogger
+from lib.log_target_textfile import TextFileLogger
+from lib.log_target_jsonfile import JsonFileLogger
 from lib.constants import (
-    ACTIVE_LOG_FILENAME,
     ACTIVE_LOG_FILENAME,
     API_KEY_HASH_PREFIX,
     APP_NAME,
@@ -77,6 +79,12 @@ from lib.constants import (
     MAX_TARGET_NAME_LENGTH,
     MAX_TARGETS,
     TARGET_NAME_PATTERN,
+    DEFAULT_LOG_TARGETS,
+    LOG_TARGET_STDOUT,
+    LOG_TARGET_JSONFILE,
+    LOG_TARGET_TEXTFILE,
+    SUPPORTED_LOG_TARGETS,
+    DEFAULT_TEXT_LOG_FORMAT,
 )
 from lib.crypto import hash_api_key, verify_api_key
 from lib.exceptions import (
@@ -137,6 +145,10 @@ from lib.types import (
 )
 
 __all__ = [
+    # Log targets
+    "StdoutLogger",
+    "TextFileLogger",
+    "JsonFileLogger",
     # Input sanitization — path validation
     "validate_log_path",
     # Command security
@@ -257,6 +269,12 @@ __all__ = [
     "FALLBACK_CLIENT_IP",
     "DEFAULT_REQUEST_ID",
     "DEFAULT_TRUSTED_PROXIES",
+    "DEFAULT_LOG_TARGETS",
+    "LOG_TARGET_STDOUT",
+    "LOG_TARGET_JSONFILE",
+    "LOG_TARGET_TEXTFILE",
+    "SUPPORTED_LOG_TARGETS",
+    "DEFAULT_TEXT_LOG_FORMAT",
     # SSH operations
     "build_auth_target",
     "check_ssh_connection",
