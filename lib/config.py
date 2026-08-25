@@ -52,12 +52,15 @@ from lib.constants import (
     LATEST_CONFIG_VERSION,
     LOG_FORMAT_VERSION,
     LOG_LEVELS,
+    LOG_TARGET_JSONFILE,
+    LOG_TARGET_TEXTFILE,
     MAX_BLOCK_PATTERNS,
     MAX_REGEX_PATTERN_LENGTH,
     MAX_TARGET_NAME_LENGTH,
     MAX_TARGETS,
     MCP_SSH_SETTING_PREFIX,
     RESTRICTED_FILE_MODE,
+    SUPPORTED_LOG_TARGETS,
     TARGET_NAME_PATTERN,
     SETTING_KEY_TYPES,
 )
@@ -1277,6 +1280,7 @@ class ConfigManager:
             "circuit_breaker_failure_threshold",
             "circuit_breaker_timeout_seconds",
             "log_level",
+            "logging",
             "max_log_output",
             "compress_rotated",
             "pool_max_connections_per_target",
@@ -1373,6 +1377,57 @@ class ConfigManager:
                 "'settings.compress_rotated' must be a boolean",
                 field="settings.compress_rotated",
             )
+
+        # --- Log targets settings ---
+        logging_raw = settings_raw.get("logging")
+        logging_validated = None
+        if logging_raw is not None:
+            if not isinstance(logging_raw, dict):
+                raise ConfigValidationError(
+                    "'settings.logging' must be an object",
+                    field="settings.logging",
+                )
+            log_targets_raw = logging_raw.get("log_targets")
+            if log_targets_raw is not None:
+                if not isinstance(log_targets_raw, list) or len(log_targets_raw) == 0:
+                    raise ConfigValidationError(
+                        "'settings.logging.log_targets' must be a non-empty list",
+                        field="settings.logging.log_targets",
+                    )
+                validated_targets = []
+                for idx, target in enumerate(log_targets_raw):
+                    if not isinstance(target, dict):
+                        raise ConfigValidationError(
+                            "log_targets entry must be an object",
+                            field=f"settings.logging.log_targets[{idx}]",
+                        )
+                    target_type = target.get("target")
+                    if target_type not in SUPPORTED_LOG_TARGETS:
+                        raise ConfigValidationError(
+                            f"Unknown log target type: {target_type!r}. "
+                            f"Supported: {', '.join(SUPPORTED_LOG_TARGETS)}",
+                            field=f"settings.logging.log_targets[{idx}].target",
+                        )
+                    # Validate target-specific fields
+                    if target_type in (LOG_TARGET_JSONFILE, LOG_TARGET_TEXTFILE):
+                        filepath = target.get("filepath")
+                        if not isinstance(filepath, str) or not filepath.strip():
+                            raise ConfigValidationError(
+                                f"Log target {target_type!r} requires a 'filepath' string",
+                                field=f"settings.logging.log_targets[{idx}].filepath",
+                            )
+                    # Optional per-target log_level
+                    tl = target.get("log_level")
+                    if tl is not None:
+                        if not isinstance(tl, str) or tl.upper() not in LOG_LEVELS:
+                            raise ConfigValidationError(
+                                f"log target 'log_level' must be one of {', '.join(LOG_LEVELS)}",
+                                field=f"settings.logging.log_targets[{idx}].log_level",
+                            )
+                    validated_targets.append(target)
+                logging_validated = {"log_targets": validated_targets}
+            else:
+                logging_validated = {}
 
         # Optional SSH connection-pool settings — defaults come from constants.
         pool_max_connections = settings_raw.get(
@@ -1551,6 +1606,7 @@ class ConfigManager:
                     "sandbox_root": sandbox_root,
                     "max_path_length": max_path_length,
                 },
+                "logging": logging_validated,
                 "rate_limit": {
                     "enabled": rate_limit_enabled,
                     "max_requests_per_minute": rate_limit_max_requests,
