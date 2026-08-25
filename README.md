@@ -646,9 +646,67 @@ The server polls the config file for changes (15 s interval, 2 s debounce). When
 
 ### Structured Logging
 
-JSONL logs are written to `LOG_DIR` (default `/logs`). Each entry includes `timestamp`, `log_level`, `event`, `request_id` (correlation ID), `source_ip`, `api_key_name`, `target_name`, `command`, `allowed`, `reason`, `matched_via`, `execution_time_ms`, `exit_code`, and optionally `output` (truncated to `max_log_output`).
+The mcp-ssh server supports pluggable log targets configured via `settings.logging.log_targets` in the config file. Each target is an independent driver that receives all log entries.
 
-Files rotate at 10 MB keeping 5 backups; rotated files are gzipped when `compress_rotated` is enabled. User-controlled fields (`command`, `target_name`, remote paths) are newline-sanitized before logging.
+#### Default Behavior
+
+By default, log entries are written to **stdout** in human-readable text format. This is suitable for Docker environments where container logs are captured by the runtime.
+
+#### Log Target Types
+
+| Target | Config value | Format | Description |
+|--------|-------------|--------|-------------|
+| Stdout | `"stdout"` | Text | Writes to stdout. Default target. |
+| JSON File | `"jsonfile"` | JSONL | Writes one JSON object per line to a file. |
+| Text File | `"file"` | Text | Writes human-readable text to a file. |
+
+#### Configuration
+
+```json
+{
+  "settings": {
+    "log_level": "INFO",
+    "logging": {
+      "log_targets": [
+        { "target": "stdout" },
+        { "target": "jsonfile", "filepath": "logs/ssh-mcp.log" }
+      ],
+      "max_log_output": 4096,
+      "compress_rotated": true
+    }
+  }
+}
+```
+
+#### Log Level
+
+- **Config file:** Set `settings.log_level` to control the default level.
+- **Environment variable:** Set `MCP_SSH_LOG_LEVEL` to override the config-file default (e.g., `MCP_SSH_LOG_LEVEL=DEBUG`).
+- **Per-target:** Each log target can have its own `log_level` that overrides the default.
+
+#### Legacy Configuration
+
+If `settings.logging` is absent, the server falls back to a single JSONL file target in the log directory (`/logs` by default). This maintains backward compatibility with existing configurations.
+
+#### Text Format
+
+Stdout and text-file targets use the format:
+
+```
+2025-01-15 10:30:00 INFO ssh_execute_command: Command executed on server1
+```
+
+#### JSON Format
+
+JSON-file targets write one JSON object per line:
+
+```json
+{"timestamp": "2025-01-15T10:30:00+00:00", "event": "ssh_execute_command", "level": "INFO", "message": "Command executed on server1", "request_id": "abc-123", "log_level": "INFO", "log_format_version": 1}
+```
+
+#### File Rotation
+
+File-based targets rotate when they exceed `max_file_size_mb` (default: 10 MiB), keeping `backup_count` backups (default: 5). Rotated files are gzip-compressed when `compress_rotated` is `true`.
 
 #### Configuration Change Events
 
