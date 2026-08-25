@@ -130,7 +130,10 @@ def _graceful_shutdown(state: SimpleNamespace, timeout: float) -> None:
         timeout: Maximum seconds to wait for in-flight SSH work before
                  force-cancelling the remainder.
     """
+    _log = logging.getLogger(__name__)
+    _log.debug("graceful_shutdown: entry — timeout=%.1f", timeout)
     if getattr(state, "_shutdown_done", False):
+        _log.debug("graceful_shutdown: already done, returning")
         return
     state._shutdown_done = True
 
@@ -192,6 +195,13 @@ def _run_server(
             precedence over the static *trusted_proxies* list.
     """
     import uvicorn
+
+    _log = logging.getLogger(__name__)
+    _log.debug(
+        "run_server: entry — rate_limiter=%s, trusted_proxies=%s",
+        rate_limiter is not None,
+        trusted_proxies,
+    )
 
     async def _serve() -> None:
         loop = asyncio.get_running_loop()
@@ -290,6 +300,12 @@ def create_app(
     Returns:
         A configured :class:`~fastmcp.FastMCP` server instance ready to serve.
     """
+    _factory_log = logging.getLogger(__name__)
+    _factory_log.debug(
+        "create_app: entry — config_dir=%s, ssh_key_path=%s, log_dir=%s, "
+        "max_command_output=%d, fix_permissions=%s",
+        config_dir, ssh_key_path, log_dir, max_command_output, fix_permissions,
+    )
     mcp = FastMCP(
         APP_NAME,
         instructions=(
@@ -301,6 +317,7 @@ def create_app(
     # --- Initialize structured logger ---
     file_logger = FileLogger(log_dir)
     stdlib_logger = logging.getLogger(__name__)
+    stdlib_logger.debug("create_app: logger initialized")
 
     # --- Initialize configuration manager with graceful fallback ---
     try:
@@ -586,6 +603,7 @@ def create_app(
 
     atexit.register(_shutdown)
 
+    _factory_log.debug("create_app: exit — returning FastMCP instance")
     return mcp
 
 
@@ -612,6 +630,9 @@ def _register_tools(
     dependencies from *this* function's parameters — no module-level
     global access.
     """
+    stdlib_logger.debug(
+        "register_tools: entry — max_command_output=%d", max_command_output
+    )
 
     # ------------------------------------------------------------------
     # Internal helpers (closures over the DI parameters)
@@ -633,7 +654,11 @@ def _register_tools(
             .get("api_keys", [])
         ):
             if verify_api_key(api_key, entry["key_hash"]):
+                stdlib_logger.debug(
+                    "lookup_api_key_name: matched key name=%s", entry["name"]
+                )
                 return entry["name"]
+        stdlib_logger.debug("lookup_api_key_name: no match found")
         return "unknown"
 
     def _build_auth_target(target_name: str) -> tuple[dict, str | None]:
@@ -643,6 +668,9 @@ def _register_tools(
         target) to the structured auth dict expected by
         :meth:`SSHClientManager.get_client`.
         """
+        stdlib_logger.debug(
+            "build_auth_target: entry — target_name=%s", target_name
+        )
         target = config_manager.get_ssh_target(target_name)
         if target is None:
             available = ", ".join(config_manager.list_ssh_targets())
@@ -675,6 +703,13 @@ def _register_tools(
                 f"nor a password"
             )
 
+        stdlib_logger.debug(
+            "build_auth_target: exit — host=%s, port=%s, username=%s, auth_type=%s",
+            auth_target.get("host"),
+            auth_target.get("port"),
+            auth_target.get("username"),
+            auth_target.get("auth", {}).get("type"),
+        )
         return auth_target, password
 
     # ------------------------------------------------------------------
@@ -698,6 +733,10 @@ def _register_tools(
             logging the denial or success message and returning early on
             denial.
         """
+        stdlib_logger.debug(
+            "authorize_command: entry — target_name=%s, command=%s, sudo=%s",
+            target_name, command, sudo,
+        )
         command = sanitize_command(command)
         target_name = sanitize_target_name(target_name)
 
@@ -730,6 +769,10 @@ def _register_tools(
             "log_level": "INFO",
             "log_format_version": LOG_FORMAT_VERSION,
         }
+        stdlib_logger.debug(
+            "authorize_command: exit — allowed=%s, matched_via=%s, reason=%s",
+            auth_result.allowed, auth_result.matched_via, auth_result.reason,
+        )
         return auth_result, log_entry
 
     def _authorize_file_op(
@@ -750,6 +793,10 @@ def _register_tools(
         Returns:
             ``(auth_result, log_entry)``.
         """
+        stdlib_logger.debug(
+            "authorize_file_op: entry — target_name=%s, verb=%s, remote_path=%s, event_type=%s",
+            target_name, verb, remote_path, event_type,
+        )
         target_name = sanitize_target_name(target_name)
         remote_path_display = sanitize_log_string(remote_path)
 
@@ -780,6 +827,10 @@ def _register_tools(
             "log_level": "INFO",
             "log_format_version": LOG_FORMAT_VERSION,
         }
+        stdlib_logger.debug(
+            "authorize_file_op: exit — allowed=%s, matched_via=%s, reason=%s",
+            auth_result.allowed, auth_result.matched_via, auth_result.reason,
+        )
         return auth_result, log_entry
 
     @staticmethod
@@ -796,6 +847,11 @@ def _register_tools(
         Returns:
             ``(stdout, stderr, exit_code)``.
         """
+        _log = logging.getLogger(__name__)
+        _log.debug(
+            "execute_ssh_command: entry — command=%s, timeout=%d, sudo=%s",
+            actual_command, timeout, sudo,
+        )
         try:
             stdin, stdout, stderr = client.exec_command(
                 actual_command, timeout=timeout
@@ -807,6 +863,10 @@ def _register_tools(
             out = stdout.read(max_output).decode("utf-8", errors="replace")
             err = stderr.read(max_output).decode("utf-8", errors="replace")
             exit_code = stdout.channel.recv_exit_status()
+            _log.debug(
+                "execute_ssh_command: exit — exit_code=%d, stdout_len=%d, stderr_len=%d",
+                exit_code, len(out), len(err),
+            )
             return out, err, exit_code
         except socket.timeout as exc:
             raise SSHTimeoutError(
@@ -844,6 +904,10 @@ def _register_tools(
         the configured truncation limit.
         """
         elapsed_ms = int((time.monotonic() - start_time) * 1000)
+        stdlib_logger.debug(
+            "finish_log_entry: tool=%s, exit_code=%d, elapsed_ms=%d",
+            tool_name, exit_code, elapsed_ms,
+        )
         log_entry["execution_time_ms"] = elapsed_ms
         log_entry["exit_code"] = exit_code
         if output is not None:
@@ -897,6 +961,7 @@ def _register_tools(
         Returns JSON with server IDs and their connection details
         (without secrets).
         """
+        stdlib_logger.debug("ssh_list_servers entry")
         targets = config_manager.list_ssh_targets()
         result = {}
         for tid in targets:
@@ -906,6 +971,11 @@ def _register_tools(
                 "port": t.get("port", DEFAULT_SSH_PORT),
                 "username": t["username"],
             }
+        stdlib_logger.debug(
+            "ssh_list_servers exit: target_count=%d targets=%s",
+            len(result),
+            list(result.keys()),
+        )
         return json.dumps(result, indent=2)
 
     @mcp.tool(annotations=ToolAnnotations(
@@ -934,6 +1004,10 @@ def _register_tools(
             JSON-formatted list of allowed command base names, or error
             message
         """
+        stdlib_logger.debug(
+            "ssh_list_allowed_commands entry: server_name=%s",
+            server_name,
+        )
         target_name = sanitize_target_name(server_name)
         source_ip = get_client_ip()
         api_key = get_api_key()
@@ -944,7 +1018,13 @@ def _register_tools(
             api_key=api_key,
         )
 
-        return json.dumps(commands)
+        result = json.dumps(commands)
+        stdlib_logger.debug(
+            "ssh_list_allowed_commands exit: target=%s command_count=%d",
+            target_name,
+            len(commands),
+        )
+        return result
 
     @mcp.tool(annotations=ToolAnnotations(
         readOnlyHint=False,
@@ -958,8 +1038,7 @@ def _register_tools(
         timeout: int = 30,
         sudo: bool = False,
     ) -> str:
-        """
-        Execute a command on a remote SSH server.
+        """Execute a command on a remote SSH server.
 
         The command is validated against the layered authorization chain:
         block_patterns -> default -> API key -> network -> deny.
@@ -982,6 +1061,14 @@ def _register_tools(
             Command output (stdout + stderr combined) or auth denial
             reason
         """
+        stdlib_logger.debug(
+            "ssh_execute_command entry: server_name=%s command=%s "
+            "timeout=%d sudo=%s",
+            server_name,
+            command,
+            timeout,
+            sudo,
+        )
         # --- Sanitize command before any validation/auth/eval ---
         command = sanitize_command(command)
         target_name = sanitize_target_name(server_name)
@@ -1071,6 +1158,15 @@ def _register_tools(
         try:
             def _ssh_operation() -> str:
                 auth_target, sudo_password = _build_auth_target(target_name)
+                stdlib_logger.debug(
+                    "ssh_execute_command remote exec: target=%s "
+                    "host=%s:%s command=%s sudo=%s",
+                    target_name,
+                    auth_target.get("host"),
+                    auth_target.get("port"),
+                    command,
+                    sudo,
+                )
                 with ssh_client_manager.connect(auth_target) as client:
                     actual_command = SudoHandler.wrap_sudo_command(
                         command, sudo, sudo_password
@@ -1086,7 +1182,13 @@ def _register_tools(
                     return _format_execution_result(
                         out, err, exit_code, max_output
                     )
-            return ssh_executor.submit(_ssh_operation).result()
+            result = ssh_executor.submit(_ssh_operation).result()
+            stdlib_logger.debug(
+                "ssh_execute_command exit: target=%s command=%s",
+                target_name,
+                command,
+            )
+            return result
         except SSHAuthenticationError as e:
             _finish_log_entry(log_entry, start_time, -1, "ssh_execute_command")
             return json.dumps(_format_error(e))
@@ -1129,6 +1231,11 @@ def _register_tools(
         Returns:
             JSON with success, output, error, exit_code, and checkcommand
         """
+        stdlib_logger.debug(
+            "ssh_check_connection entry: server_name=%s timeout=%d",
+            server_name,
+            timeout,
+        )
         target_name = sanitize_target_name(server_name)
 
         # Resolve timeout
@@ -1187,7 +1294,13 @@ def _register_tools(
                         "checkcommand": checkcommand,
                     }
                     return json.dumps(result)
-            return ssh_executor.submit(_ssh_operation).result()
+            result = ssh_executor.submit(_ssh_operation).result()
+            stdlib_logger.debug(
+                "ssh_check_connection exit: target=%s checkcommand=%s",
+                target_name,
+                checkcommand,
+            )
+            return result
         except SSHAuthenticationError as e:
             _finish_log_entry(log_entry, start_time, -1, "ssh_check_connection")
             return json.dumps(_format_error(e))
@@ -1229,6 +1342,11 @@ def _register_tools(
         Returns:
             File contents as a string, or auth denial reason
         """
+        stdlib_logger.debug(
+            "ssh_download_file entry: server_name=%s remote_path=%s",
+            server_name,
+            remote_path,
+        )
         target_name = sanitize_target_name(server_name)
 
         auth_result, log_entry = _authorize_file_op(
@@ -1288,6 +1406,14 @@ def _register_tools(
         try:
             def _ssh_operation() -> str:
                 auth_target, _ = _build_auth_target(target_name)
+                stdlib_logger.debug(
+                    "ssh_download_file remote exec: target=%s "
+                    "host=%s:%s remote_path=%s",
+                    target_name,
+                    auth_target.get("host"),
+                    auth_target.get("port"),
+                    remote_path,
+                )
                 with ssh_client_manager.connect(auth_target) as client:
                     _filename, content_bytes = (
                         file_transfer_service.download_file(
@@ -1301,7 +1427,15 @@ def _register_tools(
                         log_entry, start_time, 0, "ssh_download_file"
                     )
                     return content
-            return ssh_executor.submit(_ssh_operation).result()
+            result = ssh_executor.submit(_ssh_operation).result()
+            stdlib_logger.debug(
+                "ssh_download_file exit: target=%s remote_path=%s "
+                "content_length=%d",
+                target_name,
+                remote_path,
+                len(result),
+            )
+            return result
         except SSHAuthenticationError as e:
             _finish_log_entry(log_entry, start_time, -1, "ssh_download_file")
             return json.dumps(_format_error(e))
@@ -1352,6 +1486,14 @@ def _register_tools(
         Returns:
             Success message or auth denial reason
         """
+        stdlib_logger.debug(
+            "ssh_upload_file entry: server_name=%s remote_path=%s "
+            "content_length=%d permissions=%s",
+            server_name,
+            remote_path,
+            len(content),
+            permissions,
+        )
         target_name = sanitize_target_name(server_name)
 
         auth_result, log_entry = _authorize_file_op(
@@ -1411,6 +1553,17 @@ def _register_tools(
         try:
             def _ssh_operation() -> str:
                 auth_target, _ = _build_auth_target(target_name)
+                stdlib_logger.debug(
+                    "ssh_upload_file remote exec: target=%s "
+                    "host=%s:%s remote_path=%s content_length=%d "
+                    "permissions=%s",
+                    target_name,
+                    auth_target.get("host"),
+                    auth_target.get("port"),
+                    remote_path,
+                    len(content),
+                    permissions,
+                )
                 with ssh_client_manager.connect(auth_target) as client:
                     content_bytes = content.encode("utf-8")
                     file_transfer_service.upload_file(
@@ -1428,7 +1581,13 @@ def _register_tools(
                         f"OK: Uploaded {len(content_bytes)} bytes to "
                         f"{remote_path}"
                     )
-            return ssh_executor.submit(_ssh_operation).result()
+            result = ssh_executor.submit(_ssh_operation).result()
+            stdlib_logger.debug(
+                "ssh_upload_file exit: target=%s remote_path=%s",
+                target_name,
+                remote_path,
+            )
+            return result
         except SSHAuthenticationError as e:
             _finish_log_entry(log_entry, start_time, -1, "ssh_upload_file")
             return json.dumps(_format_error(e))
@@ -1520,10 +1679,14 @@ def main() -> None:
         help="Print the generated default configuration as JSON to stdout and exit",
     )
 
+    logging.getLogger(__name__).debug("main entry")
     args = parser.parse_args()
 
     if args.print_default_config:
         print(json.dumps(build_default_config(), indent=2))
+        logging.getLogger(__name__).debug(
+            "main exit (--print-default-config)"
+        )
         return
 
     app = create_app(
@@ -1545,6 +1708,11 @@ def main() -> None:
         settings = config_manager.data.get("settings", {})
         return settings.get("trusted_proxies", DEFAULT_TRUSTED_PROXIES)
 
+    logging.getLogger(__name__).debug(
+        "main: launching server with config_dir=%s log_dir=%s",
+        args.config,
+        args.log_dir,
+    )
     _run_server(
         app,
         rate_limiter=rate_limiter,

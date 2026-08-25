@@ -1,9 +1,12 @@
 """SFTP file transfer service for upload and download operations."""
 
+import logging
 import os
 import re
 import urllib.parse
 from typing import Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 import paramiko
 
@@ -206,6 +209,7 @@ class FileTransferService:
                                or file exceeds size limit.
             paramiko.SSHException: On SFTP/connection errors.
         """
+        logger.debug("download_file entry: remote_path=%s", remote_path)
         remote_path = self._validate_path(remote_path)
 
         sftp = ssh_client.open_sftp()
@@ -227,6 +231,10 @@ class FileTransferService:
             sftp.close()
 
         filename = os.path.basename(remote_path)
+        logger.debug(
+            "download_file exit: filename=%s, content_length=%d",
+            filename, len(content),
+        )
         return filename, content
 
     def upload_file(
@@ -243,6 +251,7 @@ class FileTransferService:
             FileTransferError: If path validation fails or content exceeds limit.
             paramiko.SSHException: On SFTP/connection errors.
         """
+        logger.debug("upload_file entry: remote_path=%s, content_length=%d", remote_path, len(content))
         remote_path = self._validate_path(remote_path)
 
         if len(content) > self.max_file_size_bytes:
@@ -257,3 +266,4 @@ class FileTransferService:
                 f.write(content)
         finally:
             sftp.close()
+        logger.debug("upload_file exit: remote_path=%s, success", remote_path)

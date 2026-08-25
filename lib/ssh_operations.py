@@ -11,11 +11,14 @@ I/O at import time) following the project's closure-based DI pattern.
 
 from __future__ import annotations
 
+import logging
 import os
 import socket
 from typing import Any
 
 import paramiko
+
+logger = logging.getLogger(__name__)
 
 from lib.config import ConfigManager
 from lib.constants import (
@@ -61,6 +64,7 @@ def build_auth_target(
         SSHConnectionError: When the target is not found, or has neither
             a valid key nor a password.
     """
+    logger.debug("build_auth_target entry: target_name=%s", target_name)
     target = config_manager.get_ssh_target(target_name)
     if target is None:
         available = ", ".join(config_manager.list_ssh_targets())
@@ -93,6 +97,11 @@ def build_auth_target(
             f"nor a password"
         )
 
+    logger.debug(
+        "build_auth_target exit: host=%s, port=%s, auth_type=%s",
+        auth_target.get("host"), auth_target.get("port"),
+        auth_target.get("auth", {}).get("type"),
+    )
     return auth_target, password
 
 
@@ -120,6 +129,10 @@ def execute_ssh_command(
     Raises:
         SSHTimeoutError: When the command times out.
     """
+    logger.debug(
+        "execute_ssh_command entry: command=%s, timeout=%d, sudo=%s",
+        command, timeout, sudo,
+    )
     try:
         stdin, stdout, stderr = client.exec_command(
             command, timeout=timeout
@@ -131,6 +144,10 @@ def execute_ssh_command(
         out = stdout.read(max_output).decode("utf-8", errors="replace")
         err = stderr.read(max_output).decode("utf-8", errors="replace")
         exit_code = stdout.channel.recv_exit_status()
+        logger.debug(
+            "execute_ssh_command exit: exit_code=%d, stdout_len=%d, stderr_len=%d",
+            exit_code, len(out), len(err),
+        )
         return out, err, exit_code
     except socket.timeout as exc:
         raise SSHTimeoutError(
@@ -186,6 +203,10 @@ def check_ssh_connection(
 
     checkcommand = target.get("checkcommand", DEFAULT_CHECK_COMMAND)
 
+    logger.debug(
+        "check_ssh_connection entry: target_name=%s, timeout=%d",
+        target_name, timeout,
+    )
     # Build the auth target and connect
     auth_target, _ = build_auth_target(config_manager, target_name, ssh_key_path)
     with ssh_client_manager.connect(auth_target) as client:
@@ -198,10 +219,15 @@ def check_ssh_connection(
             sudo_password=None,
         )
 
-    return {
+    result: CheckConnectionResult = {
         "success": exit_code == 0,
         "output": out.strip(),
         "error": err.strip() if err else None,
         "exit_code": exit_code,
         "checkcommand": checkcommand,
     }
+    logger.debug(
+        "check_ssh_connection exit: target_name=%s, success=%s, exit_code=%d",
+        target_name, result["success"], exit_code,
+    )
+    return result

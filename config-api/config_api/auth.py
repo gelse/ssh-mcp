@@ -11,10 +11,13 @@ subsequent reads by verify_token().
 from __future__ import annotations
 
 import hmac
+import logging
 import os
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
+logger = logging.getLogger(__name__)
 
 _token: str | None = None
 
@@ -30,6 +33,7 @@ def load_token() -> str:
     Returns:
         The loaded token string.
     """
+    logger.debug("load_token entry")
     global _token
     token = os.environ.get("CONFIG_API_TOKEN", "").strip()
     if not token:
@@ -37,6 +41,7 @@ def load_token() -> str:
             "CONFIG_API_TOKEN environment variable is required but not set"
         )
     _token = token
+    logger.debug("load_token exit: token loaded (length=%d)", len(token))
     return token
 
 
@@ -50,7 +55,9 @@ def get_token() -> str:
         The token string.
     """
     if _token is None:
+        logger.debug("get_token: token not loaded")
         raise RuntimeError("Token not loaded — call load_token() first")
+    logger.debug("get_token exit: token retrieved (length=%d)", len(_token))
     return _token
 
 
@@ -71,13 +78,16 @@ async def verify_token(
     Raises:
         HTTPException: 401 if the token is invalid.
     """
+    logger.debug("verify_token entry")
     expected = get_token()
     provided = credentials.credentials
 
     if not hmac.compare_digest(expected, provided):
+        logger.debug("verify_token: token mismatch, rejecting")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing authentication token",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    logger.debug("verify_token exit: token validated")
     return provided

@@ -26,8 +26,11 @@ from config_api.routes import init_config_service, router
 
 async def _periodic_cleanup(svc: ConfigService) -> None:
     """Run backup cleanup every hour."""
+    logger = logging.getLogger("config_api")
+    logger.debug("_periodic_cleanup: starting periodic cleanup loop")
     while True:
         await asyncio.sleep(3600)  # 1 hour
+        logger.debug("_periodic_cleanup: running cleanup")
         try:
             deleted = svc.cleanup_old_backups()
             if deleted:
@@ -43,10 +46,13 @@ async def _periodic_cleanup(svc: ConfigService) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # type: ignore[type-arg]
     """Manage background tasks during app lifecycle."""
+    logger = logging.getLogger("config_api")
+    logger.debug("lifespan entry: starting background tasks")
     # Start background cleanup task
     svc: ConfigService = app.state.config_service
     task = asyncio.create_task(_periodic_cleanup(svc))
     yield
+    logger.debug("lifespan exit: cancelling background tasks")
     # Cancel on shutdown
     task.cancel()
     try:
@@ -74,6 +80,11 @@ def create_app(
     Returns:
         Configured FastAPI application instance.
     """
+    logger = logging.getLogger("config_api")
+    logger.debug(
+        "create_app entry: config_dir=%s, ssh_client_manager=%s",
+        config_dir, type(ssh_client_manager).__name__ if ssh_client_manager else None,
+    )
     app = FastAPI(
         title="MCP SSH Config API",
         description="REST API for managing SSH MCP server configuration",
@@ -113,4 +124,5 @@ def create_app(
     if _ui_dir.is_dir():
         app.mount("/ui", StaticFiles(directory=str(_ui_dir), html=True), name="ui")
 
+    logger.debug("create_app exit: app created with routes mounted")
     return app

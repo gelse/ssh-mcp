@@ -2,12 +2,15 @@
 
 import hashlib
 import json
+import logging
 import os
 import random
 import socket
 import time
 from contextlib import contextmanager
 from typing import Any, Dict, Generator
+
+logger = logging.getLogger(__name__)
 
 import paramiko
 from paramiko import SSHClient, Ed25519Key, RSAKey, AutoAddPolicy
@@ -126,6 +129,7 @@ class SSHClientManager:
             ValueError: If the key format cannot be determined.
             FileNotFoundError: If the key file does not exist.
         """
+        logger.debug("_load_ssh_key entry: key_path=%s", key_path)
         with open(key_path) as f:
             header = f.readline().strip().strip("-")
 
@@ -134,7 +138,9 @@ class SSHClientManager:
             raise ValueError(f"Unsupported key format in {key_path}: {header}")
 
         with open(key_path) as f:
-            return loader(f)
+            key = loader(f)
+        logger.debug("_load_ssh_key exit: key_path=%s, loaded successfully", key_path)
+        return key
 
     @staticmethod
     def _target_name(target: Dict[str, Any]) -> str:
@@ -213,6 +219,10 @@ class SSHClientManager:
 
     def _connect_once(self, target: Dict[str, Any]) -> SSHClient:
         """Create and connect a client in a single attempt (no retries)."""
+        logger.debug(
+            "_connect_once entry: host=%s, port=%s, username=%s",
+            target.get("host"), target.get("port"), target.get("username"),
+        )
         client = SSHClient()
         client.set_missing_host_key_policy(AutoAddPolicy())
 
@@ -237,6 +247,10 @@ class SSHClientManager:
             raise ValueError(f"Unsupported auth type: {auth['type']}")
 
         client.connect(**connect_kwargs)
+        logger.debug(
+            "_connect_once exit: host=%s, connected successfully",
+            target.get("host"),
+        )
         return client
 
     def get_client(self, target: Dict[str, Any]) -> SSHClient:
@@ -261,9 +275,19 @@ class SSHClientManager:
             paramiko.SSHException: On connection or authentication failure.
             ValueError: If auth type is unsupported.
         """
+        logger.debug(
+            "get_client entry: host=%s, port=%s, username=%s, max_attempts=%d",
+            target.get("host"), target.get("port"), target.get("username"),
+            self._retry_max_attempts,
+        )
         for attempt in range(self._retry_max_attempts):
             try:
-                return self._connect_once(target)
+                client = self._connect_once(target)
+                logger.debug(
+                    "get_client exit: host=%s, attempt=%d, success",
+                    target.get("host"), attempt + 1,
+                )
+                return client
             except (SSHTimeoutError, socket.timeout, TimeoutError, ConnectionError,
                     OSError, paramiko.SSHException) as exc:
                 if not self._is_transient(exc):
@@ -303,6 +327,10 @@ class SSHClientManager:
                 paramiko or the OS, or when the circuit breaker is open.
         """
         target_name = self._target_name(target)
+        logger.debug(
+            "connect entry: target=%s, host=%s, port=%s",
+            target_name, target.get("host"), target.get("port"),
+        )
         if not self._circuit_breaker(target_name):
             raise SSHConnectionError(
                 f"SSH connection to {target.get('host', 'unknown')} "
@@ -322,6 +350,7 @@ class SSHClientManager:
             SSH_CONNECTION_DURATION_SECONDS.labels(
                 target=target_name
             ).observe(time.monotonic() - connect_started)
+            logger.debug("connect: yielding client for target=%s", target_name)
             yield client
         except paramiko.AuthenticationException as exc:
             self._log_lifecycle("ssh.connect", target, target_name, success=False)
@@ -346,6 +375,7 @@ class SSHClientManager:
         else:
             self._circuit_breaker.record_success(target_name)
         finally:
+            logger.debug("connect exit: target=%s", target_name)
             if client is not None:
                 self._return_to_pool(target, target_name, client)
 
