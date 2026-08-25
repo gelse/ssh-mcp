@@ -229,6 +229,7 @@ SETTING_KEY_TYPES: dict[str, str] = {
     "circuit_breaker_failure_threshold": "int",
     "circuit_breaker_timeout_seconds": "float",
     "log_level": "str",
+    "logging": "dict",
     "max_log_output": "int",
     "compress_rotated": "bool",
     "pool_max_connections_per_target": "int",
