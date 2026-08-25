@@ -355,19 +355,19 @@
                   }
                 ]
               }
-            },
-            "max_log_output": {
-              "description": "Maximum number of output characters stored in a log entry. Applied to all targets that support output truncation.",
-              "type": "integer",
-              "minimum": 1,
-              "default": 4096
-            },
-            "compress_rotated": {
-              "description": "Whether rotated log files are gzip-compressed. Applied to file-based targets.",
-              "type": "boolean",
-              "default": true
             }
           }
+        },
+        "max_log_output": {
+          "description": "Maximum number of output characters stored in a log entry. Applied to all targets that support output truncation.",
+          "type": "integer",
+          "minimum": 1,
+          "default": 4096
+        },
+        "compress_rotated": {
+          "description": "Whether rotated log files are gzip-compressed. Applied to file-based targets.",
+          "type": "boolean",
+          "default": true
         },
         "pool_max_connections_per_target": {
           "description": "Maximum number of idle connections kept per SSH target.",
