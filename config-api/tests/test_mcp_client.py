@@ -342,19 +342,22 @@ class TestMCPClient:
         with patch("config_api.mcp_client.httpx.Client") as MockHTTP:
             MockHTTP.return_value = mock_http
 
-            # First call triggers init (id=1) + notif + tool call (id=3)
+            # First call triggers init (id=1) + notif (no id) + tool call (id=2)
             client.call_tool("ssh_check_connection")
-            # Second call is just tool call (id=4)
+            # Second call is just tool call (id=3)
             client.call_tool("ssh_check_connection")
-            # Third call is just tool call (id=5)
+            # Third call is just tool call (id=4)
             client.call_tool("ssh_check_connection")
 
         calls = mock_http.post.call_args_list
-        # ids: 1 (init), 2 (notif), 3 (tool1), 4 (tool2), 5 (tool3)
+        # Notifications (e.g. notifications/initialized) carry no id per
+        # JSON-RPC 2.0, so they do not consume the request-id counter.
+        # ids: 1 (init), [nothing: notif], 2 (tool1), 3 (tool2), 4 (tool3)
+        assert "id" not in calls[1][1]["json"]  # notification has no id
         assert calls[0][1]["json"]["id"] == 1  # initialize
-        assert calls[2][1]["json"]["id"] == 3  # first tool call
-        assert calls[3][1]["json"]["id"] == 4  # second tool call
-        assert calls[4][1]["json"]["id"] == 5  # third tool call
+        assert calls[2][1]["json"]["id"] == 2  # first tool call
+        assert calls[3][1]["json"]["id"] == 3  # second tool call
+        assert calls[4][1]["json"]["id"] == 4  # third tool call
 
     def test_session_id_sent_on_tool_call(self) -> None:
         """The mcp-session-id header is included on tool call requests."""
