@@ -86,11 +86,11 @@ async def health() -> HealthResponse:
 
 
 # ---------------------------------------------------------------------------
-# GET /api/config — full config
+# GET /config — full config
 # ---------------------------------------------------------------------------
 
 
-@router.get("/api/config")
+@router.get("/config")
 async def get_config(
     token: str = Depends(verify_token),
     svc: ConfigService = Depends(get_config_service),
@@ -126,7 +126,7 @@ async def get_config(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/api/hash-key")
+@router.post("/hash-key")
 async def hash_key(
     request: Request,
     token: str = Depends(verify_token),
@@ -182,7 +182,7 @@ _SCHEMA_PATH: Path | None = next(
 _schema_cache: dict | None = None
 
 
-@router.get("/api/config/schema")
+@router.get("/config/schema")
 async def get_config_schema() -> JSONResponse:
     """Return the config JSON Schema.  No authentication required."""
     global _schema_cache  # noqa: PLW0603
@@ -202,7 +202,7 @@ async def get_config_schema() -> JSONResponse:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/api/config/validate")
+@router.post("/config/validate")
 async def validate_config(
     request: Request,
     token: str = Depends(verify_token),
@@ -256,7 +256,7 @@ async def validate_config(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/api/config/ssh_targets/{name}")
+@router.get("/config/ssh_targets/{name}")
 async def get_ssh_target(
     name: str,
     token: str = Depends(verify_token),
@@ -289,7 +289,7 @@ async def get_ssh_target(
 # ---------------------------------------------------------------------------
 
 
-@router.put("/api/config/ssh_targets/{name}")
+@router.put("/config/ssh_targets/{name}")
 async def put_ssh_target(
     name: str,
     request: Request,
@@ -344,7 +344,7 @@ async def put_ssh_target(
 # ---------------------------------------------------------------------------
 
 
-@router.delete("/api/config/ssh_targets/{name}")
+@router.delete("/config/ssh_targets/{name}")
 async def delete_ssh_target(
     name: str,
     token: str = Depends(verify_token),
@@ -380,7 +380,7 @@ async def delete_ssh_target(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/api/config/ssh_targets/{name}/check")
+@router.post("/config/ssh_targets/{name}/check")
 async def check_ssh_target(
     name: str,
     token: str = Depends(verify_token),
@@ -425,7 +425,7 @@ async def check_ssh_target(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/api/config/block_patterns")
+@router.post("/config/block_patterns")
 async def append_block_pattern(
     request: Request,
     token: str = Depends(verify_token),
@@ -476,7 +476,7 @@ async def append_block_pattern(
 # ---------------------------------------------------------------------------
 
 
-@router.put("/api/config/block_patterns")
+@router.put("/config/block_patterns")
 async def replace_block_patterns(
     request: Request,
     token: str = Depends(verify_token),
@@ -526,7 +526,7 @@ async def replace_block_patterns(
 # ---------------------------------------------------------------------------
 
 
-@router.put("/api/config/block_patterns/{index}")
+@router.put("/config/block_patterns/{index}")
 async def put_block_pattern(
     index: int,
     request: Request,
@@ -586,7 +586,7 @@ async def put_block_pattern(
 # ---------------------------------------------------------------------------
 
 
-@router.delete("/api/config/block_patterns/{index}")
+@router.delete("/config/block_patterns/{index}")
 async def delete_block_pattern(
     index: int,
     token: str = Depends(verify_token),
@@ -615,7 +615,7 @@ async def delete_block_pattern(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/api/backups")
+@router.get("/backups")
 async def list_backups(
     token: str = Depends(verify_token),
     svc: ConfigService = Depends(get_config_service),
@@ -642,7 +642,7 @@ async def list_backups(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/api/backups/{name}/restore")
+@router.post("/backups/{name}/restore")
 async def restore_backup(
     name: str,
     token: str = Depends(verify_token),
@@ -697,7 +697,7 @@ async def restore_backup(
 # ---------------------------------------------------------------------------
 
 
-@router.delete("/api/backups/{name}")
+@router.delete("/backups/{name}")
 async def delete_backup(
     name: str,
     token: str = Depends(verify_token),
@@ -730,7 +730,7 @@ async def delete_backup(
 # ---------------------------------------------------------------------------
 
 
-@router.put("/api/config")
+@router.put("/config")
 async def put_config(
     request: Request,
     token: str = Depends(verify_token),
@@ -800,7 +800,7 @@ async def put_config(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/api/config/{section}")
+@router.get("/config/{section}")
 async def get_config_section(
     section: str,
     token: str = Depends(verify_token),
@@ -854,7 +854,7 @@ async def get_config_section(
 # ---------------------------------------------------------------------------
 
 
-@router.put("/api/config/{section}")
+@router.put("/config/{section}")
 async def put_config_section(
     section: str,
     request: Request,

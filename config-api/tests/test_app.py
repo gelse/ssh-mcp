@@ -116,15 +116,15 @@ class TestCreateApp:
         assert data["status"] == "ok"
 
     def test_api_config_endpoint_requires_auth(self, tmp_path: Path) -> None:
-        """The /api/config endpoint requires Bearer token auth."""
+        """The /config endpoint requires Bearer token auth."""
         _write_config(tmp_path, _minimal_config())
         app = create_app(config_dir=str(tmp_path))
         client = TestClient(app)
-        response = client.get("/api/config")
+        response = client.get("/config")
         assert response.status_code == 401  # HTTPBearer returns 401 when missing
 
     def test_api_config_endpoint_with_valid_token(self, tmp_path: Path) -> None:
-        """The /api/config endpoint returns config with a valid token."""
+        """The /config endpoint returns config with a valid token."""
         _write_config(tmp_path, _minimal_config())
         # Set token in the auth module
         from config_api import auth as auth_mod
@@ -134,7 +134,7 @@ class TestCreateApp:
         app = create_app(config_dir=str(tmp_path))
         client = TestClient(app)
         response = client.get(
-            "/api/config",
+            "/config",
             headers={"Authorization": "Bearer test-token-123"},
         )
         assert response.status_code == 200
@@ -160,8 +160,8 @@ class TestCreateApp:
         # /health should respond without auth
         health_resp = client.get("/health")
         assert health_resp.status_code == 200
-        # /api/config should exist (returns 401 without token)
-        config_resp = client.get("/api/config")
+        # /config should exist (returns 401 without token)
+        config_resp = client.get("/config")
         assert config_resp.status_code == 401
 
     def test_ui_spa_served_at_slash_ui(self, tmp_path: Path) -> None:
@@ -186,9 +186,9 @@ class TestCreateApp:
         assert "<title>" in resp.text
 
     def test_api_routes_not_intercepted_by_ui(self, tmp_path: Path) -> None:
-        """/api/config still requires auth — the UI mount does not shadow it."""
+        """/config still requires auth — the UI mount does not shadow it."""
         _write_config(tmp_path, _minimal_config())
         app = create_app(config_dir=str(tmp_path))
         client = TestClient(app)
-        resp = client.get("/api/config")
+        resp = client.get("/config")
         assert resp.status_code == 401

@@ -2201,11 +2201,11 @@ class TestConfigApiEnabled:
     ):
         """GET config with valid Bearer token returns the configuration.
 
-        The config API router defines ``/api/config`` and is mounted at
+        The config API router defines ``/config`` and is mounted at
         ``/api`` on the Starlette app, so the effective path is
-        ``/api/api/config``.
+        ``/api/config``.
         """
-        req = urllib.request.Request(f"{config_api_url}/api/api/config")
+        req = urllib.request.Request(f"{config_api_url}/api/config")
         for key, value in config_api_auth_headers.items():
             req.add_header(key, value)
         with urllib.request.urlopen(req, timeout=5.0) as resp:
@@ -2217,7 +2217,7 @@ class TestConfigApiEnabled:
 
     def test_config_api_get_config_without_auth(self, config_api_url: str):
         """GET config without Bearer token returns 401 or 403."""
-        req = urllib.request.Request(f"{config_api_url}/api/api/config")
+        req = urllib.request.Request(f"{config_api_url}/api/config")
         try:
             with urllib.request.urlopen(req, timeout=5.0) as resp:
                 # Some implementations may return 200 if auth is bypassed
@@ -2229,10 +2229,10 @@ class TestConfigApiEnabled:
     def test_config_api_schema_no_auth(self, config_api_url: str):
         """GET config schema returns the JSON Schema without auth.
 
-        The router defines ``/api/config/schema`` and is mounted at ``/api``,
-        so the effective path is ``/api/api/config/schema``.
+        The router defines ``/config/schema`` and is mounted at ``/api``,
+        so the effective path is ``/api/config/schema``.
         """
-        req = urllib.request.Request(f"{config_api_url}/api/api/config/schema")
+        req = urllib.request.Request(f"{config_api_url}/api/config/schema")
         with urllib.request.urlopen(req, timeout=5.0) as resp:
             assert resp.status == 200
             body = json.loads(resp.read().decode())

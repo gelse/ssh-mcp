@@ -299,3 +299,100 @@ class TestConfigApiStarletteMount:
             assert len(mcp_routes) == 1
         finally:
             monkeypatch.undo()
+
+
+class TestConfigApiDispatch:
+    """Real ASGI request-dispatch tests for the config-api mount.
+
+    These tests build a minimal FastAPI sub-app (simulating the config-api
+    with prefix-free routes), mount it at ``/api`` on the Starlette app,
+    and send actual HTTP requests to verify the double-prefix bug is fixed.
+    """
+
+    def _build_sub_app(self) -> FastAPI:
+        """Return a minimal FastAPI sub-app with prefix-free routes."""
+        from fastapi.responses import JSONResponse
+
+        sub = FastAPI(title="Mock Config API")
+
+        @sub.get("/health")
+        async def health() -> JSONResponse:
+            return JSONResponse({"status": "ok"})
+
+        @sub.get("/config")
+        async def get_config() -> JSONResponse:
+            return JSONResponse({"ssh_targets": {}})
+
+        return sub
+
+    def test_api_config_returns_success(self, tmp_path: Path) -> None:
+        """GET /api/config on the mounted app returns 200, not 404."""
+        from starlette.routing import Mount
+        from starlette.testclient import TestClient
+
+        _write_config(tmp_path, _make_minimal_config())
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setenv("CONFIG_API_ENABLED", "false")
+        try:
+            sub_app = self._build_sub_app()
+
+            # Build a starlette app with just the mount
+            from starlette.applications import Starlette
+
+            starlette_app = Starlette(
+                routes=[Mount("/api", app=sub_app)],
+            )
+
+            client = TestClient(starlette_app)
+            resp = client.get("/api/config")
+            assert resp.status_code == 200
+            assert resp.json() == {"ssh_targets": {}}
+        finally:
+            monkeypatch.undo()
+
+    def test_api_health_returns_success(self, tmp_path: Path) -> None:
+        """GET /api/health on the mounted app returns 200."""
+        from starlette.routing import Mount
+        from starlette.testclient import TestClient
+
+        _write_config(tmp_path, _make_minimal_config())
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setenv("CONFIG_API_ENABLED", "false")
+        try:
+            sub_app = self._build_sub_app()
+
+            from starlette.applications import Starlette
+
+            starlette_app = Starlette(
+                routes=[Mount("/api", app=sub_app)],
+            )
+
+            client = TestClient(starlette_app)
+            resp = client.get("/api/health")
+            assert resp.status_code == 200
+            assert resp.json() == {"status": "ok"}
+        finally:
+            monkeypatch.undo()
+
+    def test_double_prefix_returns_404(self, tmp_path: Path) -> None:
+        """GET /api/api/config returns 404 — no double-prefix routing."""
+        from starlette.routing import Mount
+        from starlette.testclient import TestClient
+
+        _write_config(tmp_path, _make_minimal_config())
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setenv("CONFIG_API_ENABLED", "false")
+        try:
+            sub_app = self._build_sub_app()
+
+            from starlette.applications import Starlette
+
+            starlette_app = Starlette(
+                routes=[Mount("/api", app=sub_app)],
+            )
+
+            client = TestClient(starlette_app)
+            resp = client.get("/api/api/config")
+            assert resp.status_code == 404
+        finally:
+            monkeypatch.undo()
