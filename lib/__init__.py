@@ -9,8 +9,12 @@ from lib.command_security import (
     split_command_segments as segment_command_chunks,
     strip_redirects,
 )
+from lib.log_composite import CompositeLogger
+from lib.log_target_stdout import StdoutLogger
+from lib.log_target_textfile import TextFileLogger
+from lib.log_target_jsonfile import JsonFileLogger
+from lib.log_manager import LoggingManager
 from lib.constants import (
-    ACTIVE_LOG_FILENAME,
     ACTIVE_LOG_FILENAME,
     API_KEY_HASH_PREFIX,
     APP_NAME,
@@ -54,8 +58,11 @@ from lib.constants import (
     RESTRICTED_FILE_MODE,
     SECRETS_FILE_MODE,
     SETTING_KEY_TYPES,
+    DEFAULT_SSH_CHECK_TIMEOUT_MAX,
+    DEFAULT_SSH_CHECK_TIMEOUT_MIN,
     DEFAULT_SSH_PORT,
     DEFAULT_SSH_TIMEOUT_SECONDS,
+    MCP_SSH_LOG_LEVEL,
     DEFAULT_WATCHER_DEBOUNCE_SECONDS,
     DEFAULT_WATCHER_INTERVAL_SECONDS,
     PBKDF2_ALGO,
@@ -75,6 +82,12 @@ from lib.constants import (
     MAX_TARGET_NAME_LENGTH,
     MAX_TARGETS,
     TARGET_NAME_PATTERN,
+    DEFAULT_LOG_TARGETS,
+    LOG_TARGET_STDOUT,
+    LOG_TARGET_JSONFILE,
+    LOG_TARGET_TEXTFILE,
+    SUPPORTED_LOG_TARGETS,
+    DEFAULT_TEXT_LOG_FORMAT,
 )
 from lib.crypto import hash_api_key, verify_api_key
 from lib.exceptions import (
@@ -108,6 +121,11 @@ from lib.request_context import (
     RequestContextMiddleware,
 )
 from lib.ssh_client import SSHClientManager
+from lib.ssh_operations import (
+    build_auth_target,
+    check_ssh_connection,
+    execute_ssh_command,
+)
 from lib.sudo import SudoHandler
 from lib.sanitize import (
     sanitize_command,
@@ -118,6 +136,7 @@ from lib.sanitize import (
 from lib.types import (
     AllowedCommand,
     AllowedCommandsResult,
+    CheckConnectionResult,
     CommandError,
     CommandResult,
     FileDownloadResult,
@@ -129,6 +148,12 @@ from lib.types import (
 )
 
 __all__ = [
+    # Log targets
+    "CompositeLogger",
+    "LoggingManager",
+    "StdoutLogger",
+    "TextFileLogger",
+    "JsonFileLogger",
     # Input sanitization — path validation
     "validate_log_path",
     # Command security
@@ -219,6 +244,8 @@ __all__ = [
     "DEFAULT_SSH_PORT",
     "DEFAULT_SSH_TIMEOUT_SECONDS",
     "DEFAULT_CHECK_COMMAND",
+    "DEFAULT_SSH_CHECK_TIMEOUT_MAX",
+    "DEFAULT_SSH_CHECK_TIMEOUT_MIN",
     "DEFAULT_COMMAND_TIMEOUT_SECONDS",
     "DEFAULT_MAX_CONCURRENT_SSH_CONNECTIONS",
     "DEFAULT_MAX_OUTPUT_LENGTH",
@@ -247,11 +274,23 @@ __all__ = [
     "FALLBACK_CLIENT_IP",
     "DEFAULT_REQUEST_ID",
     "DEFAULT_TRUSTED_PROXIES",
+    "DEFAULT_LOG_TARGETS",
+    "LOG_TARGET_STDOUT",
+    "LOG_TARGET_JSONFILE",
+    "LOG_TARGET_TEXTFILE",
+    "SUPPORTED_LOG_TARGETS",
+    "DEFAULT_TEXT_LOG_FORMAT",
+    "MCP_SSH_LOG_LEVEL",
+    # SSH operations
+    "build_auth_target",
+    "check_ssh_connection",
+    "execute_ssh_command",
     # Types
     "ServerInfo",
     "ServerListResult",
     "AllowedCommand",
     "AllowedCommandsResult",
+    "CheckConnectionResult",
     "CommandResult",
     "CommandError",
     "FileDownloadResult",

@@ -9,7 +9,10 @@ JSON responses with appropriate HTTP status codes.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
@@ -39,10 +42,28 @@ router = APIRouter()
 _config_service: ConfigService | None = None
 
 
-def init_config_service(config_dir: str | None = None) -> ConfigService:
-    """Initialize the config service singleton.  Called once at startup."""
+def init_config_service(
+    config_dir: str | None = None,
+    *,
+    ssh_client_manager: object | None = None,
+    ssh_config_manager: object | None = None,
+    ssh_key_path: str | None = None,
+) -> ConfigService:
+    """Initialize the config service singleton.  Called once at startup.
+
+    Args:
+        config_dir: Path to the config directory.
+        ssh_client_manager: Optional SSHClientManager for unified mode.
+        ssh_config_manager: Optional ConfigManager for unified mode.
+        ssh_key_path: Optional path to the SSH key for unified mode.
+    """
     global _config_service
-    _config_service = ConfigService(config_dir)
+    _config_service = ConfigService(
+        config_dir,
+        ssh_client_manager=ssh_client_manager,
+        ssh_config_manager=ssh_config_manager,
+        ssh_key_path=ssh_key_path,
+    )
     return _config_service
 
 
@@ -64,15 +85,18 @@ def get_config_service() -> ConfigService:
 @router.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     """Liveness probe.  No authentication required."""
-    return HealthResponse(status="ok")
+    logger.debug("health entry")
+    result = HealthResponse(status="ok")
+    logger.debug("health exit: status=ok")
+    return result
 
 
 # ---------------------------------------------------------------------------
-# GET /api/config — full config
+# GET /config — full config
 # ---------------------------------------------------------------------------
 
 
-@router.get("/api/config")
+@router.get("/config")
 async def get_config(
     token: str = Depends(verify_token),
     svc: ConfigService = Depends(get_config_service),
@@ -82,6 +106,7 @@ async def get_config(
     Returns the raw JSON content of the config file without any
     secret merging or environment variable overrides.
     """
+    logger.debug("get_config entry")
     try:
         config = svc.read_config()
         return JSONResponse(content=svc._strip_secrets(config))
@@ -108,7 +133,7 @@ async def get_config(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/api/hash-key")
+@router.post("/hash-key")
 async def hash_key(
     request: Request,
     token: str = Depends(verify_token),
@@ -117,6 +142,7 @@ async def hash_key(
 
     Returns the PBKDF2 hash string suitable for storing in the config.
     """
+    logger.debug("hash_key entry")
     try:
         body = await request.json()
     except json.JSONDecodeError:
@@ -149,14 +175,31 @@ async def hash_key(
 # GET /api/config/schema — JSON Schema (no auth)
 # ---------------------------------------------------------------------------
 
-_SCHEMA_PATH = Path(__file__).resolve().parent.parent.parent / "config.schema.json"
+# In standalone mode the schema lives next to the config-api package
+# (3 levels up from routes.py), while in the unified container it is at
+# the app root (2 levels up).  Try both and fall back to the one that
+# exists.
+_schema_candidates = [
+    Path(__file__).resolve().parent.parent.parent / "config.schema.json",
+    Path(__file__).resolve().parent.parent / "config.schema.json",
+]
+_SCHEMA_PATH: Path | None = next(
+    (p for p in _schema_candidates if p.is_file()),
+    None,
+)
 _schema_cache: dict | None = None
 
 
-@router.get("/api/config/schema")
+@router.get("/config/schema")
 async def get_config_schema() -> JSONResponse:
     """Return the config JSON Schema.  No authentication required."""
+    logger.debug("get_config_schema entry")
     global _schema_cache  # noqa: PLW0603
+    if _SCHEMA_PATH is None:
+        return JSONResponse(
+            status_code=503,
+            content={"error": True, "message": "config.schema.json not found"},
+        )
     if _schema_cache is None:
         with _SCHEMA_PATH.open("r", encoding="utf-8") as f:
             _schema_cache = json.load(f)
@@ -168,7 +211,7 @@ async def get_config_schema() -> JSONResponse:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/api/config/validate")
+@router.post("/config/validate")
 async def validate_config(
     request: Request,
     token: str = Depends(verify_token),
@@ -179,6 +222,7 @@ async def validate_config(
     Returns the validated config with defaults applied on success,
     or an error response if validation fails.
     """
+    logger.debug("validate_config entry")
     try:
         body = await request.json()
     except json.JSONDecodeError:
@@ -222,13 +266,14 @@ async def validate_config(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/api/config/ssh_targets/{name}")
+@router.get("/config/ssh_targets/{name}")
 async def get_ssh_target(
     name: str,
     token: str = Depends(verify_token),
     svc: ConfigService = Depends(get_config_service),
 ) -> JSONResponse:
     """Read a single SSH target by name (secrets stripped)."""
+    logger.debug("get_ssh_target entry: name=%s", name)
     try:
         target = svc.get_ssh_target(name)
         return JSONResponse(content=target)
@@ -255,7 +300,7 @@ async def get_ssh_target(
 # ---------------------------------------------------------------------------
 
 
-@router.put("/api/config/ssh_targets/{name}")
+@router.put("/config/ssh_targets/{name}")
 async def put_ssh_target(
     name: str,
     request: Request,
@@ -263,6 +308,7 @@ async def put_ssh_target(
     svc: ConfigService = Depends(get_config_service),
 ) -> JSONResponse:
     """Create or replace a single SSH target."""
+    logger.debug("put_ssh_target entry: name=%s", name)
     try:
         body = await request.json()
     except json.JSONDecodeError:
@@ -285,6 +331,7 @@ async def put_ssh_target(
 
     try:
         result = svc.put_ssh_target(name, body)
+        logger.debug("put_ssh_target exit: name=%s, success", name)
         return JSONResponse(content=result)
     except ValueError as e:
         return JSONResponse(
@@ -310,15 +357,17 @@ async def put_ssh_target(
 # ---------------------------------------------------------------------------
 
 
-@router.delete("/api/config/ssh_targets/{name}")
+@router.delete("/config/ssh_targets/{name}")
 async def delete_ssh_target(
     name: str,
     token: str = Depends(verify_token),
     svc: ConfigService = Depends(get_config_service),
 ) -> JSONResponse:
     """Delete a single SSH target."""
+    logger.debug("delete_ssh_target entry: name=%s", name)
     try:
         svc.delete_ssh_target(name)
+        logger.debug("delete_ssh_target exit: name=%s, success", name)
         return JSONResponse(
             content={"message": f"SSH target '{name}' deleted"},
         )
@@ -346,7 +395,7 @@ async def delete_ssh_target(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/api/config/ssh_targets/{name}/check")
+@router.post("/config/ssh_targets/{name}/check")
 async def check_ssh_target(
     name: str,
     token: str = Depends(verify_token),
@@ -357,8 +406,10 @@ async def check_ssh_target(
     Returns a JSON object with success, output, error, exit_code,
     and checkcommand fields.
     """
+    logger.debug("check_ssh_target entry: name=%s", name)
     try:
         result = svc.check_ssh_target(name)
+        logger.debug("check_ssh_target exit: name=%s, success=%s", name, result.get("success"))
         return JSONResponse(content=result)
     except KeyError:
         return JSONResponse(
@@ -391,13 +442,14 @@ async def check_ssh_target(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/api/config/block_patterns")
+@router.post("/config/block_patterns")
 async def append_block_pattern(
     request: Request,
     token: str = Depends(verify_token),
     svc: ConfigService = Depends(get_config_service),
 ) -> JSONResponse:
     """Append a new block pattern to the list."""
+    logger.debug("append_block_pattern entry")
     try:
         body = await request.json()
     except json.JSONDecodeError:
@@ -421,6 +473,7 @@ async def append_block_pattern(
 
     try:
         result = svc.append_block_pattern(pattern)
+        logger.debug("append_block_pattern exit: pattern_count=%d", len(result))
         return JSONResponse(
             content=ConfigSectionResponse(
                 section="block_patterns", data=result,
@@ -442,13 +495,14 @@ async def append_block_pattern(
 # ---------------------------------------------------------------------------
 
 
-@router.put("/api/config/block_patterns")
+@router.put("/config/block_patterns")
 async def replace_block_patterns(
     request: Request,
     token: str = Depends(verify_token),
     svc: ConfigService = Depends(get_config_service),
 ) -> JSONResponse:
     """Replace the entire block_patterns list."""
+    logger.debug("replace_block_patterns entry")
     try:
         body = await request.json()
     except json.JSONDecodeError:
@@ -471,6 +525,7 @@ async def replace_block_patterns(
 
     try:
         result = svc.replace_block_patterns(body)
+        logger.debug("replace_block_patterns exit: pattern_count=%d", len(result))
         return JSONResponse(
             content=ConfigSectionResponse(
                 section="block_patterns", data=result,
@@ -492,7 +547,7 @@ async def replace_block_patterns(
 # ---------------------------------------------------------------------------
 
 
-@router.put("/api/config/block_patterns/{index}")
+@router.put("/config/block_patterns/{index}")
 async def put_block_pattern(
     index: int,
     request: Request,
@@ -500,6 +555,7 @@ async def put_block_pattern(
     svc: ConfigService = Depends(get_config_service),
 ) -> JSONResponse:
     """Replace a single block pattern at the given index."""
+    logger.debug("put_block_pattern entry: index=%d", index)
     try:
         body = await request.json()
     except json.JSONDecodeError:
@@ -523,6 +579,7 @@ async def put_block_pattern(
 
     try:
         result = svc.put_block_pattern(index, pattern)
+        logger.debug("put_block_pattern exit: index=%d, pattern_count=%d", index, len(result))
         return JSONResponse(
             content=ConfigSectionResponse(
                 section="block_patterns", data=result,
@@ -552,15 +609,17 @@ async def put_block_pattern(
 # ---------------------------------------------------------------------------
 
 
-@router.delete("/api/config/block_patterns/{index}")
+@router.delete("/config/block_patterns/{index}")
 async def delete_block_pattern(
     index: int,
     token: str = Depends(verify_token),
     svc: ConfigService = Depends(get_config_service),
 ) -> JSONResponse:
     """Remove a single block pattern at the given index."""
+    logger.debug("delete_block_pattern entry: index=%d", index)
     try:
         result = svc.delete_block_pattern(index)
+        logger.debug("delete_block_pattern exit: index=%d, pattern_count=%d", index, len(result))
         return JSONResponse(
             content=ConfigSectionResponse(
                 section="block_patterns", data=result,
@@ -581,15 +640,17 @@ async def delete_block_pattern(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/api/backups")
+@router.get("/backups")
 async def list_backups(
     token: str = Depends(verify_token),
     svc: ConfigService = Depends(get_config_service),
 ) -> JSONResponse:
     """List all config backup files, sorted newest first."""
+    logger.debug("list_backups entry")
     try:
         raw_backups = svc.backup_list()
         backups = [BackupInfo(**b) for b in raw_backups]
+        logger.debug("list_backups exit: backup_count=%d", len(backups))
         return JSONResponse(
             content=BackupListResponse(backups=backups).model_dump(),
         )
@@ -608,15 +669,17 @@ async def list_backups(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/api/backups/{name}/restore")
+@router.post("/backups/{name}/restore")
 async def restore_backup(
     name: str,
     token: str = Depends(verify_token),
     svc: ConfigService = Depends(get_config_service),
 ) -> JSONResponse:
     """Restore configuration from a backup file."""
+    logger.debug("restore_backup entry: name=%s", name)
     try:
         restored = svc.backup_restore(name)
+        logger.debug("restore_backup exit: name=%s, success", name)
         return JSONResponse(
             content=BackupRestoreResponse(
                 message=f"Config restored from {name}",
@@ -663,15 +726,17 @@ async def restore_backup(
 # ---------------------------------------------------------------------------
 
 
-@router.delete("/api/backups/{name}")
+@router.delete("/backups/{name}")
 async def delete_backup(
     name: str,
     token: str = Depends(verify_token),
     svc: ConfigService = Depends(get_config_service),
 ) -> JSONResponse:
     """Delete a single backup file."""
+    logger.debug("delete_backup entry: name=%s", name)
     try:
         svc.backup_delete(name)
+        logger.debug("delete_backup exit: name=%s, success", name)
         return JSONResponse(content={"message": "Backup deleted"})
     except FileNotFoundError:
         return JSONResponse(
@@ -696,7 +761,7 @@ async def delete_backup(
 # ---------------------------------------------------------------------------
 
 
-@router.put("/api/config")
+@router.put("/config")
 async def put_config(
     request: Request,
     token: str = Depends(verify_token),
@@ -708,6 +773,7 @@ async def put_config(
     Secret fields (password, private_key, key_hash) are stripped before
     writing.  The config is validated using ConfigManager._validate().
     """
+    logger.debug("put_config entry")
     # Enforce body size limit (1 MB) — check Content-Length first
     content_length = request.headers.get("content-length")
     if content_length and int(content_length) > 1_048_576:
@@ -741,6 +807,7 @@ async def put_config(
 
     try:
         validated = svc.write_config(body)
+        logger.debug("put_config exit: success, config_keys=%s", list(validated.keys()) if isinstance(validated, dict) else "non-dict")
         return JSONResponse(content=validated)
     except ConfigValidationError as e:
         return JSONResponse(
@@ -766,7 +833,7 @@ async def put_config(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/api/config/{section}")
+@router.get("/config/{section}")
 async def get_config_section(
     section: str,
     token: str = Depends(verify_token),
@@ -776,11 +843,13 @@ async def get_config_section(
 
     Valid sections: ssh_targets, block_patterns, allowed_commands, settings.
     """
+    logger.debug("get_config_section entry: section=%s", section)
     try:
         data = svc.read_section(section)
         # Strip secrets from ssh_targets section for API consumers
         if section == "ssh_targets":
             data = svc._strip_secrets({"ssh_targets": data})["ssh_targets"]
+        logger.debug("get_config_section exit: section=%s, data_keys=%s", section, list(data.keys()) if isinstance(data, dict) else "non-dict")
         return JSONResponse(
             content=ConfigSectionResponse(
                 section=section, data=data,
@@ -820,7 +889,7 @@ async def get_config_section(
 # ---------------------------------------------------------------------------
 
 
-@router.put("/api/config/{section}")
+@router.put("/config/{section}")
 async def put_config_section(
     section: str,
     request: Request,
@@ -832,6 +901,7 @@ async def put_config_section(
     Reads the current full config, replaces the specified section with the
     request body, validates the merged config, and atomically writes.
     """
+    logger.debug("put_config_section entry: section=%s", section)
     try:
         body = await request.json()
     except json.JSONDecodeError:
@@ -845,6 +915,7 @@ async def put_config_section(
 
     try:
         validated = svc.write_section(section, body)
+        logger.debug("put_config_section exit: section=%s, success", section)
         return JSONResponse(
             content=ConfigSectionResponse(
                 section=section,

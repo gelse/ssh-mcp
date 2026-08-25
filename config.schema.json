@@ -197,6 +197,88 @@
         }
       }
     },
+    "logTargetStdout": {
+      "description": "Log target that writes human-readable text to stdout.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target"],
+      "properties": {
+        "target": {
+          "const": "stdout"
+        },
+        "log_level": {
+          "description": "Minimum log level for this target. Overrides the global log_level.",
+          "type": "string",
+          "enum": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+        }
+      }
+    },
+    "logTargetJsonFile": {
+      "description": "Log target that writes JSONL (one JSON object per line) to a file.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "filepath"],
+      "properties": {
+        "target": {
+          "const": "jsonfile"
+        },
+        "filepath": {
+          "description": "Path to the log file. Relative paths are resolved against the log directory.",
+          "type": "string",
+          "minLength": 1
+        },
+        "log_level": {
+          "description": "Minimum log level for this target. Overrides the global log_level.",
+          "type": "string",
+          "enum": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+        },
+        "max_file_size_mb": {
+          "description": "Maximum file size in MiB before rotation.",
+          "type": "integer",
+          "minimum": 1,
+          "default": 10
+        },
+        "backup_count": {
+          "description": "Number of rotated backup files to keep.",
+          "type": "integer",
+          "minimum": 1,
+          "default": 5
+        }
+      }
+    },
+    "logTargetTextFile": {
+      "description": "Log target that writes human-readable text to a file.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "filepath"],
+      "properties": {
+        "target": {
+          "const": "file"
+        },
+        "filepath": {
+          "description": "Path to the log file. Relative paths are resolved against the log directory.",
+          "type": "string",
+          "minLength": 1
+        },
+        "log_level": {
+          "description": "Minimum log level for this target. Overrides the global log_level.",
+          "type": "string",
+          "enum": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+        },
+        "max_file_size_mb": {
+          "description": "Maximum file size in MiB before rotation.",
+          "type": "integer",
+          "minimum": 1,
+          "default": 10
+        },
+        "backup_count": {
+          "description": "Number of rotated backup files to keep.",
+          "type": "integer",
+          "minimum": 1,
+          "default": 5
+        }
+      }
+    },
     "settings": {
       "description": "Runtime settings. All keys are optional; unspecified keys fall back to bundled defaults.",
       "type": "object",
@@ -251,14 +333,41 @@
             "CRITICAL"
           ]
         },
+        "logging": {
+          "description": "Logging configuration. Defines log targets and their settings. When absent, falls back to legacy behavior: a single JSONL file target in the default log directory.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "log_targets": {
+              "description": "Array of log target objects. Each entry defines a log output destination. Multiple targets are supported simultaneously.",
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "oneOf": [
+                  {
+                    "$ref": "#/$defs/logTargetStdout"
+                  },
+                  {
+                    "$ref": "#/$defs/logTargetJsonFile"
+                  },
+                  {
+                    "$ref": "#/$defs/logTargetTextFile"
+                  }
+                ]
+              }
+            }
+          }
+        },
         "max_log_output": {
-          "description": "Maximum number of output characters stored in a log entry.",
+          "description": "Maximum number of output characters stored in a log entry. Applied to all targets that support output truncation.",
           "type": "integer",
-          "minimum": 1
+          "minimum": 1,
+          "default": 4096
         },
         "compress_rotated": {
-          "description": "Whether rotated log files are gzip-compressed.",
-          "type": "boolean"
+          "description": "Whether rotated log files are gzip-compressed. Applied to file-based targets.",
+          "type": "boolean",
+          "default": true
         },
         "pool_max_connections_per_target": {
           "description": "Maximum number of idle connections kept per SSH target.",
@@ -292,6 +401,36 @@
           "items": {
             "type": "string"
           }
+        },
+        "rate_limit": {
+          "description": "Per-IP rate-limiting settings. Set enabled to false to disable rate limiting entirely (e.g. for test suites issuing a high request volume from a single client IP).",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "Whether per-IP rate limiting is active. When false, the rate-limiter is disabled at startup.",
+              "type": "boolean",
+              "default": true
+            },
+            "max_requests_per_minute": {
+              "description": "Maximum requests allowed per client IP within the sliding window.",
+              "type": "integer",
+              "default": 60,
+              "minimum": 1
+            },
+            "window_seconds": {
+              "description": "Sliding-window duration (seconds) for rate limiting.",
+              "type": "number",
+              "default": 60,
+              "minimum": 0
+            },
+            "cleanup_interval_seconds": {
+              "description": "Minimum interval (seconds) between expired-entry garbage collections.",
+              "type": "number",
+              "default": 300,
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
         },
         "sftp": {
           "description": "SFTP file-transfer settings.",

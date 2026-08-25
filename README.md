@@ -24,6 +24,7 @@ ssh-mcp runs as a single HTTP service. Multiple AI clients — agents, CI pipeli
 - [Tools](#tools)
 - [Configuration](#configuration)
 - [Observability](#observability)
+- [Configuration API](#configuration-api)
 - [Deployment](#deployment)
 - [Limitations and Threat Model](#limitations-and-threat-model)
 - [Development](#development)
@@ -203,6 +204,21 @@ SFTP transfers go through 8-layer path validation including null-byte checks, co
 ### Rate Limiting
 
 Sliding-window rate limiter per client IP (60 requests / 60 seconds, `/health` exempt). Violations return HTTP 429 with `Retry-After`.
+
+Rate limiting is configurable under `settings.rate_limit`:
+
+```jsonc
+"settings": {
+  "rate_limit": {
+    "enabled": true,                        // set false to disable entirely
+    "max_requests_per_minute": 60,          // max requests per client IP in the window
+    "window_seconds": 60.0,                 // sliding-window duration
+    "cleanup_interval_seconds": 300.0       // expired-entry GC interval
+  }
+}
+```
+
+> **Note:** the rate limiter is built **once at container startup** from the initial config and is **not** rebuilt on config hot-reload. To disable rate limiting you must set `settings.rate_limit.enabled` to `false` in the config present at boot (e.g. `config/ssh-mcp-config.json` in the mounted volume). This is useful for high-volume clients or test suites that issue many requests from a single IP.
 
 ---
 
@@ -594,6 +610,8 @@ environment variables  >  secrets.json  >  ssh-mcp-config.json
 | `MCP_SSH_SSH_KEY` | `--ssh-key` | `ssh_key` | `SSH_KEY_PATH` |
 | `MCP_SSH_LOG_DIR` | `--log-dir` | `/logs` | `LOG_DIR` |
 | `MAX_OUTPUT_LENGTH` | `--max-output` | `50000` | — |
+| `CONFIG_API_ENABLED` | — | `false` | — |
+| `CONFIG_API_TOKEN` | — | *(required when API enabled)* | — |
 | — | `--fix-permissions` | `False` | — |
 | — | `--print-default-config` | — | — |
 
@@ -628,9 +646,67 @@ The server polls the config file for changes (15 s interval, 2 s debounce). When
 
 ### Structured Logging
 
-JSONL logs are written to `LOG_DIR` (default `/logs`). Each entry includes `timestamp`, `log_level`, `event`, `request_id` (correlation ID), `source_ip`, `api_key_name`, `target_name`, `command`, `allowed`, `reason`, `matched_via`, `execution_time_ms`, `exit_code`, and optionally `output` (truncated to `max_log_output`).
+The mcp-ssh server supports pluggable log targets configured via `settings.logging.log_targets` in the config file. Each target is an independent driver that receives all log entries.
 
-Files rotate at 10 MB keeping 5 backups; rotated files are gzipped when `compress_rotated` is enabled. User-controlled fields (`command`, `target_name`, remote paths) are newline-sanitized before logging.
+#### Default Behavior
+
+By default, log entries are written to **stdout** in human-readable text format. This is suitable for Docker environments where container logs are captured by the runtime.
+
+#### Log Target Types
+
+| Target | Config value | Format | Description |
+|--------|-------------|--------|-------------|
+| Stdout | `"stdout"` | Text | Writes to stdout. Default target. |
+| JSON File | `"jsonfile"` | JSONL | Writes one JSON object per line to a file. |
+| Text File | `"file"` | Text | Writes human-readable text to a file. |
+
+#### Configuration
+
+```json
+{
+  "settings": {
+    "log_level": "INFO",
+    "logging": {
+      "log_targets": [
+        { "target": "stdout" },
+        { "target": "jsonfile", "filepath": "logs/ssh-mcp.log" }
+      ],
+      "max_log_output": 4096,
+      "compress_rotated": true
+    }
+  }
+}
+```
+
+#### Log Level
+
+- **Config file:** Set `settings.log_level` to control the default level.
+- **Environment variable:** Set `MCP_SSH_LOG_LEVEL` to override the config-file default (e.g., `MCP_SSH_LOG_LEVEL=DEBUG`).
+- **Per-target:** Each log target can have its own `log_level` that overrides the default.
+
+#### Legacy Configuration
+
+If `settings.logging` is absent, the server falls back to a single JSONL file target in the log directory (`/logs` by default). This maintains backward compatibility with existing configurations.
+
+#### Text Format
+
+Stdout and text-file targets use the format:
+
+```
+2025-01-15 10:30:00 INFO ssh_execute_command: Command executed on server1
+```
+
+#### JSON Format
+
+JSON-file targets write one JSON object per line:
+
+```json
+{"timestamp": "2025-01-15T10:30:00+00:00", "event": "ssh_execute_command", "level": "INFO", "message": "Command executed on server1", "request_id": "abc-123", "log_level": "INFO", "log_format_version": 1}
+```
+
+#### File Rotation
+
+File-based targets rotate when they exceed `max_file_size_mb` (default: 10 MiB), keeping `backup_count` backups (default: 5). Rotated files are gzip-compressed when `compress_rotated` is `true`.
 
 #### Configuration Change Events
 
@@ -645,13 +721,82 @@ Files rotate at 10 MB keeping 5 backups; rotated files are gzipped when `compres
 
 ---
 
+## Configuration API
+
+The unified container includes an optional Configuration API and Web Dashboard for managing the configuration file through a REST API and browser-based UI. This feature is disabled by default.
+
+### Enabling the Configuration API
+
+Set these environment variables in your `compose.yaml` or `.env` file:
+
+| Variable | Default | Description |
+|---|---|---|
+| `CONFIG_API_ENABLED` | `false` | Set to `true` to enable the Configuration API |
+| `CONFIG_API_TOKEN` | *(required when enabled)* | Bearer token for authenticating API requests |
+
+```yaml
+services:
+  mcp-ssh:
+    environment:
+      CONFIG_API_ENABLED: "true"
+      CONFIG_API_TOKEN: "your-secret-token-here"
+```
+
+### API Endpoints
+
+All endpoints are mounted at `/api` on the same Starlette ASGI application as the MCP server.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/health` | Health check for the config API |
+| `GET` | `/api/config` | Get the full configuration (redacts secrets) |
+| `GET` | `/api/config/raw` | Get the raw config file content (requires admin token) |
+| `PUT` | `/api/config` | Replace the full configuration |
+| `GET` | `/api/config/settings` | Get the `settings` section |
+| `PUT` | `/api/config/settings` | Update the `settings` section |
+| `GET` | `/api/config/ssh-targets` | List all SSH targets |
+| `POST` | `/api/config/ssh-targets` | Add a new SSH target |
+| `GET` | `/api/config/ssh-targets/{name}` | Get a specific SSH target |
+| `PUT` | `/api/config/ssh-targets/{name}` | Update an SSH target |
+| `DELETE` | `/api/config/ssh-targets/{name}` | Delete an SSH target |
+| `POST` | `/api/config/ssh-targets/{name}/test` | Test SSH connectivity to a target |
+| `GET` | `/api/config/allowed-commands` | List allowed command rules |
+| `PUT` | `/api/config/allowed-commands` | Replace allowed command rules |
+| `GET` | `/api/config/block-patterns` | List block patterns |
+| `PUT` | `/api/config/block-patterns` | Replace block patterns |
+| `POST` | `/api/config/reload` | Force a config reload |
+| `GET` | `/api/stats` | Get runtime statistics (server info, connections, uptime) |
+
+### Authentication
+
+All API requests require a `Bearer` token in the `Authorization` header:
+
+```bash
+curl -H "Authorization: Bearer your-secret-token-here" http://localhost:9080/api/config
+```
+
+### Web Dashboard
+
+When enabled, a web dashboard is available at `/api/ui/` providing a browser-based interface for:
+- Viewing and editing the configuration
+- Managing SSH targets with inline connectivity testing
+- Monitoring runtime statistics
+
+### Swagger / ReDoc
+
+Interactive API documentation is auto-generated by FastAPI:
+- Swagger UI: `/api/docs`
+- ReDoc: `/api/redoc`
+
+---
+
 ## Deployment
 
 ### Docker Compose
 
-The [`compose.yaml`](compose.yaml) defines two services:
+The [`compose.yaml`](compose.yaml) defines a single `mcp-ssh` service that hosts both the MCP server and, optionally, the Configuration API & Web Dashboard. The config API is enabled via the `CONFIG_API_ENABLED` environment variable (default: `false`).
 
-#### `mcp-ssh` — MCP SSH Gateway
+#### `mcp-ssh` — MCP SSH Gateway + Config API
 
 | Host path | Container path | Mode |
 |---|---|---|
@@ -662,23 +807,25 @@ The [`compose.yaml`](compose.yaml) defines two services:
 
 Exposed on host port `9080` (maps to container port `8080`). The runtime image is `python:3.13-alpine` with a hash-pinned digest. A non-root `mcpssh` user runs the process. A CycloneDX SBOM is generated at build time in the `sbom` stage.
 
-#### `mcp-ssh-config-api` — Configuration API & Web Dashboard
+#### Configuration API & Web Dashboard (optional)
 
-| Host path | Container path | Mode |
-|---|---|---|
-| `./config` | `/config` | rw |
-
-Exposed on host port `9081` (maps to container port `8081`). The service provides:
-
-- **REST API** at `/api/...` — full CRUD for SSH targets, block patterns, command rules, backups, and settings
-- **Web Dashboard (GUI)** at `http://localhost:9081/ui/` — a single-page application for visual policy management (SSH targets, block patterns, command rules, settings, backups)
-- **API docs** at `http://localhost:9081/docs` (Swagger UI) and `http://localhost:9081/redoc` (ReDoc)
-
-Requires the `CONFIG_API_TOKEN` environment variable (set in `.env`). Generate a token with:
+Enable the config API by setting `CONFIG_API_ENABLED=true` in your `.env` file or environment:
 
 ```bash
+# Generate an auth token
 openssl rand -hex 32
 ```
+
+```env
+CONFIG_API_ENABLED=true
+CONFIG_API_TOKEN=<your-token>
+```
+
+When enabled, the config API is mounted at `/api` on the same HTTP server as the MCP gateway. It provides:
+
+- **REST API** at `http://localhost:9080/api/...` — full CRUD for SSH targets, block patterns, command rules, backups, and settings
+- **Web Dashboard (GUI)** at `http://localhost:9080/ui/` — a single-page application for visual policy management (SSH targets, block patterns, command rules, settings, backups)
+- **API docs** at `http://localhost:9080/docs` (Swagger UI) and `http://localhost:9080/redoc` (ReDoc)
 
 ### Makefile
 
@@ -690,9 +837,7 @@ openssl rand -hex 32
 | `make test` | Run unit tests |
 | `make config-test` | Run config-api unit tests |
 | `make integrationtest` | Build test image, run integration tests |
-| `make config-integrationtest` | Build config-api test image, run integration tests |
 | `make clean-test` | Remove test artifacts and containers |
-| `make config-clean-test` | Remove config-api test artifacts and containers |
 
 ### Pull from GHCR
 
@@ -738,7 +883,8 @@ docker pull ghcr.io/gelse/ssh-mcp:latest
 ### Project Structure
 
 - [`server.py`](server.py) — FastMCP app factory + CLI entry point
-- [`lib/`](lib/) — 24 single-responsibility modules (auth, config, SSH client, file transfer, etc.)
+- [`lib/`](lib/) — 25 single-responsibility modules (auth, config, SSH client, file transfer, ssh_operations, etc.)
+- [`config-api/`](config-api/) — Configuration API + Web Dashboard (FastAPI, mounted at `/api` when `CONFIG_API_ENABLED=true`)
 - [`tests/`](tests/) — 29 unit-test files + integration tests with real Docker containers
 
 ### Tech Stack

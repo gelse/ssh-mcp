@@ -66,6 +66,14 @@ MCP_SSH_CONFIG_PATH: str = "MCP_SSH_CONFIG_PATH"
 MCP_SSH_LOG_DIR: str = "MCP_SSH_LOG_DIR"
 """Environment variable that overrides the log output directory."""
 
+MCP_SSH_LOG_LEVEL: str = "MCP_SSH_LOG_LEVEL"
+"""Environment variable that overrides the default log level.
+
+When set, this value replaces ``DEFAULT_LOG_LEVEL`` for the default
+target level.  Per-target ``log_level`` overrides in the config file
+take precedence over this env var.
+"""
+
 MCP_SSH_SSH_KEY: str = "MCP_SSH_SSH_KEY"
 """Environment variable that overrides the private SSH key path."""
 
@@ -164,6 +172,12 @@ DEFAULT_CHECK_COMMAND: str = "echo ping"
 """Default command executed to verify SSH connectivity when no
 per-target checkcommand is configured."""
 
+DEFAULT_SSH_CHECK_TIMEOUT_MIN: int = 1
+"""Minimum allowed timeout (seconds) for the SSH connectivity check."""
+
+DEFAULT_SSH_CHECK_TIMEOUT_MAX: int = 30
+"""Maximum allowed timeout (seconds) for the SSH connectivity check."""
+
 DEFAULT_COMMAND_TIMEOUT_SECONDS: int = 120
 """Default timeout (seconds) for remote command execution."""
 
@@ -215,6 +229,7 @@ SETTING_KEY_TYPES: dict[str, str] = {
     "circuit_breaker_failure_threshold": "int",
     "circuit_breaker_timeout_seconds": "float",
     "log_level": "str",
+    "logging": "dict",
     "max_log_output": "int",
     "compress_rotated": "bool",
     "pool_max_connections_per_target": "int",
@@ -426,6 +441,14 @@ SUDO_NO_PASSWORD_FLAG: str = "sudo -n"
 # Rate-Limiting Defaults
 # =============================================================================
 
+DEFAULT_RATE_LIMIT_ENABLED: bool = True
+"""Whether per-IP rate limiting is enabled by default.
+
+Set ``settings.rate_limit.enabled`` to ``false`` in the config file to
+disable rate limiting entirely (e.g. for integration test suites that
+issue a high volume of requests from a single client IP).
+"""
+
 DEFAULT_RATE_LIMIT_REQUESTS: int = 60
 """Default maximum requests per client IP within the rate-limit window."""
 
@@ -462,3 +485,29 @@ the ``X-Forwarded-For`` header when the direct connection peer is in
 this list.  An empty list means no proxy is trusted and the header is
 ignored entirely, preventing header spoofing by untrusted clients.
 """
+
+# =============================================================================
+# Pluggable Log Target Defaults
+# =============================================================================
+
+DEFAULT_LOG_TARGETS: list[dict] = [{"target": "stdout"}]
+"""Default log targets when ``settings.logging.log_targets`` is absent."""
+
+LOG_TARGET_STDOUT: str = "stdout"
+"""Identifier for the stdout log target type."""
+
+LOG_TARGET_JSONFILE: str = "jsonfile"
+"""Identifier for the JSONL file log target type."""
+
+LOG_TARGET_TEXTFILE: str = "file"
+"""Identifier for the text file log target type."""
+
+SUPPORTED_LOG_TARGETS: tuple[str, ...] = (
+    LOG_TARGET_STDOUT,
+    LOG_TARGET_JSONFILE,
+    LOG_TARGET_TEXTFILE,
+)
+"""All supported log target type identifiers."""
+
+DEFAULT_TEXT_LOG_FORMAT: str = "{timestamp} {level} {event}: {message}"
+"""Default text format string for stdout and text-file targets."""

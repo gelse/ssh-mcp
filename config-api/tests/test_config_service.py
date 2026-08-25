@@ -496,6 +496,112 @@ class TestWriteConfig:
         svc.write_config(_minimal_config())
         assert svc.config_path.exists()
 
+    def test_write_config_reloads_config_managers(
+        self, tmp_path: Path
+    ) -> None:
+        """write_config() calls reload() on both ConfigManagers."""
+        from config_api.config_service import ConfigService
+
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _minimal_config())
+        svc = ConfigService(config_dir=str(tmp_path))
+
+        with patch.object(svc, "_reload_config_managers") as mock_reload:
+            svc.write_config(_minimal_config())
+
+        mock_reload.assert_called_once()
+
+    def test_write_section_reloads_config_managers(
+        self, tmp_path: Path
+    ) -> None:
+        """write_section() triggers config manager reload via write_config."""
+        from config_api.config_service import ConfigService
+
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _minimal_config())
+        svc = ConfigService(config_dir=str(tmp_path))
+
+        with patch.object(svc, "_reload_config_managers") as mock_reload:
+            svc.write_section("block_patterns", ["rm\\s+-rf"])
+
+        mock_reload.assert_called_once()
+
+    def test_put_ssh_target_reloads_config_managers(
+        self, tmp_path: Path
+    ) -> None:
+        """put_ssh_target() triggers config manager reload via write_config."""
+        from config_api.config_service import ConfigService
+
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _minimal_config())
+        svc = ConfigService(config_dir=str(tmp_path))
+
+        with patch.object(svc, "_reload_config_managers") as mock_reload:
+            svc.put_ssh_target(
+                "new-server",
+                {
+                    "host": "10.0.0.99",
+                    "username": "user",
+                    "port": 22,
+                    "password": "pass",
+                },
+            )
+
+        mock_reload.assert_called_once()
+
+
+class TestReloadConfigManagers:
+    """Tests for ConfigService._reload_config_managers()."""
+
+    def test_reloads_ssh_config_manager(self, tmp_path: Path) -> None:
+        """Reloads the MCP server's ConfigManager when available."""
+        from config_api.config_service import ConfigService
+
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _minimal_config())
+        mock_cfg = MagicMock()
+        svc = ConfigService(
+            config_dir=str(tmp_path),
+            ssh_config_manager=mock_cfg,
+        )
+
+        svc._reload_config_managers()
+        mock_cfg.reload.assert_called_once()
+
+    def test_reloads_validator(self, tmp_path: Path) -> None:
+        """Reloads the local validation ConfigManager."""
+        from config_api.config_service import ConfigService
+
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _minimal_config())
+        svc = ConfigService(config_dir=str(tmp_path))
+
+        with patch.object(svc._validator, "reload") as mock_reload:
+            svc._reload_config_managers()
+            mock_reload.assert_called_once()
+
+    def test_no_error_when_no_ssh_config_manager(
+        self, tmp_path: Path
+    ) -> None:
+        """Does not fail when ssh_config_manager is None (standalone mode)."""
+        from config_api.config_service import ConfigService
+
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _minimal_config())
+        svc = ConfigService(config_dir=str(tmp_path))
+
+        # Should not raise
+        svc._reload_config_managers()
+
+    def test_no_error_when_reload_fails(self, tmp_path: Path) -> None:
+        """Reload failure is caught and logged, not raised."""
+        from config_api.config_service import ConfigService
+
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _minimal_config())
+        mock_cfg = MagicMock()
+        mock_cfg.reload.side_effect = OSError("disk error")
+        svc = ConfigService(
+            config_dir=str(tmp_path),
+            ssh_config_manager=mock_cfg,
+        )
+
+        # Should not raise — just log a warning
+        svc._reload_config_managers()
+
 
 # ---------------------------------------------------------------------------
 # write_section
@@ -998,6 +1104,112 @@ class TestPutSshTarget:
             (config_dir / DEFAULT_CONFIG_FILENAME).read_text(encoding="utf-8")
         )
         assert raw["ssh_targets"]["secrets-server"]["password"] == "p"
+
+    def test_preserves_existing_password_on_edit_when_empty(
+        self, service: "ConfigService"
+    ) -> None:
+        """Editing a target with empty password preserves the existing one."""
+        # The existing test-server target has password="secret123"
+        result = service.put_ssh_target(
+            "test-server",
+            {"host": "10.0.0.1", "port": 22, "username": "admin", "password": ""},
+        )
+        assert result["host"] == "10.0.0.1"
+        assert "password" not in result  # stripped from return
+        # Verify the secret is preserved on disk
+        raw = service.read_config()
+        assert raw["ssh_targets"]["test-server"]["password"] == "secret123"
+
+    def test_preserves_existing_password_on_edit_when_absent(
+        self, service: "ConfigService"
+    ) -> None:
+        """Editing a target without password field preserves the existing one."""
+        result = service.put_ssh_target(
+            "test-server",
+            {"host": "10.0.0.1", "port": 22, "username": "admin"},
+        )
+        assert result["host"] == "10.0.0.1"
+        raw = service.read_config()
+        assert raw["ssh_targets"]["test-server"]["password"] == "secret123"
+
+    def test_preserves_existing_password_when_whitespace_only(
+        self, service: "ConfigService"
+    ) -> None:
+        """Editing with whitespace-only password preserves the existing one."""
+        result = service.put_ssh_target(
+            "test-server",
+            {"host": "10.0.0.1", "port": 22, "username": "admin", "password": "   "},
+        )
+        raw = service.read_config()
+        assert raw["ssh_targets"]["test-server"]["password"] == "secret123"
+
+    def test_replaces_password_when_new_value_provided(
+        self, service: "ConfigService"
+    ) -> None:
+        """Providing a new non-empty password replaces the existing one."""
+        result = service.put_ssh_target(
+            "test-server",
+            {"host": "10.0.0.1", "port": 22, "username": "admin", "password": "new-secret"},
+        )
+        assert result["host"] == "10.0.0.1"
+        raw = service.read_config()
+        assert raw["ssh_targets"]["test-server"]["password"] == "new-secret"
+
+    def test_preserves_existing_private_key_on_edit_when_empty(
+        self, service: "ConfigService"
+    ) -> None:
+        """Editing with empty private_key preserves the existing one."""
+        # Set up a target with private_key
+        config = service.read_config()
+        config["ssh_targets"]["test-server"]["private_key"] = "my-private-key"
+        service.write_config(config)
+
+        # Now edit with empty private_key
+        result = service.put_ssh_target(
+            "test-server",
+            {
+                "host": "10.0.0.1",
+                "port": 22,
+                "username": "admin",
+                "password": "secret123",
+                "private_key": "",
+            },
+        )
+        raw = service.read_config()
+        assert raw["ssh_targets"]["test-server"]["private_key"] == "my-private-key"
+
+    def test_replaces_private_key_when_new_value_provided(
+        self, service: "ConfigService"
+    ) -> None:
+        """Providing a new non-empty private_key replaces the existing one."""
+        config = service.read_config()
+        config["ssh_targets"]["test-server"]["private_key"] = "old-key"
+        service.write_config(config)
+
+        result = service.put_ssh_target(
+            "test-server",
+            {
+                "host": "10.0.0.1",
+                "port": 22,
+                "username": "admin",
+                "password": "secret123",
+                "private_key": "new-key",
+            },
+        )
+        raw = service.read_config()
+        assert raw["ssh_targets"]["test-server"]["private_key"] == "new-key"
+
+    def test_create_new_target_requires_credentials(
+        self, service: "ConfigService"
+    ) -> None:
+        """Creating a new target without credentials fails validation."""
+        from lib.exceptions import ConfigValidationError
+
+        with pytest.raises(ConfigValidationError):
+            service.put_ssh_target(
+                "new-no-creds",
+                {"host": "10.0.0.5", "port": 22, "username": "user"},
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -1564,3 +1776,271 @@ class TestValidateBackupName:
 
         with pytest.raises(ValueError, match="Invalid backup name format"):
             ConfigService._validate_backup_name("ssh-mcp-config.bak")
+
+
+# ---------------------------------------------------------------------------
+# check_ssh_target — dual-mode (unified / standalone)
+# ---------------------------------------------------------------------------
+
+
+def _config_with_checkcommand() -> dict:
+    """Return a minimal config that includes a checkcommand."""
+    cfg = _minimal_config()
+    cfg["ssh_targets"]["test-server"]["checkcommand"] = "echo ping"
+    return cfg
+
+
+class TestCheckSSHTarget:
+    """Tests for ConfigService.check_ssh_target() in both modes."""
+
+    # -- helpers -----------------------------------------------------------
+
+    @pytest.fixture()
+    def svc(self, tmp_path: Path) -> "ConfigService":
+        """ConfigService backed by a config with a checkcommand target."""
+        from config_api.config_service import ConfigService
+
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _config_with_checkcommand())
+        return ConfigService(config_dir=str(tmp_path))
+
+    # -- _use_direct_ssh property ------------------------------------------
+
+    def test_use_direct_ssh_false_when_no_deps(
+        self, tmp_path: Path
+    ) -> None:
+        """_use_direct_ssh is False when no SSH managers are injected."""
+        from config_api.config_service import ConfigService
+
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _config_with_checkcommand())
+        svc_inst = ConfigService(config_dir=str(tmp_path))
+        assert svc_inst._use_direct_ssh is False  # type: ignore[attr-defined]
+
+    def test_use_direct_ssh_false_when_partial_deps(
+        self, tmp_path: Path
+    ) -> None:
+        """_use_direct_ssh is False when only one manager is provided."""
+        from config_api.config_service import ConfigService
+
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _config_with_checkcommand())
+        svc_inst = ConfigService(
+            config_dir=str(tmp_path),
+            ssh_client_manager=object(),
+        )
+        assert svc_inst._use_direct_ssh is False  # type: ignore[attr-defined]
+
+    def test_use_direct_ssh_true_when_all_deps(self, tmp_path: Path) -> None:
+        """_use_direct_ssh is True when both managers are injected and
+        lib.ssh_operations is importable."""
+        from config_api.config_service import ConfigService, _ssh_operations_module
+
+        if _ssh_operations_module is None:
+            pytest.skip("lib.ssh_operations not importable in this env")
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _config_with_checkcommand())
+        svc_inst = ConfigService(
+            config_dir=str(tmp_path),
+            ssh_client_manager=object(),
+            ssh_config_manager=object(),
+        )
+        assert svc_inst._use_direct_ssh is True  # type: ignore[attr-defined]
+
+    # -- unified mode (direct SSH calls) -----------------------------------
+
+    def test_unified_mode_success(self, tmp_path: Path) -> None:
+        """Direct SSH call returns success result."""
+        from config_api.config_service import ConfigService, _ssh_operations_module
+
+        if _ssh_operations_module is None:
+            pytest.skip("lib.ssh_operations not importable in this env")
+
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _config_with_checkcommand())
+        mock_mgr = MagicMock()
+        mock_cfg = MagicMock()
+
+        svc = ConfigService(
+            config_dir=str(tmp_path),
+            ssh_client_manager=mock_mgr,
+            ssh_config_manager=mock_cfg,
+        )
+
+        mock_result = {
+            "success": True,
+            "output": "pong",
+            "error": None,
+            "exit_code": 0,
+            "checkcommand": "echo ping",
+        }
+        with patch(
+            "config_api.config_service._ssh_operations_module.check_ssh_connection",
+            return_value=mock_result,
+        ) as mock_check:
+            result = svc.check_ssh_target("test-server")
+
+        mock_check.assert_called_once_with(
+            ssh_client_manager=mock_mgr,
+            config_manager=mock_cfg,
+            target_name="test-server",
+            ssh_key_path=svc._ssh_key_path,
+            timeout=10,
+        )
+        assert result["success"] is True
+        assert result["output"] == "pong"
+        assert result["exit_code"] == 0
+
+    def test_unified_mode_failure(self, tmp_path: Path) -> None:
+        """Direct SSH call that raises returns error dict."""
+        from config_api.config_service import ConfigService, _ssh_operations_module
+
+        if _ssh_operations_module is None:
+            pytest.skip("lib.ssh_operations not importable in this env")
+
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _config_with_checkcommand())
+
+        svc = ConfigService(
+            config_dir=str(tmp_path),
+            ssh_client_manager=MagicMock(),
+            ssh_config_manager=MagicMock(),
+        )
+
+        with patch(
+            "config_api.config_service._ssh_operations_module.check_ssh_connection",
+            side_effect=ConnectionError("refused"),
+        ):
+            result = svc.check_ssh_target("test-server")
+
+        assert result["success"] is False
+        assert "refused" in result["error"]
+        assert result["exit_code"] == -1
+
+    def test_unified_mode_custom_timeout(self, tmp_path: Path) -> None:
+        """Direct SSH call forwards custom timeout."""
+        from config_api.config_service import ConfigService, _ssh_operations_module
+
+        if _ssh_operations_module is None:
+            pytest.skip("lib.ssh_operations not importable in this env")
+
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _config_with_checkcommand())
+
+        svc = ConfigService(
+            config_dir=str(tmp_path),
+            ssh_client_manager=MagicMock(),
+            ssh_config_manager=MagicMock(),
+        )
+
+        mock_result = {
+            "success": True,
+            "output": "",
+            "error": None,
+            "exit_code": 0,
+            "checkcommand": "echo ping",
+        }
+        with patch(
+            "config_api.config_service._ssh_operations_module.check_ssh_connection",
+            return_value=mock_result,
+        ) as mock_check:
+            svc.check_ssh_target("test-server", timeout=30)
+
+        call_kwargs = mock_check.call_args[1]
+        assert call_kwargs["timeout"] == 30
+
+    # -- standalone mode (MCPClient fallback) ------------------------------
+
+    def test_standalone_mode_falls_back_to_mcp(
+        self, tmp_path: Path
+    ) -> None:
+        """Without SSH managers, falls back to MCPClient."""
+        from config_api.config_service import ConfigService
+
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _config_with_checkcommand())
+        svc = ConfigService(config_dir=str(tmp_path))
+
+        mock_mcp_result = {
+            "success": True,
+            "output": "pong",
+            "error": None,
+            "exit_code": 0,
+            "checkcommand": "echo ping",
+        }
+        with patch("config_api.config_service.MCPClient") as MockMCP:
+            MockMCP.return_value.call_tool.return_value = mock_mcp_result
+            result = svc.check_ssh_target("test-server")
+
+        MockMCP.return_value.call_tool.assert_called_once_with(
+            "ssh_check_connection",
+            arguments={"server_name": "test-server", "timeout": 10},
+            timeout=15,
+        )
+        assert result["success"] is True
+        assert result["output"] == "pong"
+
+    def test_standalone_mode_mcp_tool_error(self, tmp_path: Path) -> None:
+        """MCPToolError is caught and returned as error dict."""
+        from config_api.config_service import ConfigService
+        from config_api.mcp_client import MCPToolError
+
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _config_with_checkcommand())
+        svc = ConfigService(config_dir=str(tmp_path))
+
+        with patch("config_api.config_service.MCPClient") as MockMCP:
+            MockMCP.return_value.call_tool.side_effect = MCPToolError(
+                "target not found", "ssh_check_connection"
+            )
+            result = svc.check_ssh_target("test-server")
+
+        assert result["success"] is False
+        assert "target not found" in result["error"]
+
+    def test_standalone_mode_mcp_client_error(self, tmp_path: Path) -> None:
+        """MCPClientError is caught and returned as error dict."""
+        from config_api.config_service import ConfigService
+        from config_api.mcp_client import MCPClientError
+
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _config_with_checkcommand())
+        svc = ConfigService(config_dir=str(tmp_path))
+
+        with patch("config_api.config_service.MCPClient") as MockMCP:
+            MockMCP.return_value.call_tool.side_effect = MCPClientError(
+                "connection refused"
+            )
+            result = svc.check_ssh_target("test-server")
+
+        assert result["success"] is False
+        assert "unreachable" in result["error"]
+
+    # -- common paths (both modes) -----------------------------------------
+
+    def test_nonexistent_target_raises_key_error(
+        self, tmp_path: Path
+    ) -> None:
+        """check_ssh_target raises KeyError for unknown target."""
+        from config_api.config_service import ConfigService
+
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _config_with_checkcommand())
+        svc = ConfigService(config_dir=str(tmp_path))
+
+        with pytest.raises(KeyError, match="nonexistent"):
+            svc.check_ssh_target("nonexistent")
+
+    def test_default_checkcommand_when_missing(
+        self, tmp_path: Path
+    ) -> None:
+        """Uses 'echo ping' as default checkcommand when not configured."""
+        from config_api.config_service import ConfigService
+
+        cfg = _minimal_config()
+        # Remove checkcommand if present
+        cfg["ssh_targets"]["test-server"].pop("checkcommand", None)
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, cfg)
+        svc = ConfigService(config_dir=str(tmp_path))
+
+        mock_mcp_result = {
+            "success": True,
+            "output": "ping",
+            "error": None,
+            "exit_code": 0,
+            "checkcommand": "echo ping",
+        }
+        with patch("config_api.config_service.MCPClient") as MockMCP:
+            MockMCP.return_value.call_tool.return_value = mock_mcp_result
+            result = svc.check_ssh_target("test-server")
+
+        assert result["checkcommand"] == "echo ping"

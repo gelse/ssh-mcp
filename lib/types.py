@@ -107,6 +107,25 @@ class FileUploadResult(TypedDict):
     """Number of bytes written to the remote file."""
 
 
+class CheckConnectionResult(TypedDict):
+    """Return type for the ``ssh_check_connection`` MCP tool."""
+
+    success: bool
+    """Whether the SSH check succeeded."""
+
+    output: str
+    """Stdout from the check command."""
+
+    error: str | None
+    """Error message if the check failed, else None."""
+
+    exit_code: int
+    """Process exit code from the check command."""
+
+    checkcommand: str
+    """The command that was executed."""
+
+
 class HealthCheckResult(TypedDict):
     """Return type for the health-check endpoint."""
 

@@ -57,6 +57,11 @@
     "circuit_breaker_failure_threshold": 5,
     "circuit_breaker_timeout_seconds": 60.0,
     "log_level": "INFO",
+    "logging": {
+      "log_targets": [
+        { "target": "stdout" }
+      ]
+    },
     "max_log_output": 4096,
     "compress_rotated": true,
     "pool_max_connections_per_target": 5,
@@ -65,6 +70,12 @@
     "max_concurrent_ssh_connections": 20,
     "watcher_debounce_seconds": 2.0,
     "trusted_proxies": [],
+    "rate_limit": {
+      "enabled": true,
+      "max_requests_per_minute": 60,
+      "window_seconds": 60.0,
+      "cleanup_interval_seconds": 300.0
+    },
     "sftp": {
       "sandbox_root": "/",
       "max_path_length": 4096

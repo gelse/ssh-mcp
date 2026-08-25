@@ -16,14 +16,23 @@ import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from config_api.mcp_client import MCPClient, MCPClientError, MCPToolError
 from lib.config import ConfigManager
 from lib.constants import (
     DEFAULT_CONFIG_DIR,
     DEFAULT_CONFIG_FILENAME,
+    DEFAULT_SSH_KEY_FILENAME,
     RESTRICTED_FILE_MODE,
     TARGET_NAME_PATTERN,
 )
 from lib.exceptions import ConfigValidationError
+
+# Attempt to import ssh_operations for direct SSH calls (unified mode).
+# In standalone mode, this import will fail and MCPClient is used instead.
+try:
+    import lib.ssh_operations as _ssh_operations_module
+except ImportError:
+    _ssh_operations_module = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +59,31 @@ class ConfigService:
         "settings",
     })
 
-    def __init__(self, config_dir: str | None = None) -> None:
+    def __init__(
+        self,
+        config_dir: str | None = None,
+        *,
+        ssh_client_manager: object | None = None,
+        ssh_config_manager: object | None = None,
+        ssh_key_path: str | None = None,
+    ) -> None:
+        """Initialise the config service.
+
+        Args:
+            config_dir: Path to the config directory.  Falls back to the
+                ``CONFIG_DIR`` environment variable or the compiled default.
+            ssh_client_manager: An
+                :class:`~lib.ssh_client.SSHClientManager` instance for
+                direct SSH calls (unified mode).  ``None`` falls back to
+                MCPClient (standalone mode).
+            ssh_config_manager: A :class:`~lib.config.ConfigManager`
+                instance whose :meth:`get_ssh_target` returns the *full*
+                (unstripped) target dict.  Required when
+                *ssh_client_manager* is provided.
+            ssh_key_path: Default path to the SSH private key used by
+                :func:`lib.ssh_operations.check_ssh_connection`.  Falls
+                back to ``DEFAULT_SSH_KEY_FILENAME`` when omitted.
+        """
         self.config_dir = Path(
             config_dir or os.environ.get("CONFIG_DIR", DEFAULT_CONFIG_DIR)
         )
@@ -61,7 +94,56 @@ class ConfigService:
         # __init__ calls self.load() which reads the existing file — this is
         # expected and harmless.  The ConfigManager instance is used solely
         # for its _validate() method.
-        self._validator = ConfigManager(str(self.config_dir))
+        #
+        # If the config file is malformed or missing required fields (e.g.
+        # empty ssh_targets), the ConfigManager constructor raises an
+        # exception.  This is expected in scenarios where the config API is
+        # started before a valid config exists (e.g. first boot with the
+        # unified container).  In that case we allow the service to start
+        # without validation — the config API can still serve read/write
+        # requests, but validation endpoints will raise an error.
+        try:
+            self._validator = ConfigManager(str(self.config_dir))
+        except Exception as exc:
+            logger.warning(
+                "ConfigManager init failed (%s: %s) — config API "
+                "will operate without validation until the config "
+                "is valid",
+                type(exc).__name__,
+                exc,
+            )
+            self._validator = None
+
+        # Direct SSH operation dependencies (unified mode).
+        self._ssh_client_manager = ssh_client_manager
+        self._ssh_config_manager = ssh_config_manager
+        self._ssh_key_path = ssh_key_path or DEFAULT_SSH_KEY_FILENAME
+
+    def _reload_config_managers(self) -> None:
+        """Reload in-memory config caches after a disk write.
+
+        Calls ``reload()`` on the MCP server's ConfigManager (when
+        available in unified mode) and on the local validation
+        ConfigManager so that both reflect the on-disk state
+        immediately.
+        """
+        # Reload the MCP server's in-memory config so the next tool
+        # call sees the fresh values (e.g. updated checkcommand).
+        if self._ssh_config_manager is not None:
+            try:
+                self._ssh_config_manager.reload()  # type: ignore[union-attr]
+            except Exception as exc:
+                logger.warning(
+                    "Failed to reload MCP ConfigManager: %s", exc,
+                )
+        # Reload the local validation ConfigManager too.
+        if self._validator is not None:
+            try:
+                self._validator.reload()
+            except Exception as exc:
+                logger.warning(
+                    "Failed to reload validator ConfigManager: %s", exc,
+                )
 
     # ------------------------------------------------------------------
     # Read operations
@@ -133,45 +215,103 @@ class ConfigService:
                 clean.pop(field, None)
         return clean
 
+    @property
+    def _use_direct_ssh(self) -> bool:
+        """Return ``True`` when direct SSH calls are available (unified mode)."""
+        return (
+            _ssh_operations_module is not None
+            and self._ssh_client_manager is not None
+            and self._ssh_config_manager is not None
+        )
+
     def check_ssh_target(self, name: str, timeout: int = 10) -> dict:
-        """Execute the checkcommand on an SSH target and return the result.
+        """Execute the checkcommand on an SSH target to verify connectivity.
+
+        In **unified mode** (when ``lib.ssh_operations`` is importable and
+        the required managers have been injected), calls
+        :func:`lib.ssh_operations.check_ssh_connection` directly — no HTTP
+        round-trip required.
+
+        In **standalone mode** falls back to the MCP server's
+        ``ssh_check_connection`` tool via :class:`MCPClient`.
 
         Args:
             name: The SSH target identifier.
             timeout: Connection/command timeout in seconds.
 
         Returns:
-            Dict with success, output, error, exit_code fields.
+            Dict with ``success``, ``output``, ``error``, ``exit_code``,
+            and ``checkcommand`` fields.
 
         Raises:
             KeyError: If the target does not exist.
         """
-        target = self.get_ssh_target(name)  # raises KeyError if missing
+        # Retrieve target info (raises KeyError if missing).
+        # In standalone mode this also gets the checkcommand for the
+        # fallback error response.
+        target = self.get_ssh_target(name)
         checkcommand = target.get("checkcommand", "echo ping")
 
-        # Re-read full config (get_ssh_target strips secrets)
-        current = self.read_config()
-        full_target = current.get("ssh_targets", {}).get(name, {})
+        # ----- Unified mode: direct function call -----
+        if self._use_direct_ssh:
+            try:
+                result = _ssh_operations_module.check_ssh_connection(
+                    ssh_client_manager=self._ssh_client_manager,
+                    config_manager=self._ssh_config_manager,
+                    target_name=name,
+                    ssh_key_path=self._ssh_key_path,
+                    timeout=timeout,
+                )
+                return {
+                    "success": result.get("success", False),
+                    "output": result.get("output", ""),
+                    "error": result.get("error"),
+                    "exit_code": result.get("exit_code", -1),
+                    "checkcommand": result.get("checkcommand", checkcommand),
+                }
+            except Exception as exc:
+                # Translate any library exception into the standard
+                # error dict so the API contract is preserved.
+                return {
+                    "success": False,
+                    "output": "",
+                    "error": str(exc),
+                    "exit_code": -1,
+                    "checkcommand": checkcommand,
+                }
 
-        from config_api.ssh_checker import check_ssh_connection
-
-        result = check_ssh_connection(
-            host=full_target["host"],
-            port=full_target.get("port", 22),
-            username=full_target["username"],
-            password=full_target.get("password"),
-            private_key=full_target.get("private_key"),
-            checkcommand=checkcommand,
-            timeout=timeout,
-        )
-
-        return {
-            "success": result.success,
-            "output": result.output,
-            "error": result.error,
-            "exit_code": result.exit_code,
-            "checkcommand": checkcommand,
-        }
+        # ----- Standalone mode: MCPClient HTTP fallback -----
+        mcp_client = MCPClient()
+        try:
+            result = mcp_client.call_tool(
+                "ssh_check_connection",
+                arguments={"server_name": name, "timeout": timeout},
+                timeout=timeout + 5,  # Extra buffer for HTTP overhead
+            )
+            return {
+                "success": result.get("success", False),
+                "output": result.get("output", ""),
+                "error": result.get("error"),
+                "exit_code": result.get("exit_code", -1),
+                "checkcommand": result.get("checkcommand", checkcommand),
+            }
+        except MCPToolError as e:
+            # Tool returned an error response (e.g., target not found)
+            return {
+                "success": False,
+                "output": "",
+                "error": str(e),
+                "exit_code": -1,
+                "checkcommand": checkcommand,
+            }
+        except MCPClientError as e:
+            return {
+                "success": False,
+                "output": "",
+                "error": f"MCP server unreachable: {e}",
+                "exit_code": -1,
+                "checkcommand": checkcommand,
+            }
 
     def get_block_patterns(self) -> list[str]:
         """Read the block_patterns list from the config.
@@ -199,8 +339,16 @@ class ConfigService:
             A validated deep copy with defaults applied.
 
         Raises:
-            ConfigValidationError: If validation fails.
+            ConfigValidationError: If validation fails or the validator
+                is unavailable (e.g. because ConfigManager failed to
+                initialise due to an invalid config on disk).
         """
+        if self._validator is None:
+            raise ConfigValidationError(
+                "Validation unavailable: config validator failed to "
+                "initialise.  Ensure the config file is valid and "
+                "contains a non-empty ssh_targets section."
+            )
         return self._validator._validate(config)
 
     def validate_only(self, config: dict) -> dict:
@@ -263,6 +411,12 @@ class ConfigService:
             # the return value so API callers never see them)
             self._atomic_write(validated)
 
+        # Step 6: Invalidate in-memory ConfigManager caches so the
+        # MCP server picks up the new config immediately (e.g. fresh
+        # checkcommand values) without waiting for the file-watcher
+        # debounce window.
+        self._reload_config_managers()
+
         return clean
 
     def write_section(self, section: str, data: dict | list) -> dict:
@@ -307,6 +461,12 @@ class ConfigService:
         Reads the current config, replaces or adds the target, validates
         the full config, and atomically writes.
 
+        When editing an existing target, empty or missing ``password`` /
+        ``private_key`` fields in *target_data* are treated as "keep
+        unchanged" — the existing secret values are preserved.  On
+        creation (new target), at least one credential is still required
+        by the config-schema validation in ``lib/config.py``.
+
         Args:
             name: The SSH target identifier.
             target_data: The target config dict (may include
@@ -323,7 +483,21 @@ class ConfigService:
             raise ValueError(f"Invalid target name: {name!r}")
 
         current = self.read_config()
-        current.setdefault("ssh_targets", {})[name] = target_data
+        targets = current.setdefault("ssh_targets", {})
+
+        if name in targets:
+            # --- editing an existing target ---
+            # Preserve existing secrets when the caller sends empty
+            # or omitted password / private_key fields.
+            existing = targets[name]
+            for field in self._SECRET_FIELDS:
+                new_value = target_data.get(field)
+                if not new_value or (isinstance(new_value, str) and not new_value.strip()):
+                    # Keep the existing secret if present
+                    if field in existing:
+                        target_data[field] = existing[field]
+
+        targets[name] = target_data
         written = self.write_config(current)
         target = written["ssh_targets"][name]
         clean = copy.deepcopy(target)

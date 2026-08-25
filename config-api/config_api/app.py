@@ -2,18 +2,15 @@
 
 Creates and configures the FastAPI application with all routes,
 middleware, and dependencies.  No module-level side effects —
-everything is initialized inside create_app() or main().
+everything is initialized inside create_app().
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-import os
-import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-import uvicorn
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
@@ -29,8 +26,11 @@ from config_api.routes import init_config_service, router
 
 async def _periodic_cleanup(svc: ConfigService) -> None:
     """Run backup cleanup every hour."""
+    logger = logging.getLogger("config_api")
+    logger.debug("_periodic_cleanup: starting periodic cleanup loop")
     while True:
         await asyncio.sleep(3600)  # 1 hour
+        logger.debug("_periodic_cleanup: running cleanup")
         try:
             deleted = svc.cleanup_old_backups()
             if deleted:
@@ -46,10 +46,13 @@ async def _periodic_cleanup(svc: ConfigService) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # type: ignore[type-arg]
     """Manage background tasks during app lifecycle."""
+    logger = logging.getLogger("config_api")
+    logger.debug("lifespan entry: starting background tasks")
     # Start background cleanup task
     svc: ConfigService = app.state.config_service
     task = asyncio.create_task(_periodic_cleanup(svc))
     yield
+    logger.debug("lifespan exit: cancelling background tasks")
     # Cancel on shutdown
     task.cancel()
     try:
@@ -58,16 +61,30 @@ async def lifespan(app: FastAPI):  # type: ignore[type-arg]
         pass
 
 
-def create_app(config_dir: str | None = None) -> FastAPI:
+def create_app(
+    config_dir: str | None = None,
+    *,
+    ssh_client_manager: object | None = None,
+    ssh_config_manager: object | None = None,
+    ssh_key_path: str | None = None,
+) -> FastAPI:
     """Create and configure the FastAPI application.
 
     Args:
         config_dir: Path to the config directory.  If None, uses the
                     CONFIG_DIR env var or defaults to /config.
+        ssh_client_manager: Optional SSHClientManager for unified mode.
+        ssh_config_manager: Optional ConfigManager for unified mode.
+        ssh_key_path: Optional path to the SSH key for unified mode.
 
     Returns:
         Configured FastAPI application instance.
     """
+    logger = logging.getLogger("config_api")
+    logger.debug(
+        "create_app entry: config_dir=%s, ssh_client_manager=%s",
+        config_dir, type(ssh_client_manager).__name__ if ssh_client_manager else None,
+    )
     app = FastAPI(
         title="MCP SSH Config API",
         description="REST API for managing SSH MCP server configuration",
@@ -77,8 +94,24 @@ def create_app(config_dir: str | None = None) -> FastAPI:
         lifespan=lifespan,
     )
 
+    # Load Bearer token from environment (required for auth).
+    # create_app() is the entry point so we must load here.
+    from config_api.auth import load_token  # noqa: PLC0415
+
+    try:
+        load_token()
+    except RuntimeError:
+        # Token is optional — if not set, auth-protected routes will
+        # reject requests at call time rather than crashing at startup.
+        pass
+
     # Initialize config service
-    svc = init_config_service(config_dir)
+    svc = init_config_service(
+        config_dir,
+        ssh_client_manager=ssh_client_manager,
+        ssh_config_manager=ssh_config_manager,
+        ssh_key_path=ssh_key_path,
+    )
 
     # Mount routes
     app.include_router(router)
@@ -91,53 +124,5 @@ def create_app(config_dir: str | None = None) -> FastAPI:
     if _ui_dir.is_dir():
         app.mount("/ui", StaticFiles(directory=str(_ui_dir), html=True), name="ui")
 
+    logger.debug("create_app exit: app created with routes mounted")
     return app
-
-
-def main() -> None:
-    """CLI entry point for the config API server.
-
-    Environment variables:
-        CONFIG_API_TOKEN: Required. Bearer token for API authentication.
-        CONFIG_DIR: Config directory path (default: /config).
-        CONFIG_API_PORT: Port to listen on (default: 8081).
-        CONFIG_API_HOST: Bind address (default: 0.0.0.0).
-    """
-    # Configure logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        stream=sys.stdout,
-    )
-    logger = logging.getLogger("config_api")
-
-    # Load token (raises RuntimeError if not set)
-    try:
-        load_token()
-    except RuntimeError as e:
-        logger.error("Startup failed: %s", e)
-        sys.exit(1)
-
-    # Read settings from environment
-    config_dir = os.environ.get("CONFIG_DIR", "/config")
-    host = os.environ.get("CONFIG_API_HOST", "0.0.0.0")
-    port = int(os.environ.get("CONFIG_API_PORT", "8081"))
-
-    logger.info("Starting config API on %s:%d", host, port)
-    logger.info("Config directory: %s", config_dir)
-
-    # Create app
-    app = create_app(config_dir)
-
-    # Run with uvicorn
-    uvicorn.run(
-        app,
-        host=host,
-        port=port,
-        log_level="info",
-        access_log=True,
-    )
-
-
-if __name__ == "__main__":
-    main()

@@ -21,9 +21,14 @@ from lib.constants import (
     DEFAULT_MAX_OUTPUT_LENGTH,
     DEFAULT_SSH_PORT,
     LATEST_CONFIG_VERSION,
+    LOG_LEVELS,
+    LOG_TARGET_JSONFILE,
+    LOG_TARGET_STDOUT,
+    LOG_TARGET_TEXTFILE,
     MAX_BLOCK_PATTERNS,
     MAX_REGEX_PATTERN_LENGTH,
     MAX_TARGETS,
+    SUPPORTED_LOG_TARGETS,
 )
 
 _RESTRICTED = 0o600
@@ -919,8 +924,8 @@ class TestWatcherHealth:
 class TestResilienceSettings:
     """Validation of retry / circuit-breaker settings keys."""
 
-    def test_validated_settings_contain_all_fifteen_keys(self):
-        """The validated settings dict always exposes all fifteen settings."""
+    def test_validated_settings_contain_all_keys(self):
+        """The validated settings dict always exposes every settings key."""
         with tempfile.TemporaryDirectory() as td:
             _write_config(td, _minimal_valid_config())
             mgr = ConfigManager(td)
@@ -942,6 +947,8 @@ class TestResilienceSettings:
                 "watcher_debounce_seconds",
                 "trusted_proxies",
                 "sftp",
+                "rate_limit",
+                "logging",
             }
 
     def test_defaults_applied_when_keys_missing(self):
@@ -1987,3 +1994,185 @@ class TestResourceLimits:
             _write_config(td, cfg)
             with pytest.raises(ConfigValidationError, match="exceeds.*character limit"):
                 ConfigManager(td)
+
+
+# ---------------------------------------------------------------------------
+# Tests: settings.logging validation
+# ---------------------------------------------------------------------------
+
+
+class TestSettingsLoggingValidation:
+    """Validation of settings.logging config block."""
+
+    # -- Success path tests --
+
+    def test_valid_logging_stdout_target(self) -> None:
+        """A config with settings.logging using a stdout target loads fine."""
+        cfg = _minimal_valid_config()
+        cfg["settings"]["logging"] = {
+            "log_targets": [{"target": "stdout"}],
+        }
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            mgr = ConfigManager(td)
+            assert mgr.data["settings"]["logging"]["log_targets"][0]["target"] == "stdout"
+
+    def test_valid_logging_jsonfile_target(self) -> None:
+        """A config with a jsonfile target and filepath loads fine."""
+        cfg = _minimal_valid_config()
+        cfg["settings"]["logging"] = {
+            "log_targets": [{"target": "jsonfile", "filepath": "/var/log/mcp.jsonl"}],
+        }
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            mgr = ConfigManager(td)
+            target = mgr.data["settings"]["logging"]["log_targets"][0]
+            assert target["target"] == "jsonfile"
+            assert target["filepath"] == "/var/log/mcp.jsonl"
+
+    def test_valid_logging_textfile_target(self) -> None:
+        """A config with a file (textfile) target and filepath loads fine."""
+        cfg = _minimal_valid_config()
+        cfg["settings"]["logging"] = {
+            "log_targets": [{"target": "file", "filepath": "/var/log/mcp.log"}],
+        }
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            mgr = ConfigManager(td)
+            target = mgr.data["settings"]["logging"]["log_targets"][0]
+            assert target["target"] == "file"
+            assert target["filepath"] == "/var/log/mcp.log"
+
+    def test_valid_logging_multiple_targets(self) -> None:
+        """A config with multiple log targets loads fine."""
+        cfg = _minimal_valid_config()
+        cfg["settings"]["logging"] = {
+            "log_targets": [
+                {"target": "stdout"},
+                {"target": "jsonfile", "filepath": "/var/log/mcp.jsonl"},
+                {"target": "file", "filepath": "/var/log/mcp.log"},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            mgr = ConfigManager(td)
+            assert len(mgr.data["settings"]["logging"]["log_targets"]) == 3
+
+    def test_missing_logging_is_ok(self) -> None:
+        """A config without settings.logging is valid (backward compat)."""
+        cfg = _minimal_valid_config()
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            mgr = ConfigManager(td)
+            # logging key may be absent or None
+            logging_val = mgr.data.get("settings", {}).get("logging")
+            assert logging_val is None or logging_val == {}
+
+    # -- Error path tests --
+
+    def test_log_targets_must_be_nonempty_list(self) -> None:
+        """log_targets as empty list or non-list raises error."""
+        cfg = _minimal_valid_config()
+        cfg["settings"]["logging"] = {"log_targets": []}
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(ConfigValidationError, match="log_targets.*must be a non-empty list"):
+                ConfigManager(td)
+
+        cfg2 = _minimal_valid_config()
+        cfg2["settings"]["logging"] = {"log_targets": "stdout"}
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg2)
+            with pytest.raises(ConfigValidationError, match="log_targets.*must be a non-empty list"):
+                ConfigManager(td)
+
+    def test_unknown_target_type_raises_error(self) -> None:
+        """Unknown log target type string raises error."""
+        cfg = _minimal_valid_config()
+        cfg["settings"]["logging"] = {
+            "log_targets": [{"target": "syslog"}],
+        }
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(ConfigValidationError, match="Unknown log target type"):
+                ConfigManager(td)
+
+    def test_missing_filepath_for_jsonfile_raises_error(self) -> None:
+        """jsonfile target without filepath raises error."""
+        cfg = _minimal_valid_config()
+        cfg["settings"]["logging"] = {
+            "log_targets": [{"target": "jsonfile"}],
+        }
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(ConfigValidationError, match="requires a 'filepath'"):
+                ConfigManager(td)
+
+    def test_missing_filepath_for_textfile_raises_error(self) -> None:
+        """file (textfile) target without filepath raises error."""
+        cfg = _minimal_valid_config()
+        cfg["settings"]["logging"] = {
+            "log_targets": [{"target": "file"}],
+        }
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(ConfigValidationError, match="requires a 'filepath'"):
+                ConfigManager(td)
+
+    def test_per_target_log_level_validation(self) -> None:
+        """Invalid per-target log_level raises error."""
+        cfg = _minimal_valid_config()
+        cfg["settings"]["logging"] = {
+            "log_targets": [
+                {"target": "stdout", "log_level": "INVALID"},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(ConfigValidationError, match="log_level.*must be one of"):
+                ConfigManager(td)
+
+    def test_per_target_log_level_valid(self) -> None:
+        """Valid per-target log_level is accepted and preserved."""
+        cfg = _minimal_valid_config()
+        cfg["settings"]["logging"] = {
+            "log_targets": [
+                {"target": "stdout", "log_level": "DEBUG"},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            mgr = ConfigManager(td)
+            assert mgr.data["settings"]["logging"]["log_targets"][0]["log_level"] == "DEBUG"
+
+    def test_logging_must_be_dict(self) -> None:
+        """settings.logging as non-dict raises error."""
+        # String value
+        cfg = _minimal_valid_config()
+        cfg["settings"]["logging"] = "stdout"
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(ConfigValidationError, match="must be an object"):
+                ConfigManager(td)
+
+        # List value
+        cfg2 = _minimal_valid_config()
+        cfg2["settings"]["logging"] = ["stdout"]
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg2)
+            with pytest.raises(ConfigValidationError, match="must be an object"):
+                ConfigManager(td)
+
+    def test_extra_fields_in_log_targets_not_rejected(self) -> None:
+        """Extra fields in log target dicts are currently permitted."""
+        cfg = _minimal_valid_config()
+        cfg["settings"]["logging"] = {
+            "log_targets": [
+                {"target": "stdout", "extra_field": "allowed"},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            # Should not raise — extra fields are not validated
+            mgr = ConfigManager(td)
+            assert mgr.data["settings"]["logging"]["log_targets"][0].get("extra_field") == "allowed"

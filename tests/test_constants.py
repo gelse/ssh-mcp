@@ -355,9 +355,9 @@ class TestConstantValues:
         assert SIZE_UNIT_MULTIPLIERS["gb"] == 1024 * 1024 * 1024
 
     def test_setting_key_types_complete(self) -> None:
-        """SETTING_KEY_TYPES has 15 keys with valid type names."""
-        assert len(SETTING_KEY_TYPES) == 15
-        valid_types = {"int", "float", "str", "bool", "size", "list"}
+        """SETTING_KEY_TYPES has 16 keys with valid type names."""
+        assert len(SETTING_KEY_TYPES) == 16
+        valid_types = {"int", "float", "str", "bool", "size", "list", "dict"}
         for key, type_name in SETTING_KEY_TYPES.items():
             assert isinstance(key, str)
             assert type_name in valid_types, f"{key} has invalid type '{type_name}'"
