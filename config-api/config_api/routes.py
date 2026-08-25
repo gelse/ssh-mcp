@@ -167,7 +167,18 @@ async def hash_key(
 # GET /api/config/schema — JSON Schema (no auth)
 # ---------------------------------------------------------------------------
 
-_SCHEMA_PATH = Path(__file__).resolve().parent.parent.parent / "config.schema.json"
+# In standalone mode the schema lives next to the config-api package
+# (3 levels up from routes.py), while in the unified container it is at
+# the app root (2 levels up).  Try both and fall back to the one that
+# exists.
+_schema_candidates = [
+    Path(__file__).resolve().parent.parent.parent / "config.schema.json",
+    Path(__file__).resolve().parent.parent / "config.schema.json",
+]
+_SCHEMA_PATH: Path | None = next(
+    (p for p in _schema_candidates if p.is_file()),
+    None,
+)
 _schema_cache: dict | None = None
 
 
@@ -175,6 +186,11 @@ _schema_cache: dict | None = None
 async def get_config_schema() -> JSONResponse:
     """Return the config JSON Schema.  No authentication required."""
     global _schema_cache  # noqa: PLW0603
+    if _SCHEMA_PATH is None:
+        return JSONResponse(
+            status_code=503,
+            content={"error": True, "message": "config.schema.json not found"},
+        )
     if _schema_cache is None:
         with _SCHEMA_PATH.open("r", encoding="utf-8") as f:
             _schema_cache = json.load(f)

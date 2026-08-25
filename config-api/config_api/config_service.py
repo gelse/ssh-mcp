@@ -94,7 +94,25 @@ class ConfigService:
         # __init__ calls self.load() which reads the existing file — this is
         # expected and harmless.  The ConfigManager instance is used solely
         # for its _validate() method.
-        self._validator = ConfigManager(str(self.config_dir))
+        #
+        # If the config file is malformed or missing required fields (e.g.
+        # empty ssh_targets), the ConfigManager constructor raises an
+        # exception.  This is expected in scenarios where the config API is
+        # started before a valid config exists (e.g. first boot with the
+        # unified container).  In that case we allow the service to start
+        # without validation — the config API can still serve read/write
+        # requests, but validation endpoints will raise an error.
+        try:
+            self._validator = ConfigManager(str(self.config_dir))
+        except Exception as exc:
+            logger.warning(
+                "ConfigManager init failed (%s: %s) — config API "
+                "will operate without validation until the config "
+                "is valid",
+                type(exc).__name__,
+                exc,
+            )
+            self._validator = None
 
         # Direct SSH operation dependencies (unified mode).
         self._ssh_client_manager = ssh_client_manager
@@ -295,8 +313,16 @@ class ConfigService:
             A validated deep copy with defaults applied.
 
         Raises:
-            ConfigValidationError: If validation fails.
+            ConfigValidationError: If validation fails or the validator
+                is unavailable (e.g. because ConfigManager failed to
+                initialise due to an invalid config on disk).
         """
+        if self._validator is None:
+            raise ConfigValidationError(
+                "Validation unavailable: config validator failed to "
+                "initialise.  Ensure the config file is valid and "
+                "contains a non-empty ssh_targets section."
+            )
         return self._validator._validate(config)
 
     def validate_only(self, config: dict) -> dict:

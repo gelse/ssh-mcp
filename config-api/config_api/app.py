@@ -86,6 +86,18 @@ def create_app(
         lifespan=lifespan,
     )
 
+    # Load Bearer token from environment (required for auth).
+    # In standalone mode this is called by main(); in unified mode
+    # create_app() is the entry point so we must load here.
+    from config_api.auth import load_token  # noqa: PLC0415
+
+    try:
+        load_token()
+    except RuntimeError:
+        # Token is optional — if not set, auth-protected routes will
+        # reject requests at call time rather than crashing at startup.
+        pass
+
     # Initialize config service
     svc = init_config_service(
         config_dir,
