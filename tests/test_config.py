@@ -2132,6 +2132,19 @@ class TestSettingsLoggingValidation:
             with pytest.raises(ConfigValidationError, match="log_level.*must be one of"):
                 ConfigManager(td)
 
+    def test_per_target_log_level_valid(self) -> None:
+        """Valid per-target log_level is accepted and preserved."""
+        cfg = _minimal_valid_config()
+        cfg["settings"]["logging"] = {
+            "log_targets": [
+                {"target": "stdout", "log_level": "DEBUG"},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            mgr = ConfigManager(td)
+            assert mgr.data["settings"]["logging"]["log_targets"][0]["log_level"] == "DEBUG"
+
     def test_logging_must_be_dict(self) -> None:
         """settings.logging as non-dict raises error."""
         # String value
