@@ -119,6 +119,32 @@ class ConfigService:
         self._ssh_config_manager = ssh_config_manager
         self._ssh_key_path = ssh_key_path or DEFAULT_SSH_KEY_FILENAME
 
+    def _reload_config_managers(self) -> None:
+        """Reload in-memory config caches after a disk write.
+
+        Calls ``reload()`` on the MCP server's ConfigManager (when
+        available in unified mode) and on the local validation
+        ConfigManager so that both reflect the on-disk state
+        immediately.
+        """
+        # Reload the MCP server's in-memory config so the next tool
+        # call sees the fresh values (e.g. updated checkcommand).
+        if self._ssh_config_manager is not None:
+            try:
+                self._ssh_config_manager.reload()  # type: ignore[union-attr]
+            except Exception as exc:
+                logger.warning(
+                    "Failed to reload MCP ConfigManager: %s", exc,
+                )
+        # Reload the local validation ConfigManager too.
+        if self._validator is not None:
+            try:
+                self._validator.reload()
+            except Exception as exc:
+                logger.warning(
+                    "Failed to reload validator ConfigManager: %s", exc,
+                )
+
     # ------------------------------------------------------------------
     # Read operations
     # ------------------------------------------------------------------
@@ -384,6 +410,12 @@ class ConfigService:
             # read-modify-write cycles — stripping only happens in
             # the return value so API callers never see them)
             self._atomic_write(validated)
+
+        # Step 6: Invalidate in-memory ConfigManager caches so the
+        # MCP server picks up the new config immediately (e.g. fresh
+        # checkcommand values) without waiting for the file-watcher
+        # debounce window.
+        self._reload_config_managers()
 
         return clean
 

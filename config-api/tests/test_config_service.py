@@ -496,6 +496,112 @@ class TestWriteConfig:
         svc.write_config(_minimal_config())
         assert svc.config_path.exists()
 
+    def test_write_config_reloads_config_managers(
+        self, tmp_path: Path
+    ) -> None:
+        """write_config() calls reload() on both ConfigManagers."""
+        from config_api.config_service import ConfigService
+
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _minimal_config())
+        svc = ConfigService(config_dir=str(tmp_path))
+
+        with patch.object(svc, "_reload_config_managers") as mock_reload:
+            svc.write_config(_minimal_config())
+
+        mock_reload.assert_called_once()
+
+    def test_write_section_reloads_config_managers(
+        self, tmp_path: Path
+    ) -> None:
+        """write_section() triggers config manager reload via write_config."""
+        from config_api.config_service import ConfigService
+
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _minimal_config())
+        svc = ConfigService(config_dir=str(tmp_path))
+
+        with patch.object(svc, "_reload_config_managers") as mock_reload:
+            svc.write_section("block_patterns", ["rm\\s+-rf"])
+
+        mock_reload.assert_called_once()
+
+    def test_put_ssh_target_reloads_config_managers(
+        self, tmp_path: Path
+    ) -> None:
+        """put_ssh_target() triggers config manager reload via write_config."""
+        from config_api.config_service import ConfigService
+
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _minimal_config())
+        svc = ConfigService(config_dir=str(tmp_path))
+
+        with patch.object(svc, "_reload_config_managers") as mock_reload:
+            svc.put_ssh_target(
+                "new-server",
+                {
+                    "host": "10.0.0.99",
+                    "username": "user",
+                    "port": 22,
+                    "password": "pass",
+                },
+            )
+
+        mock_reload.assert_called_once()
+
+
+class TestReloadConfigManagers:
+    """Tests for ConfigService._reload_config_managers()."""
+
+    def test_reloads_ssh_config_manager(self, tmp_path: Path) -> None:
+        """Reloads the MCP server's ConfigManager when available."""
+        from config_api.config_service import ConfigService
+
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _minimal_config())
+        mock_cfg = MagicMock()
+        svc = ConfigService(
+            config_dir=str(tmp_path),
+            ssh_config_manager=mock_cfg,
+        )
+
+        svc._reload_config_managers()
+        mock_cfg.reload.assert_called_once()
+
+    def test_reloads_validator(self, tmp_path: Path) -> None:
+        """Reloads the local validation ConfigManager."""
+        from config_api.config_service import ConfigService
+
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _minimal_config())
+        svc = ConfigService(config_dir=str(tmp_path))
+
+        with patch.object(svc._validator, "reload") as mock_reload:
+            svc._reload_config_managers()
+            mock_reload.assert_called_once()
+
+    def test_no_error_when_no_ssh_config_manager(
+        self, tmp_path: Path
+    ) -> None:
+        """Does not fail when ssh_config_manager is None (standalone mode)."""
+        from config_api.config_service import ConfigService
+
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _minimal_config())
+        svc = ConfigService(config_dir=str(tmp_path))
+
+        # Should not raise
+        svc._reload_config_managers()
+
+    def test_no_error_when_reload_fails(self, tmp_path: Path) -> None:
+        """Reload failure is caught and logged, not raised."""
+        from config_api.config_service import ConfigService
+
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, _minimal_config())
+        mock_cfg = MagicMock()
+        mock_cfg.reload.side_effect = OSError("disk error")
+        svc = ConfigService(
+            config_dir=str(tmp_path),
+            ssh_config_manager=mock_cfg,
+        )
+
+        # Should not raise — just log a warning
+        svc._reload_config_managers()
+
 
 # ---------------------------------------------------------------------------
 # write_section

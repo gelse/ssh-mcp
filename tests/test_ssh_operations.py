@@ -501,6 +501,55 @@ class TestCheckSSHConnection:
             "uptime", timeout=10
         )
 
+    def test_checkcommand_read_from_config_manager(self, tmp_path):
+        """checkcommand is read from the ConfigManager's in-memory data."""
+        config = _minimal_config(
+            ssh_targets={
+                "testserver": {
+                    "host": "10.0.0.1",
+                    "username": "testuser",
+                    "port": 22,
+                    "password": "testpass",
+                    "checkcommand": "uptime",
+                },
+            }
+        )
+        config_mgr, ssh_mgr = self._make_manager_and_mock(tmp_path, config)
+
+        mock_client = MagicMock()
+        mock_stdin = MagicMock()
+        mock_stdout = MagicMock()
+        mock_stderr = MagicMock()
+
+        mock_stdout.read.return_value = b"ok"
+        mock_stderr.read.return_value = b""
+        mock_stdout.channel.recv_exit_status.return_value = 0
+
+        mock_client.exec_command.return_value = (
+            mock_stdin,
+            mock_stdout,
+            mock_stderr,
+        )
+        ssh_mgr.connect.return_value.__enter__ = MagicMock(
+            return_value=mock_client
+        )
+        ssh_mgr.connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        with patch(
+            "lib.ssh_operations.os.path.exists", return_value=True
+        ):
+            result = check_ssh_connection(
+                ssh_mgr,
+                config_mgr,
+                "testserver",
+                "/app/ssh_key",
+            )
+
+        assert result["checkcommand"] == "uptime"
+        mock_client.exec_command.assert_called_once_with(
+            "uptime", timeout=10
+        )
+
     def test_timeout_clamped_to_min(self, tmp_path):
         """Timeout below minimum is clamped to DEFAULT_SSH_CHECK_TIMEOUT_MIN."""
         config = _minimal_config()
