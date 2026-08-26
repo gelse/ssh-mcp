@@ -86,17 +86,5 @@
         }
       ]
     }
-  ],
-  "remotes": [
-    {
-      "type": "streamable-http",
-      "url": "https://{host}/mcp",
-      "variables": {
-        "host": {
-          "description": "Hostname or IP of the ssh-mcp deployment",
-          "isRequired": true
-        }
-      }
-    }
   ]
 }
