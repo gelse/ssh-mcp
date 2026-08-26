@@ -104,6 +104,22 @@ response time.
 - Rotate keys regularly, especially if a key may have been exposed.
 - Remove legacy `sha256:` hashes and re-hash them with PBKDF2.
 
+### Format Validation
+
+Before comparison, raw API keys submitted by clients are validated for
+syntactic safety by [`lib/request_context.py`](lib/request_context.py):
+
+- **Non-empty** — empty or missing keys are rejected immediately.
+- **Printable ASCII only** — every byte must be in the `0x20`–`0x7E` range,
+  rejecting control characters (e.g. `\x1f`) and non-ASCII bytes (e.g.
+  `café`).
+- **Maximum length** — keys must not exceed `MAX_API_KEY_LENGTH` (default:
+  1024 characters).
+
+This prevents injection of control characters or extremely long strings into
+the API key comparison path.
+
+
 [`secrets.compare_digest()`]: https://docs.python.org/3/library/secrets.html#secrets.compare_digest
 
 ---
@@ -212,6 +228,47 @@ preventing whitespace normalization attacks. The extracted command basename
 is validated against a character whitelist (`[a-zA-Z0-9][a-zA-Z0-9_-]*`).
 
 [`shlex.split()`]: https://docs.python.org/3/library/shlex.html#shlex.split
+
+## Sudo Command Handling
+
+When a tool call sets `sudo=True`, the server conditionally wraps the command
+with the appropriate sudo flags via [`lib/sudo.py`](lib/sudo.py). This
+centralises all sudo-related logic and prevents misuse.
+
+### Password vs Passwordless
+
+| Scenario | Wrapper | Flag |
+|----------|---------|------|
+| `sudo=True` with a password | `sudo -S -p ''` | Reads the password from stdin; empty prompt string suppresses the sudo password prompt |
+| `sudo=True` without a password | `sudo -n` | Refuses to run if the remote user's password is required |
+| `sudo=False` (default) | None | Command runs unchanged |
+
+The password is injected via stdin (`-S` flag) so it never appears in the
+remote process's argument list or in `/proc/*/cmdline`.
+
+### Double-Wrapping Prevention
+
+`validate_sudo()` rejects requests where `sudo=True` **and** the raw command
+already contains the word `sudo` (case-insensitive word-boundary match).
+This prevents:
+
+- **sudo-in-sudo escalation** — e.g. `sudo sudo whoami` would produce
+  unexpected privilege stacking on the remote host.
+- **Inconsistent audit trails** — double-wrapping obscures the true command
+  executed.
+
+When validation fails, the handler returns an error message and the command
+is never executed.
+
+### Relationship to Block Patterns
+
+Operators can completely prohibit sudo by adding `\bsudo\b` to
+`block_patterns` (see [Block Patterns](#1-block-patterns-block_patterns)).
+Even when the tool supports `sudo=True`, the block-pattern layer runs first
+and will deny any command containing `sudo` — regardless of whether it was
+injected by the wrapper or present in the original command.
+
+---
 
 ## Input Sanitization
 
@@ -377,7 +434,7 @@ The server ships with conservative defaults designed for production safety:
 | Max output length              | 50,000 bytes           | Caps command output          |
 | Max file transfer size         | 10 MiB                 | Prevents disk-fill attacks             |
 | Dangerous pattern detection    | Always enabled         | Prevents command injection             |
-| Path traversal checks          | 7-layer validation     | Defense-in-depth for SFTP paths        |
+| Path traversal checks          | 8-layer validation     | Defense-in-depth for SFTP paths        |
 | Per-IP rate limiting           | 60 req/min             | Mitigates brute-force and DoS          |
 | Max concurrent SSH connections | 20                     | Global cap; excess gets HTTP 503     |
 | Non-root container user        | `mcpssh`               | Limits impact of container escape      |
@@ -392,9 +449,98 @@ The server ships with conservative defaults designed for production safety:
 - **Log level override:** The `MCP_SSH_LOG_LEVEL` environment variable can increase verbosity. Ensure this is not set to `DEBUG` in production, as it may expose sensitive information.
 - **Per-target log levels:** Individual targets can have their own log levels. Be cautious when setting a file target to `DEBUG` — it may log sensitive request details.
 
+#### Log Path Validation
+
+Log file and directory paths are validated by `validate_log_path()` in
+[`lib/sanitize.py`](lib/sanitize.py) before any file is opened:
+
+1. **Empty-string rejection** — blank or whitespace-only paths are rejected.
+2. **Null-byte rejection** — paths containing `\x00` are rejected, preventing
+   C-string truncation attacks.
+3. **Symlink resolution** — `Path.resolve()` collapses symbolic links and `..`
+   traversals before further checks.
+4. **Base-directory containment** — when a base directory is configured, the
+   resolved path must reside within (or equal to) the resolved base directory.
+   Paths that escape are rejected with a `ConfigValidationError`.
+
+Without this validation, an attacker with config write access could write logs
+to arbitrary paths (e.g. `/etc/cron.d/malicious`) or exploit symlink traversal
+to overwrite sensitive files.
+
 ---
 
 ## Configuration Hardening
+
+### Circuit Breaker
+
+The SSH client uses a per-target circuit breaker ([`lib/circuit_breaker.py`](lib/circuit_breaker.py))
+to prevent cascading failures and resource exhaustion against unhealthy SSH
+targets. It is consulted by [`lib/ssh_client.py`](lib/ssh_client.py) before
+every SSH connection attempt.
+
+#### State Machine
+
+```
+CLOSED ──(failure_threshold consecutive failures)──► OPEN
+  ▲                                                       │
+  │                                           (timeout_seconds elapsed)
+  │                                                       ▼
+  │                                                  HALF_OPEN
+  │                                                       │
+  │              ┌───(probe succeeds)───┐                  │
+  └──────────────┘                      └──(probe fails)──┘
+```
+
+| State | Behaviour |
+|-------|-----------|
+| **CLOSED** | Normal operation — all connection requests are allowed through. Failures are counted. |
+| **OPEN** | All connection requests are **rejected immediately** (fail-fast). After `timeout_seconds`, a single probe is allowed through. |
+| **HALF_OPEN** | Exactly one connection attempt is permitted as a probe. Success returns the circuit to CLOSED; failure re-opens it. |
+
+#### Defaults
+
+| Setting | Default | Config Key |
+|---------|---------|------------|
+| Failure threshold | 5 consecutive failures | `settings.circuit_breaker.failure_threshold` |
+| Open-circuit timeout | 60 seconds | `settings.circuit_breaker.timeout_seconds` |
+
+#### Security Implication
+
+Without a circuit breaker, a failing target would cause every request to
+block on a slow or hanging TCP/SSH handshake, exhausting the global
+connection pool and starving other targets. The circuit breaker enforces
+**fail-fast** — after the configured threshold, the target is skipped
+immediately, protecting both the server's resources and other healthy
+targets. Operators should tune the threshold and timeout for their
+environment: a lower threshold tightens brute-force protection, while a
+higher timeout gives recovering targets more time.
+
+---
+
+### Connection Pool Security
+
+The SSH connection pool ([`lib/connection_pool.py`](lib/connection_pool.py))
+reuses established paramiko connections across requests and enforces several
+security-relevant limits:
+
+| Setting | Default | Config Key | Behaviour |
+|---------|---------|------------|-----------|
+| Global concurrency cap | 20 | `settings.pool.max_concurrent_ssh_connections` | Enforced via `threading.Semaphore`; excess checkouts receive **HTTP 503** |
+| Per-target idle cap | 5 | `settings.pool.max_connections_per_target` | Returned connections beyond this limit are closed immediately |
+| Idle timeout | 300 seconds | `settings.pool.idle_timeout_seconds` | Stale connections are evicted by a background cleanup thread |
+| Cleanup interval | 60 seconds | `settings.pool.cleanup_interval_seconds` | Frequency of the idle-eviction sweep |
+
+**Config-change invalidation:** When the config is hot-reloaded, the pool
+receives a change notification and invalidates idle connections for any
+removed or reconfigured targets. This ensures credential changes and target
+removals take effect immediately for pooled connections, without waiting for
+idle eviction.
+
+**Thread safety:** Each target has its own `threading.Lock`. Locks are never
+nested — helpers that touch multiple targets acquire and release locks one at
+a time.
+
+---
 
 ### Secrets Management
 
@@ -468,6 +614,35 @@ Only keys declared in `SETTING_KEY_TYPES` are accepted; unknown keys and
 un-coercible values are ignored with a warning, and the value is never
 logged. See [`lib/constants.py`](../lib/constants.py) for the accepted keys.
 
+### Config Validation Depth
+
+At load time, [`lib/config.py`](lib/config.py) performs several
+security-relevant validation checks beyond basic schema conformance:
+
+- **ReDoS screening** — block patterns are scanned for known
+  ReDoS-prone constructs (nested quantifiers, overlapping alternation)
+  via `check_redos_risk()`. Risky patterns invalidate the config.
+- **CIDR overlap detection** — network authorization ranges are checked
+  for overlapping CIDRs that could produce unintended allow/deny
+  precedence.
+- **Trusted-proxy normalization** — each `trusted_proxies` entry is
+  validated as a parseable IP address and IPv4-mapped IPv6 is collapsed.
+- **Setting override coercion** — `MCP_SSH_SETTING_*` env-var values are
+  type-coerced (string, int, float, bool) according to
+  `SETTING_KEY_TYPES` and rejected with a warning if un-coercible.
+
+### Hot-Reload Security
+
+The config hot-reload mechanism uses a **2-second debounce window** to
+prevent rapid config thrashing. Multiple filesystem events within the
+window are coalesced into a single reload, preventing an attacker from
+rapidly toggling config to exploit race conditions.
+
+Combined with the atomic `RulesSnapshot` reference swap (documented in
+[Command Authorization](#command-authorization)), readers never observe a
+partially-updated rule set, and the debounce ensures the swap frequency
+is bounded.
+
 ---
 
 ## Vulnerability Reporting
@@ -494,7 +669,13 @@ open a public issue. Instead, report it privately:
 ## Related Documentation
 
 - [API Key Hashing](../lib/crypto.py) — `hash_api_key()` and `verify_api_key()`
-- [Command Security](../lib/command_security.py) — dangerous-pattern and segmentation checks
-- [File Transfer Security](../lib/file_transfer.py) — `_validate_path()` with 7-layer checks
-- [Authorization Engine](../lib/auth.py) — Layered decision chain
+- [Circuit Breaker](../lib/circuit_breaker.py) — Per-target failure tracking and fail-fast recovery
+- [Command Security](../lib/command_security.py) — Dangerous-pattern and segmentation checks
+- [Connection Pool](../lib/connection_pool.py) — Per-target SSH connection pooling
+- [File Transfer Security](../lib/file_transfer.py) — `_validate_path()` with 8-layer checks
+- [Input Sanitization](../lib/sanitize.py) — Command, target-name, and log-string sanitization
 - [Rate Limiter](../lib/rate_limiter.py) — Sliding-window implementation
+- [Request Context](../lib/request_context.py) — Client IP extraction and API key format validation
+- [Secrets Management](../lib/secrets.py) — `secrets.json` loading and env-var override
+- [Sudo Handler](../lib/sudo.py) — Command wrapping and double-wrapping prevention
+- [Authorization Engine](../lib/auth.py) — Layered decision chain
