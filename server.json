@@ -1,0 +1,100 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.gelse/ssh-mcp",
+  "title": "ssh-mcp",
+  "description": "A centralized MCP gateway that gives AI agents controlled access to SSH infrastructure over Streamable HTTP. Provides per-client authorization, layered command policies, audit logging, rate limiting, and connection pooling.",
+  "version": "0.0.0",
+  "repository": {
+    "url": "https://github.com/gelse/ssh-mcp",
+    "source": "github"
+  },
+  "website": "https://github.com/gelse/ssh-mcp#readme",
+  "packages": [
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/gelse/ssh-mcp:latest",
+      "transport": {
+        "type": "stdio"
+      },
+      "runtimeArguments": [
+        {
+          "type": "named",
+          "name": "-p",
+          "value": "8080:8080",
+          "description": "Map the MCP HTTP port"
+        },
+        {
+          "type": "named",
+          "name": "-v",
+          "value": "{config_dir}:/config",
+          "description": "Mount the configuration directory",
+          "variables": {
+            "config_dir": {
+              "description": "Path to the local config directory containing ssh-mcp-config.json",
+              "isRequired": true
+            }
+          }
+        },
+        {
+          "type": "named",
+          "name": "-v",
+          "value": "{ssh_key}:/app/ssh_key:ro",
+          "description": "Mount the SSH private key read-only",
+          "variables": {
+            "ssh_key": {
+              "description": "Path to the SSH private key file",
+              "isRequired": true
+            }
+          }
+        },
+        {
+          "type": "named",
+          "name": "-v",
+          "value": "{logs_dir}:/logs",
+          "description": "Mount the logs directory",
+          "variables": {
+            "logs_dir": {
+              "description": "Path to the local logs directory",
+              "isRequired": false
+            }
+          }
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "CONFIG_DIR",
+          "description": "Directory containing ssh-mcp-config.json",
+          "default": "/config"
+        },
+        {
+          "name": "LOG_DIR",
+          "description": "Directory for JSONL audit logs",
+          "default": "/logs"
+        },
+        {
+          "name": "CONFIG_API_ENABLED",
+          "description": "Enable the configuration REST API and web dashboard",
+          "default": "false",
+          "choices": ["true", "false"]
+        },
+        {
+          "name": "CONFIG_API_TOKEN",
+          "description": "Bearer token for the configuration API",
+          "isSecret": true
+        }
+      ]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://{host}/mcp",
+      "variables": {
+        "host": {
+          "description": "Hostname or IP of the ssh-mcp deployment",
+          "isRequired": true
+        }
+      }
+    }
+  ]
+}
