@@ -271,18 +271,18 @@ docker compose up -d --build
 ### 4. Verify it's running
 
 ```bash
-curl http://localhost:8080/health
+curl http://localhost:9080/health
 # {"status": "ok", "connection_pool": {...}}
 ```
 
 ### 5. Connect an MCP client
 
-Any MCP client supporting Streamable HTTP can connect. Point it at `http://localhost:8080/mcp` with an API key header. See [MCP Client Configuration](#mcp-client-configuration) for details.
+Any MCP client supporting Streamable HTTP can connect. Point it at `http://localhost:9080/mcp` with an API key header. See [MCP Client Configuration](#mcp-client-configuration) for details.
 
 ### 6. List servers and run a command
 
 ```bash
-curl -X POST http://localhost:8080/mcp \
+curl -X POST http://localhost:9080/mcp \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your-api-key" \
   -d '{
@@ -295,7 +295,7 @@ curl -X POST http://localhost:8080/mcp \
     }
   }'
 
-curl -X POST http://localhost:8080/mcp \
+curl -X POST http://localhost:9080/mcp \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your-api-key" \
   -d '{
@@ -327,7 +327,7 @@ Any MCP client supporting Streamable HTTP transport can connect. The configurati
 {
   "mcpServers": {
     "ssh": {
-      "url": "http://localhost:8080/mcp",
+      "url": "http://localhost:9080/mcp",
       "headers": {
         "Authorization": "Bearer <your-api-key>"
       }
@@ -375,7 +375,7 @@ print(call_tool("ssh_execute_command", {
 Send tool calls as JSON-RPC `tools/call` requests to `/mcp`:
 
 ```bash
-curl -X POST http://localhost:8080/mcp \
+curl -X POST http://localhost:9080/mcp \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your-api-key" \
   -d '{
@@ -721,9 +721,18 @@ File-based targets rotate when they exceed `max_file_size_mb` (default: 10 MiB),
 
 ---
 
-## Configuration API
+## Configuration API & Web Dashboard
 
-The unified container includes an optional Configuration API and Web Dashboard for managing the configuration file through a REST API and browser-based UI. This feature is disabled by default.
+The unified container includes an optional **Configuration API and Web Dashboard** — a full management plane for your SSH policy, targets, command rules, and backups. No config-file editing required. This feature is disabled by default.
+
+### What You Get
+
+- **Web Dashboard** — a responsive single-page application with 5 pages: SSH Targets, Block Patterns, Command Rules, Settings, and Backups. Login with your API token and manage everything from the browser.
+- **REST API** — full CRUD for every config section, plus config validation, API key hashing, backup management, and inline SSH connectivity testing.
+- **API Key Hashing Utility** — hash plaintext API keys into PBKDF2 strings ready for config. No more guessing the hash format.
+- **Backup & Restore** — automatic config backups on every write; list, restore, or delete backups from the dashboard or API.
+- **Atomic, Thread-Safe Writes** — all config writes are validated, serialized with a threading lock, and atomically written to disk.
+- **Swagger UI & ReDoc** — auto-generated interactive API documentation at `/api/docs` and `/api/redoc`.
 
 ### Enabling the Configuration API
 
@@ -746,30 +755,61 @@ services:
 
 All endpoints are mounted at `/api` on the same Starlette ASGI application as the MCP server.
 
+#### Health & Utilities
+
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/health` | Health check for the config API |
+| `GET` | `/api/health` | Health check for the config API (no auth required) |
+| `POST` | `/api/hash-key` | Hash a plaintext API key into a PBKDF2-HMAC-SHA256 string |
+| `GET` | `/api/config/schema` | Return the config JSON Schema (no auth required) |
+| `POST` | `/api/config/validate` | Validate a config dict without writing it to disk |
+
+#### Configuration
+
+| Method | Path | Description |
+|---|---|---|
 | `GET` | `/api/config` | Get the full configuration (redacts secrets) |
-| `GET` | `/api/config/raw` | Get the raw config file content (requires admin token) |
 | `PUT` | `/api/config` | Replace the full configuration |
-| `GET` | `/api/config/settings` | Get the `settings` section |
-| `PUT` | `/api/config/settings` | Update the `settings` section |
-| `GET` | `/api/config/ssh-targets` | List all SSH targets |
-| `POST` | `/api/config/ssh-targets` | Add a new SSH target |
-| `GET` | `/api/config/ssh-targets/{name}` | Get a specific SSH target |
-| `PUT` | `/api/config/ssh-targets/{name}` | Update an SSH target |
-| `DELETE` | `/api/config/ssh-targets/{name}` | Delete an SSH target |
-| `POST` | `/api/config/ssh-targets/{name}/test` | Test SSH connectivity to a target |
-| `GET` | `/api/config/allowed-commands` | List allowed command rules |
-| `PUT` | `/api/config/allowed-commands` | Replace allowed command rules |
-| `GET` | `/api/config/block-patterns` | List block patterns |
-| `PUT` | `/api/config/block-patterns` | Replace block patterns |
-| `POST` | `/api/config/reload` | Force a config reload |
-| `GET` | `/api/stats` | Get runtime statistics (server info, connections, uptime) |
+| `GET` | `/api/config/{section}` | Get a single config section (`settings`, `ssh_targets`, `allowed_commands`, `block_patterns`) |
+| `PUT` | `/api/config/{section}` | Replace a single config section |
+
+#### SSH Targets
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/config/ssh_targets/{name}` | Get a specific SSH target (secrets stripped) |
+| `PUT` | `/api/config/ssh_targets/{name}` | Create or replace an SSH target |
+| `DELETE` | `/api/config/ssh_targets/{name}` | Delete an SSH target |
+| `POST` | `/api/config/ssh_targets/{name}/check` | Test SSH connectivity via the target's `checkcommand` |
+
+#### Command Rules
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/config/allowed_commands` | List allowed command rules (via `GET /api/config/{section}`) |
+| `PUT` | `/api/config/allowed_commands` | Replace allowed command rules (via `PUT /api/config/{section}`) |
+
+#### Block Patterns
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/config/block_patterns` | List block patterns (via `GET /api/config/{section}`) |
+| `PUT` | `/api/config/block_patterns` | Replace all block patterns |
+| `POST` | `/api/config/block_patterns` | Append a block pattern |
+| `PUT` | `/api/config/block_patterns/{index}` | Replace a single block pattern by index |
+| `DELETE` | `/api/config/block_patterns/{index}` | Remove a single block pattern by index |
+
+#### Backups
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/backups` | List config backups (newest first) |
+| `POST` | `/api/backups/{name}/restore` | Restore configuration from a backup |
+| `DELETE` | `/api/backups/{name}` | Delete a backup file |
 
 ### Authentication
 
-All API requests require a `Bearer` token in the `Authorization` header:
+All API requests (except `/api/health` and `/api/config/schema`) require a `Bearer` token in the `Authorization` header:
 
 ```bash
 curl -H "Authorization: Bearer your-secret-token-here" http://localhost:9080/api/config
@@ -777,16 +817,28 @@ curl -H "Authorization: Bearer your-secret-token-here" http://localhost:9080/api
 
 ### Web Dashboard
 
-When enabled, a web dashboard is available at `/api/ui/` providing a browser-based interface for:
-- Viewing and editing the configuration
-- Managing SSH targets with inline connectivity testing
-- Monitoring runtime statistics
+When enabled, a **responsive single-page application** is available at `http://localhost:9080/ui/` — a full management UI built with Tailwind CSS. No page reloads, toast notifications for every operation, and modal dialogs for editing.
+
+| Page | Capabilities |
+|---|---|
+| **SSH Targets** | View, add, edit, delete targets; inline connectivity testing via `checkcommand`; table view with host/port/username |
+| **Block Patterns** | Add, edit (by index), delete individual patterns; view the full pattern list |
+| **Command Rules** | Edit default, API-key, and network rules; full rules editor with target and command lists |
+| **Settings** | Edit all server settings: SFTP sandbox, rate limiting, logging, connection pooling, circuit breaker, and more |
+| **Backups** | List, restore, and delete configuration backups; timestamp and size for each backup |
+
+Additional features:
+- **Token-based login** with session management (stored in `sessionStorage`)
+- **Config validation** — changes are validated before writing
+- **API key hashing** — hash plaintext keys directly from the dashboard
+- **Responsive design** — works on desktop and mobile
+- **Toast notifications** — success/error feedback for every operation
 
 ### Swagger / ReDoc
 
 Interactive API documentation is auto-generated by FastAPI:
-- Swagger UI: `/api/docs`
-- ReDoc: `/api/redoc`
+- Swagger UI: `http://localhost:9080/api/docs`
+- ReDoc: `http://localhost:9080/api/redoc`
 
 ---
 
@@ -825,14 +877,14 @@ When enabled, the config API is mounted at `/api` on the same HTTP server as the
 
 - **REST API** at `http://localhost:9080/api/...` — full CRUD for SSH targets, block patterns, command rules, backups, and settings
 - **Web Dashboard (GUI)** at `http://localhost:9080/ui/` — a single-page application for visual policy management (SSH targets, block patterns, command rules, settings, backups)
-- **API docs** at `http://localhost:9080/docs` (Swagger UI) and `http://localhost:9080/redoc` (ReDoc)
+- **API docs** at `http://localhost:9080/api/docs` (Swagger UI) and `http://localhost:9080/api/redoc` (ReDoc)
 
 ### Makefile
 
 | Command | Description |
 |---|---|
-| `make dockercontainer` | Build the Docker image (`ghcr.io/gelse/ssh-mcp:latest`) |
-| `make up` | `docker compose up -d --build` |
+| `make build` | Build the Docker image (`ghcr.io/gelse/ssh-mcp:latest`) |
+| `make up` | `docker compose up -d` |
 | `make down` | `docker compose down` |
 | `make test` | Run unit tests |
 | `make config-test` | Run config-api unit tests |
@@ -883,13 +935,13 @@ docker pull ghcr.io/gelse/ssh-mcp:latest
 ### Project Structure
 
 - [`server.py`](server.py) — FastMCP app factory + CLI entry point
-- [`lib/`](lib/) — 25 single-responsibility modules (auth, config, SSH client, file transfer, ssh_operations, etc.)
+- [`lib/`](lib/) — 30 single-responsibility modules (auth, config, SSH client, file transfer, logging, etc.)
 - [`config-api/`](config-api/) — Configuration API + Web Dashboard (FastAPI, mounted at `/api` when `CONFIG_API_ENABLED=true`)
-- [`tests/`](tests/) — 29 unit-test files + integration tests with real Docker containers
+- [`tests/`](tests/) — 36 unit-test files + integration tests with real Docker containers
 
 ### Tech Stack
 
-Python 3.13, [FastMCP](https://gofastmcp.com/) 3.4.x, [paramiko](https://www.paramiko.org/) 5.0, Starlette 1.4
+Python 3.13, [FastMCP](https://gofastmcp.com/) 3.4.x, [paramiko](https://www.paramiko.org/) 5.0, Starlette 1.4, [FastAPI](https://fastapi.tiangolo.com/) 0.115+, [Pydantic](https://docs.pydantic.dev/) 2.10+, [httpx](https://www.python-httpx.org/) 0.28+, [uvicorn](https://www.uvicorn.org/) 0.34+
 
 ### Running Tests
 

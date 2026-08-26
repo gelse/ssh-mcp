@@ -14,7 +14,7 @@
 
 **Stack:** Python 3.13, [FastMCP](https://gofastmcp.com/) 3.4.x, [paramiko](https://www.paramiko.org/) 5.0, Starlette 1.4, Prometheus client, watchdog
 
-**Five tools:** `ssh_list_servers`, `ssh_list_allowed_commands`, `ssh_execute_command`, `ssh_download_file`, `ssh_upload_file` — see [`README.md`](README.md).
+**Six tools:** `ssh_list_servers`, `ssh_list_allowed_commands`, `ssh_execute_command`, `ssh_check_connection`, `ssh_download_file`, `ssh_upload_file` — see [`README.md`](README.md).
 
 **Key patterns:** App-factory (`create_app()`, zero I/O at import), closure DI for tools, thread-pool for SSH I/O, per-target connection pooling, layered auth chain, config hot-reload (15 s poll / 2 s debounce), circuit breaker + exponential-backoff, sliding-window rate limiter, JSONL logging with rotation/gzip.
 
