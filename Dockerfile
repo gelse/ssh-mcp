@@ -13,6 +13,7 @@ RUN pip install --no-cache-dir --require-hashes -r /tmp/requirements-build.txt &
 
 # ---------- Stage: runtime ----------
 FROM python:3.13-alpine@sha256:399babc8b49529dabfd9c922f2b5eea81d611e4512e3ed250d75bd2e7683f4b0
+LABEL io.modelcontextprotocol.server.name="io.github.gelse/ssh-mcp"
 
 # Create non-root user for security
 RUN addgroup -S mcpssh && adduser -S mcpssh -G mcpssh
