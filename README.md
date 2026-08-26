@@ -8,6 +8,7 @@ ssh-mcp runs as a single HTTP service. Multiple AI clients — agents, CI pipeli
 [![Docker](https://img.shields.io/badge/docker-ready-2496ED.svg?logo=docker)](https://ghcr.io/gelse/ssh-mcp)
 [![MCP](https://img.shields.io/badge/MCP-streamable--HTTP-green.svg)](https://modelcontextprotocol.io/)
 [![Security](https://img.shields.io/badge/security-layered--auth-orange.svg)](docs/SECURITY.md)
+[![M8ven Live Monitored](https://m8ven.ai/badge/mcp/gelse-ssh-mcp-btei1o)](https://m8ven.ai/mcp/gelse-ssh-mcp-btei1o)
 
 ---
 
