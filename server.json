@@ -2,19 +2,21 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.gelse/ssh-mcp",
   "title": "ssh-mcp",
-  "description": "A centralized MCP gateway that gives AI agents controlled access to SSH infrastructure over Streamable HTTP. Provides per-client authorization, layered command policies, audit logging, rate limiting, and connection pooling.",
+  "description": "MCP gateway for controlled SSH access with per-client auth, command policies, and audit logging.",
   "version": "0.0.0",
   "repository": {
     "url": "https://github.com/gelse/ssh-mcp",
     "source": "github"
   },
-  "website": "https://github.com/gelse/ssh-mcp#readme",
+  "websiteUrl": "https://github.com/gelse/ssh-mcp#readme",
   "packages": [
     {
       "registryType": "oci",
       "identifier": "ghcr.io/gelse/ssh-mcp:latest",
+      "runtimeHint": "docker",
       "transport": {
-        "type": "stdio"
+        "type": "streamable-http",
+        "url": "http://localhost:8080/mcp"
       },
       "runtimeArguments": [
         {
