@@ -53,18 +53,15 @@
 // ===========================================================================
 
 async function api(method, path, body = null) {
-  const token = sessionStorage.getItem('token');
   const opts = {
     method,
     headers: {
-      'Authorization': `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
   };
   if (body !== null) opts.body = JSON.stringify(body);
   const res = await fetch(`/api${path}`, opts);
   if (res.status === 401) {
-    sessionStorage.removeItem('token');
     window.location.hash = '#/login';
     throw new Error('Unauthorized');
   }
@@ -268,14 +265,20 @@ const routes = {
   '#/backups':  renderBackups,
 };
 
-function navigate(hash) {
+async function navigate(hash) {
   const navbar = document.getElementById('navbar');
-  if (!sessionStorage.getItem('token') && hash !== '#/login') {
-    window.location.hash = '#/login';
-    return;
-  }
-  if (sessionStorage.getItem('token')) {
-    navbar.classList.remove('hidden');
+  if (hash !== '#/login') {
+    try {
+      const res = await fetch('/api/auth/session');
+      if (!res.ok) {
+        window.location.hash = '#/login';
+        return;
+      }
+      navbar.classList.remove('hidden');
+    } catch {
+      window.location.hash = '#/login';
+      return;
+    }
   } else {
     navbar.classList.add('hidden');
   }
@@ -347,11 +350,12 @@ function renderLogin() {
     btn.textContent = 'Connecting...';
     error.classList.add('hidden');
     try {
-      const res = await fetch('/api/config', {
-        headers: { 'Authorization': `Bearer ${token}` },
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token }),
       });
       if (res.ok) {
-        sessionStorage.setItem('token', token);
         window.location.hash = '#/targets';
       } else {
         error.textContent = 'Invalid token';
@@ -1767,8 +1771,8 @@ async function renderBackups() {
 // Logout
 // ===========================================================================
 
-document.getElementById('logout-btn').addEventListener('click', () => {
-  sessionStorage.removeItem('token');
+document.getElementById('logout-btn').addEventListener('click', async () => {
+  await fetch('/api/auth/logout', { method: 'POST' });
   window.location.hash = '#/login';
 });
 
@@ -1777,6 +1781,27 @@ document.getElementById('logout-btn').addEventListener('click', () => {
 // ===========================================================================
 
 navigate(window.location.hash || '#/login');
+
+// ===========================================================================
+// Idle Timeout (30 minutes)
+// ===========================================================================
+
+const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+let idleTimer = null;
+
+function resetIdleTimer() {
+  if (idleTimer !== null) clearTimeout(idleTimer);
+  idleTimer = setTimeout(async () => {
+    await fetch('/api/auth/logout', { method: 'POST' });
+    showToast('Session expired due to inactivity', 'info');
+    window.location.hash = '#/login';
+  }, IDLE_TIMEOUT_MS);
+}
+
+['mousemove', 'keydown', 'click', 'scroll'].forEach((evt) => {
+  document.addEventListener(evt, resetIdleTimer, { passive: true });
+});
+resetIdleTimer();
 
 </script>
 </body>
