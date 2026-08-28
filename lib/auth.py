@@ -99,6 +99,67 @@ def _strip_redirects(command: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Network host-bits validation helpers
+# ---------------------------------------------------------------------------
+
+
+def _has_host_bits(range_str: str) -> tuple[bool, str | None]:
+    """Check whether a CIDR range has non-zero host bits that will be silently ignored.
+
+    When a user writes ``192.168.1.100/24`` the host octet ``.100`` is
+    silently dropped and the network collapses to ``192.168.1.0/24``.
+    This helper detects that situation so a warning can be emitted.
+
+    Args:
+        range_str: CIDR notation string like "192.168.1.100/24".
+
+    Returns:
+        Tuple of (has_host_bits, host_bits_ip) where host_bits_ip is the
+        human-readable host-part IP string if host bits are set, else None.
+    """
+    try:
+        # Parse the host portion from the *original* address before
+        # ``ip_network(strict=False)`` zeroes out the host bits.
+        addr = ipaddress.ip_address(range_str.split("/")[0])
+        net = ipaddress.ip_network(range_str, strict=False)
+    except (ValueError, IndexError):
+        return False, None
+    host_bits = int(addr) & ((1 << (net.max_prefixlen - net.prefixlen)) - 1)
+    if host_bits == 0:
+        return False, None
+    # Convert the host-part bits to a human-readable IP string
+    if isinstance(net, ipaddress.IPv6Network):
+        return True, str(ipaddress.IPv6Address(host_bits))
+    return True, str(ipaddress.IPv4Address(host_bits))
+
+
+def _check_network_host_bits(networks: tuple[dict, ...]) -> None:
+    """Log a warning for any network range with host bits set.
+
+    Called once per config load in _build_snapshot() so the warning fires
+    exactly once per problematic entry per config revision.
+
+    Args:
+        networks: Tuple of network rule dicts from config, each with a "range" key.
+    """
+    for entry in networks:
+        range_str = entry.get("range", "")
+        has_bits, host_bits_ip = _has_host_bits(range_str)
+        if has_bits:
+            try:
+                net = ipaddress.ip_network(range_str, strict=False)
+                logger.warning(
+                    "Network range '%s' has host bits set — %s will be ignored. "
+                    "Use '%s' for exact network matching.",
+                    range_str,
+                    host_bits_ip,
+                    str(net),
+                )
+            except ValueError:
+                pass
+
+
+# ---------------------------------------------------------------------------
 # AuthorizationManager
 # ---------------------------------------------------------------------------
 
@@ -369,7 +430,7 @@ class AuthorizationManager:
             A frozen :class:`RulesSnapshot` with block patterns compiled once.
         """
         allowed_commands = data.get("allowed_commands", {})
-        return RulesSnapshot(
+        snapshot = RulesSnapshot(
             block_patterns=tuple(
                 (p, compile_safe_pattern(p, re.IGNORECASE))
                 for p in data.get("block_patterns", [])
@@ -378,6 +439,8 @@ class AuthorizationManager:
             api_keys=tuple(allowed_commands.get("api_keys", [])),
             networks=tuple(allowed_commands.get("networks", [])),
         )
+        _check_network_host_bits(snapshot.networks)
+        return snapshot
 
     def _check_block_patterns(self, command: str) -> AuthResult | None:
         """Check *command* against all configured block patterns.
