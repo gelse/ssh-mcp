@@ -77,6 +77,39 @@ def get_config_service() -> ConfigService:
     return _config_service
 
 
+def _error_response(
+    status_code: int,
+    error_type: str,
+    message: str,
+    exc: Exception,
+    *,
+    field: str | None = None,
+    log_level: int = logging.WARNING,
+) -> JSONResponse:
+    """Log full exception and return sanitized error response.
+
+    Args:
+        status_code: HTTP status code to return.
+        error_type: Error category string (e.g., "OSError", "JSONDecodeError").
+        message: Safe user-facing error message.
+        exc: The exception to log (full details logged server-side).
+        field: Optional field name for validation errors.
+        log_level: Logging level (default: WARNING).
+
+    Returns:
+        JSONResponse with sanitized ErrorResponse content.
+    """
+    logger.log(log_level, "[%s] %s", error_type, message, exc_info=True)
+    return JSONResponse(
+        status_code=status_code,
+        content=ErrorResponse(
+            error_type=error_type,
+            message=message,
+            field=field,
+        ).model_dump(),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Health endpoint (no auth)
 # ---------------------------------------------------------------------------
@@ -119,12 +152,8 @@ async def get_config(
             ).model_dump(),
         )
     except json.JSONDecodeError as e:
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content=ErrorResponse(
-                error_type="JSONDecodeError",
-                message=f"Config file contains invalid JSON: {e}",
-            ).model_dump(),
+        return _error_response(
+            500, "JSONDecodeError", "Config file contains invalid JSON", e
         )
 
 
@@ -157,12 +186,8 @@ async def hash_key(
     try:
         parsed = HashKeyRequest.model_validate(body)
     except Exception as exc:
-        return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            content=ErrorResponse(
-                error_type="ValidationError",
-                message=str(exc),
-            ).model_dump(),
+        return _error_response(
+            422, "ValidationError", "Invalid request body", exc
         )
 
     result = hash_api_key(parsed.key)
@@ -334,12 +359,8 @@ async def put_ssh_target(
         logger.debug("put_ssh_target exit: name=%s, success", name)
         return JSONResponse(content=result)
     except ValueError as e:
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content=ErrorResponse(
-                error_type="ValueError",
-                message=str(e),
-            ).model_dump(),
+        return _error_response(
+            400, "ValueError", "Invalid SSH target data", e
         )
     except ConfigValidationError as e:
         return JSONResponse(
@@ -428,12 +449,9 @@ async def check_ssh_target(
             ).model_dump(),
         )
     except Exception as e:
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content=ErrorResponse(
-                error_type="SSHCheckError",
-                message=f"Connection check failed: {e}",
-            ).model_dump(),
+        return _error_response(
+            500, "SSHCheckError", "SSH connection check failed", e,
+            log_level=logging.ERROR,
         )
 
 
@@ -695,20 +713,12 @@ async def restore_backup(
             ).model_dump(),
         )
     except json.JSONDecodeError as e:
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content=ErrorResponse(
-                error_type="JSONDecodeError",
-                message=f"Backup file contains invalid JSON: {e}",
-            ).model_dump(),
+        return _error_response(
+            500, "JSONDecodeError", "Backup file contains invalid JSON", e
         )
     except ValueError as e:
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content=ErrorResponse(
-                error_type="ValueError",
-                message=str(e),
-            ).model_dump(),
+        return _error_response(
+            400, "ValueError", "Invalid backup name", e
         )
     except ConfigValidationError as e:
         return JSONResponse(
@@ -747,12 +757,8 @@ async def delete_backup(
             ).model_dump(),
         )
     except ValueError as e:
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content=ErrorResponse(
-                error_type="ValueError",
-                message=str(e),
-            ).model_dump(),
+        return _error_response(
+            400, "ValueError", "Invalid backup name", e
         )
 
 
@@ -819,12 +825,9 @@ async def put_config(
             ).model_dump(),
         )
     except OSError as e:
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content=ErrorResponse(
-                error_type="OSError",
-                message=f"Failed to write config: {e}",
-            ).model_dump(),
+        return _error_response(
+            500, "OSError", "Failed to write configuration", e,
+            log_level=logging.ERROR,
         )
 
 
@@ -951,10 +954,7 @@ async def put_config_section(
             ).model_dump(),
         )
     except OSError as e:
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content=ErrorResponse(
-                error_type="OSError",
-                message=f"Failed to write config: {e}",
-            ).model_dump(),
+        return _error_response(
+            500, "OSError", "Failed to write configuration", e,
+            log_level=logging.ERROR,
         )
