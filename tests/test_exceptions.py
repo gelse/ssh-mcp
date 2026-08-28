@@ -12,11 +12,14 @@ import pytest
 from lib.exceptions import (
     AuthorizationError,
     ConfigError,
+    ConfigMigrationError,
     ConfigValidationError,
     FileTransferError,
     MCPSSHError,
     PathValidationError,
     RateLimitError,
+    SecretsError,
+    ServiceUnavailableError,
     SSHAuthenticationError,
     SSHConnectionError,
     SSHTimeoutError,
@@ -26,6 +29,8 @@ from lib.exceptions import (
 # Every concrete application-level exception defined in lib.exceptions.
 ALL_SUBCLASSES = [
     ConfigError,
+    SecretsError,
+    ConfigMigrationError,
     ConfigValidationError,
     SSHConnectionError,
     SSHAuthenticationError,
@@ -34,6 +39,7 @@ ALL_SUBCLASSES = [
     FileTransferError,
     PathValidationError,
     RateLimitError,
+    ServiceUnavailableError,
     ShutdownError,
 ]
 
@@ -156,3 +162,76 @@ class TestConcreteSubclassBasics:
     def test_shutdown_error(self):
         with pytest.raises(ShutdownError, match="shutdown"):
             raise ShutdownError("shutdown failed")
+
+    def test_service_unavailable_error(self):
+        with pytest.raises(ServiceUnavailableError, match="busy"):
+            raise ServiceUnavailableError("too busy")
+
+
+class TestUserMessage:
+    """Tests for the ``user_message`` property on MCPSSHError and subclasses."""
+
+    # -- base class tests ---------------------------------------------------
+
+    def test_base_default_user_message(self):
+        """MCPSSHError without explicit user_message returns the class default."""
+        err = MCPSSHError("detail")
+        assert err.user_message == "An internal error occurred"
+
+    def test_base_explicit_user_message(self):
+        """MCPSSHError with explicit user_message returns that value."""
+        err = MCPSSHError("detail", user_message="safe")
+        assert err.user_message == "safe"
+
+    def test_str_preserves_original_message(self):
+        """str() must still return the original message, not the user_message."""
+        err = MCPSSHError("detail")
+        assert str(err) == "detail"
+
+    # -- parametrized subclass tests ----------------------------------------
+
+    @pytest.mark.parametrize("exc_cls", ALL_SUBCLASSES)
+    def test_subclass_default_user_message_is_nonempty(self, exc_cls):
+        """Every subclass defines a non-empty DEFAULT_USER_MESSAGE."""
+        assert isinstance(exc_cls.DEFAULT_USER_MESSAGE, str)
+        assert len(exc_cls.DEFAULT_USER_MESSAGE) > 0
+
+    @pytest.mark.parametrize("exc_cls", ALL_SUBCLASSES)
+    def test_subclass_default_used_when_no_explicit(self, exc_cls):
+        """Without an explicit user_message, the subclass default is returned."""
+        err = exc_cls("detail")
+        assert err.user_message == exc_cls.DEFAULT_USER_MESSAGE
+
+    @pytest.mark.parametrize("exc_cls", ALL_SUBCLASSES)
+    def test_subclass_explicit_user_message(self, exc_cls):
+        """Explicit user_message overrides the subclass default."""
+        err = exc_cls("detail", user_message="custom")
+        assert err.user_message == "custom"
+
+    @pytest.mark.parametrize("exc_cls", ALL_SUBCLASSES)
+    def test_subclass_str_preserves_original(self, exc_cls):
+        """str() of every subclass still returns the original message."""
+        err = exc_cls("original msg")
+        assert str(err) == "original msg"
+
+    # -- custom __init__ subclasses -----------------------------------------
+
+    def test_config_validation_error_user_message(self):
+        """ConfigValidationError uses its own DEFAULT_USER_MESSAGE."""
+        err = ConfigValidationError("msg", errors=["e"], field="f")
+        assert err.user_message == "Configuration validation failed"
+
+    def test_config_validation_error_explicit_user_message(self):
+        """ConfigValidationError respects explicit user_message."""
+        err = ConfigValidationError("msg", user_message="custom")
+        assert err.user_message == "custom"
+
+    def test_service_unavailable_error_user_message(self):
+        """ServiceUnavailableError uses its own DEFAULT_USER_MESSAGE."""
+        err = ServiceUnavailableError("msg", status_code=503)
+        assert err.user_message == "Service temporarily unavailable"
+
+    def test_service_unavailable_error_explicit_user_message(self):
+        """ServiceUnavailableError respects explicit user_message."""
+        err = ServiceUnavailableError("msg", status_code=503, user_message="custom")
+        assert err.user_message == "custom"

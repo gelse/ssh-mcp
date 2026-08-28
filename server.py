@@ -932,7 +932,8 @@ def _register_tools(
         """Build a structured error response for an MCPSSHError.
 
         Returns a dict with the ``error`` flag, the concrete exception
-        type name, a human-readable message, a ``retryable`` flag, and a
+        type name, the safe ``user_message`` (falling back to ``str(exc)``
+        for non-MCPSSHError exceptions), a ``retryable`` flag, and a
         ``status_code`` reflecting the intended HTTP status (503 for a
         :class:`ServiceUnavailableError`, 200 otherwise).  The
         ``request_id`` is taken from the current request context so errors
@@ -946,7 +947,7 @@ def _register_tools(
         return {
             "error": True,
             "error_type": type(exc).__name__,
-            "message": str(exc),
+            "message": getattr(exc, "user_message", str(exc)),
             "retryable": isinstance(exc, SSHTimeoutError),
             "status_code": status_code,
             "request_id": get_request_id(),

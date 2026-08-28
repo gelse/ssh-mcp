@@ -1108,7 +1108,7 @@ def test_sudo_execute_command_blocked_by_pattern(mcp_url: str):
         result = result["result"]
     content = result.get("content", [])
     text = "".join(item.get("text", "") for item in content)
-    assert "blocked" in text.lower() or "denied" in text.lower()
+    assert "not authorized" in text.lower() or "denied" in text.lower()
 
 
 def test_sudo_validation_rejects_explicit_sudo(mcp_url: str):
@@ -1131,7 +1131,7 @@ def test_sudo_validation_rejects_explicit_sudo(mcp_url: str):
         result = result["result"]
     content = result.get("content", [])
     text = "".join(item.get("text", "") for item in content)
-    assert "must not contain 'sudo'" in text
+    assert "not authorized" in text.lower()
 
 
 class TestFileTransfer:
@@ -1225,7 +1225,7 @@ class TestFileTransfer:
         assert error["error"] is True, f"Expected traversal error, got: {text!r}"
         assert error["error_type"] == "PathValidationError"
         assert error["retryable"] is False
-        assert "must not be '..'" in error["message"]
+        assert "invalid file path" in error["message"].lower()
         assert error.get("request_id"), "Error response must include a request_id"
 
     def test_ssh_download_file_binary(self, mcp_url: str, ssh_container):
@@ -1288,8 +1288,7 @@ class TestAuthorizationFlows:
             result = result["result"]
         content = result.get("content", [])
         text = "".join(item.get("text", "") for item in content)
-        assert "Command rejected" in text
-        assert "blocked by pattern" in text
+        assert "not authorized" in text.lower()
 
     def test_command_allowed_by_api_key(self, mcp_url: str, switch_config):
         """A command only allowed via API key fails without it and passes with it."""
@@ -1316,7 +1315,7 @@ class TestAuthorizationFlows:
             result = result["result"]
         content = result.get("content", [])
         denied_text = "".join(item.get("text", "") for item in content)
-        assert "Command rejected" in denied_text
+        assert "not authorized" in denied_text.lower()
 
         # With the key: allowed
         result = _mcp_request(
@@ -1384,7 +1383,7 @@ class TestAuthorizationFlows:
             result = result["result"]
         content = result.get("content", [])
         denied_text = "".join(item.get("text", "") for item in content)
-        assert "Command rejected" in denied_text
+        assert "not authorized" in denied_text.lower()
 
         # From a matching IP: allowed
         result = _mcp_request(
@@ -1433,8 +1432,7 @@ class TestAuthorizationFlows:
             result = result["result"]
         content = result.get("content", [])
         text = "".join(item.get("text", "") for item in content)
-        assert "Command rejected" in text
-        assert "blocked by pattern" in text
+        assert "not authorized" in text.lower()
 
 
 class TestConfigRejectsReDoSPattern:
@@ -1556,8 +1554,10 @@ class TestErrorScenarios:
                 "timeout": 5,
             },
         )
-        assert "Command rejected" in text, f"Unexpected response: {text!r}"
-        assert "Unknown target 'nonexistent-server'" in text
+        error = json.loads(text)
+        assert error["error"] is True, f"Unexpected response: {text!r}"
+        assert error.get("error_type") in ("AuthorizationError", "SSHConnectionError")
+        assert "not authorized" in error["message"].lower() or "not found" in error["message"].lower()
 
     def test_ssh_execute_auth_failure(self, mcp_url: str):
         """Wrong SSH credentials produce an error without leaking key material."""
@@ -1575,7 +1575,7 @@ class TestErrorScenarios:
         assert error["error_type"] == "SSHAuthenticationError"
         assert error["retryable"] is False
         assert error["status_code"] == 200, "Non-503 errors default to HTTP 200"
-        assert "Authentication failed" in error["message"]
+        assert "ssh authentication failed" in error["message"].lower()
         assert error.get("request_id"), "Error response must include a request_id"
         # The error must not leak any private key material.
         assert "-----BEGIN" not in text
@@ -2069,7 +2069,7 @@ class TestSshCheckConnection:
         data = json.loads(text)
 
         assert data["error"] is True
-        assert "not found" in data["message"].lower()
+        assert "ssh connection failed" in data["message"].lower()
 
     def test_ssh_check_connection_custom_command(
         self, mcp_url: str, switch_config
