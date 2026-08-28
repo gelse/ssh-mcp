@@ -8,6 +8,7 @@ JSON responses with appropriate HTTP status codes.
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 from pathlib import Path
@@ -17,7 +18,13 @@ logger = logging.getLogger(__name__)
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
-from config_api.auth import verify_token
+from config_api.auth import (
+    create_session,
+    get_token,
+    revoke_session,
+    validate_session,
+    verify_token,
+)
 from config_api.config_service import ConfigService
 from config_api.models import (
     BackupInfo,
@@ -30,10 +37,17 @@ from config_api.models import (
     HealthResponse,
     ValidateResponse,
 )
+from lib.constants import (
+    CONFIG_API_SESSION_COOKIE_NAME,
+    CONFIG_API_SESSION_COOKIE_SAMESITE,
+    CONFIG_API_SESSION_COOKIE_SECURE,
+    CONFIG_API_SESSION_MAX_AGE_SECONDS,
+)
 from lib.crypto import hash_api_key
 from lib.exceptions import ConfigValidationError
 
 router = APIRouter()
+auth_router = APIRouter(prefix="/auth", tags=["auth"])
 
 # ---------------------------------------------------------------------------
 # Config service singleton
@@ -958,3 +972,131 @@ async def put_config_section(
             500, "OSError", "Failed to write configuration", e,
             log_level=logging.ERROR,
         )
+
+
+# ---------------------------------------------------------------------------
+# POST /api/auth/login — token login, sets session cookie
+# ---------------------------------------------------------------------------
+
+
+@auth_router.post("/login")
+async def login(request: Request) -> JSONResponse:
+    """Validate a raw API token and create a session cookie.
+
+    Accepts a JSON body ``{"token": "<raw_token>"}`` and validates it
+    against the configured token using timing-safe comparison.  On success
+    an HttpOnly session cookie is set on the response.
+
+    Args:
+        request: The incoming request containing the JSON body.
+
+    Returns:
+        JSONResponse with ``{"status": "ok"}`` on success.
+
+    Raises:
+        JSONResponse: 401 if the token is invalid.
+    """
+    logger.debug("login entry")
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={"error": True, "message": "Invalid token"},
+        )
+
+    token = body.get("token") if isinstance(body, dict) else None
+    if not token or not isinstance(token, str):
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={"error": True, "message": "Invalid token"},
+        )
+
+    try:
+        expected = get_token()
+    except RuntimeError:
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={"error": True, "message": "Invalid token"},
+        )
+
+    if not hmac.compare_digest(expected, token):
+        logger.debug("login: token mismatch")
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={"error": True, "message": "Invalid token"},
+        )
+
+    session_id = create_session()
+    response = JSONResponse(content={"status": "ok"})
+    response.set_cookie(
+        key=CONFIG_API_SESSION_COOKIE_NAME,
+        value=session_id,
+        httponly=True,
+        secure=CONFIG_API_SESSION_COOKIE_SECURE,
+        samesite=CONFIG_API_SESSION_COOKIE_SAMESITE,  # type: ignore[arg-type]
+        max_age=CONFIG_API_SESSION_MAX_AGE_SECONDS,
+        path="/api",
+    )
+    logger.debug("login exit: session created")
+    return response
+
+
+# ---------------------------------------------------------------------------
+# POST /api/auth/logout — clear cookie and revoke session
+# ---------------------------------------------------------------------------
+
+
+@auth_router.post("/logout")
+async def logout(
+    request: Request,
+    token: str = Depends(verify_token),  # noqa: ARG001
+) -> JSONResponse:
+    """Clear the session cookie and revoke the current session.
+
+    Requires a valid session cookie or Bearer token.  Removes the session
+    from the in-memory store and clears the cookie on the response.
+
+    Args:
+        request: The incoming request (used to read the session cookie).
+        token: Verified token from the auth dependency (unused).
+
+    Returns:
+        JSONResponse with ``{"status": "ok"}``.
+    """
+    logger.debug("logout entry")
+    session_id = request.cookies.get(CONFIG_API_SESSION_COOKIE_NAME)
+    if session_id:
+        revoke_session(session_id)
+
+    response = JSONResponse(content={"status": "ok"})
+    response.delete_cookie(
+        key=CONFIG_API_SESSION_COOKIE_NAME,
+        path="/api",
+    )
+    logger.debug("logout exit: session cleared")
+    return response
+
+
+# ---------------------------------------------------------------------------
+# GET /api/auth/session — lightweight session validity check
+# ---------------------------------------------------------------------------
+
+
+@auth_router.get("/session")
+async def session_check(
+    token: str = Depends(verify_token),  # noqa: ARG001
+) -> JSONResponse:
+    """Check whether the current session or token is valid.
+
+    Accepts either a valid session cookie or Bearer token.  Returns
+    ``{"authenticated": true}`` when the request is authenticated.
+
+    Args:
+        token: Verified token from the auth dependency (unused).
+
+    Returns:
+        JSONResponse with ``{"authenticated": true}``.
+    """
+    logger.debug("session_check exit: authenticated")
+    return JSONResponse(content={"authenticated": True})

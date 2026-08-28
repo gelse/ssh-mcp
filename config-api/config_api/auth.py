@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 _token: str | None = None
 
-_security = HTTPBearer()
+_security = HTTPBearer(auto_error=False)
 
 # ---------------------------------------------------------------------------
 # In-memory session store  (session_id → creation timestamp)
