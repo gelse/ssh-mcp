@@ -511,3 +511,25 @@ SUPPORTED_LOG_TARGETS: tuple[str, ...] = (
 
 DEFAULT_TEXT_LOG_FORMAT: str = "{timestamp} {level} {event}: {message}"
 """Default text format string for stdout and text-file targets."""
+
+# =============================================================================
+# Config API Session / Cookie Defaults
+# =============================================================================
+
+CONFIG_API_SESSION_COOKIE_NAME: str = "config_api_session"
+"""Name of the HTTP cookie used for config-api session authentication."""
+
+CONFIG_API_SESSION_ID_LENGTH: int = 32
+"""Number of random bytes generated for each session ID."""
+
+CONFIG_API_SESSION_MAX_AGE_SECONDS: int = 3600
+"""Hard expiry (seconds) for a config-api session cookie."""
+
+CONFIG_API_SESSION_COOKIE_SECURE: bool = True
+"""Whether the session cookie is restricted to HTTPS connections."""
+
+CONFIG_API_SESSION_COOKIE_SAMESITE: str = "strict"
+"""SameSite attribute applied to the session cookie."""
+
+CONFIG_API_SESSION_IDLE_TIMEOUT_SECONDS: int = 1800
+"""Client-side idle timeout (seconds) before the session expires."""
