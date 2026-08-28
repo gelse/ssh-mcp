@@ -18,6 +18,7 @@ threats it mitigates, and how to configure and operate it securely.
 - [Log Target Security](#log-target-security)
 - [Configuration Hardening](#configuration-hardening)
 - [Client IP Extraction](#client-ip-extraction)
+- [Config API Session Management](#config-api-session-management)
 - [Vulnerability Reporting](#vulnerability-reporting)
 
 ---
@@ -642,6 +643,128 @@ Combined with the atomic `RulesSnapshot` reference swap (documented in
 [Command Authorization](#command-authorization)), readers never observe a
 partially-updated rule set, and the debounce ensures the swap frequency
 is bounded.
+
+---
+
+## Config API Session Management
+
+The config-api SPA ([`config-api/config_api/ui/index.html`](config-api/config_api/ui/index.html))
+uses a **cookie-based session system** for browser authentication instead of
+storing raw tokens in `sessionStorage`. This section documents the threat model,
+session architecture, and operational constraints.
+
+### Threat Model
+
+Prior to this change, the SPA stored the API token in `sessionStorage`, which
+is accessible to any JavaScript running on the same origin. An XSS
+vulnerability in the SPA or a third-party script loaded from the same origin
+could exfiltrate the token. The cookie-based approach mitigates this because
+**HttpOnly cookies are invisible to JavaScript** — they are sent automatically
+by the browser on matching requests but cannot be read by `document.cookie` or
+any client-side script.
+
+### Session ID Architecture
+
+On successful login (`POST /api/auth/login`), the server:
+
+1. Validates the submitted API token using timing-safe comparison
+   (`hmac.compare_digest`).
+2. Generates a **cryptographically random session ID** — `secrets.token_hex(32)`
+   (32 bytes / 256 bits of entropy).
+3. Stores the session ID and its creation timestamp in an **in-memory
+   dictionary** (`_sessions`).
+4. Returns the session ID in an **HttpOnly cookie** — the raw API token is
+   *never* placed in the cookie.
+
+The session ID is an opaque handle with no relationship to the API token.
+Compromising a session ID does not reveal the token; revoking a session by
+deleting it from the store immediately invalidates the cookie without affecting
+other sessions or the underlying token.
+
+### Cookie Attributes
+
+| Attribute    | Value                                    | Rationale                                           |
+|--------------|------------------------------------------|-----------------------------------------------------|
+| `HttpOnly`   | `true`                                   | Prevents JavaScript access (XSS mitigation)         |
+| `Secure`     | `true` (configurable)                    | Prevents transmission over plain HTTP               |
+| `SameSite`   | `strict`                                 | Blocks cross-origin requests (CSRF mitigation)      |
+| `Path`       | `/api`                                   | Scoped to config-api routes only                    |
+| `Max-Age`    | `3600` (1 hour)                          | Hard server-side expiry via cookie lifetime         |
+
+The `Secure` flag defaults to `true` and can be changed via
+`CONFIG_API_SESSION_COOKIE_SECURE` in [`lib/constants.py`](lib/constants.py).
+Set it to `false` only for local development behind an explicit TLS-terminating
+proxy.
+
+### Idle Timeout
+
+The session system enforces a **dual-expiry model**:
+
+- **Server-side hard expiry** — the cookie's `Max-Age` (3600 s) enforces an
+  absolute upper bound. After this, the browser drops the cookie and any
+  subsequent request falls through to Bearer-header auth (or is rejected).
+- **Client-side idle timeout** — the SPA monitors user activity (mouse,
+  keyboard, scroll events) and clears the session after **30 minutes** of
+  inactivity (`CONFIG_API_SESSION_IDLE_TIMEOUT_SECONDS`). This provides a
+  tighter bound than the cookie's hard expiry for interactive sessions.
+
+Both layers are independent: the client-side timeout provides a better user
+experience for idle sessions, while the server-side `Max-Age` guarantees
+termination even if the client-side logic is bypassed.
+
+### Server-Side Revocation
+
+Sessions can be revoked at any time by deleting the session ID from the
+in-memory store ([`config-api/config_api/auth.py`](config-api/config_api/auth.py:129)):
+
+```python
+revoke_session(session_id)  # removes from _sessions dict
+```
+
+The logout endpoint (`POST /api/auth/logout`) performs two actions:
+
+1. Calls `revoke_session()` to remove the session from the store.
+2. Clears the cookie by sending a `Set-Cookie` header with `Max-Age=0`.
+
+Expired sessions are also cleaned up eagerly during validation
+(`validate_session`) and periodically via `cleanup_expired_sessions()`.
+
+### Bearer Header Fallback
+
+API clients (curl, scripts, CI pipelines) that cannot use cookies can
+authenticate via the standard `Authorization: Bearer <token>` header. The
+[`verify_token()`](config-api/config_api/auth.py:170) dependency checks
+authentication in this order:
+
+1. **Session cookie** — if a valid, non-expired session cookie is present, the
+   request is authenticated immediately.
+2. **Bearer header** — if no valid cookie is found, the `Authorization` header
+   is checked using `hmac.compare_digest` for timing-safe comparison.
+
+This means browser-based and programmatic clients can coexist on the same
+endpoints without conflict.
+
+### Limitations
+
+| Limitation | Impact | Mitigation |
+|------------|--------|------------|
+| **In-memory session store** | Sessions are lost on server restart | Clients must re-authenticate after restart; acceptable for single-instance deployments |
+| **Single-instance only** | Sessions are not shared across multiple config-api containers | Deploy behind a single instance or use sticky sessions; multi-container deployments should use Bearer-header auth instead |
+| **No persistent audit log** | Session creation/revocation events are logged at DEBUG level only | Enable DEBUG logging for the `config_api.auth` logger if session auditing is required |
+
+### Related Constants
+
+All session-related magic values are centralized in
+[`lib/constants.py`](lib/constants.py):
+
+| Constant | Default | Description |
+|----------|---------|-------------|
+| `CONFIG_API_SESSION_COOKIE_NAME` | `config_api_session` | Cookie name |
+| `CONFIG_API_SESSION_ID_LENGTH` | `32` | Bytes of randomness per session ID |
+| `CONFIG_API_SESSION_MAX_AGE_SECONDS` | `3600` | Hard cookie expiry (1 hour) |
+| `CONFIG_API_SESSION_COOKIE_SECURE` | `true` | HTTPS-only flag |
+| `CONFIG_API_SESSION_COOKIE_SAMESITE` | `strict` | SameSite attribute |
+| `CONFIG_API_SESSION_IDLE_TIMEOUT_SECONDS` | `1800` | Client-side idle timeout (30 min) |
 
 ---
 
