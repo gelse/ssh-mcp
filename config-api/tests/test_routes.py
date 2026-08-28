@@ -26,6 +26,7 @@ Covers:
 from __future__ import annotations
 
 import json
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -1265,3 +1266,148 @@ class TestDeleteBackup:
             headers=auth_headers,
         )
         assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Error sanitization — verify no internal details leak in responses
+# ---------------------------------------------------------------------------
+
+
+class TestErrorSanitization:
+    """Tests that error responses sanitize internal details.
+
+    Verifies that exception messages, file paths, IPs, usernames, and
+    other sensitive information are NOT leaked in HTTP response bodies,
+    while the full details ARE logged server-side.
+    """
+
+    def test_get_config_json_error_no_raw_details(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """GET /config hides raw JSONDecodeError details from response."""
+        exc = json.JSONDecodeError(
+            "Expecting ',' delimiter", '{"key": "value"', 5,
+        )
+        mock_svc = MagicMock()
+        mock_svc.read_config.side_effect = exc
+        with patch("config_api.routes._config_service", mock_svc):
+            response = client.get("/config", headers=auth_headers)
+
+        assert response.status_code == 500
+        data = response.json()
+        assert data["error"] is True
+        assert data["error_type"] == "JSONDecodeError"
+        # Safe message must NOT leak internal details
+        assert "Expecting" not in data["message"]
+        assert "delimiter" not in data["message"]
+        assert "5" not in data["message"]
+
+    def test_hash_key_pydantic_error_no_raw_details(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """POST /hash-key hides Pydantic ValidationError details."""
+        response = client.post(
+            "/hash-key",
+            json={"key": ""},
+            headers=auth_headers,
+        )
+        assert response.status_code == 422
+        data = response.json()
+        assert data["error"] is True
+        assert data["error_type"] == "ValidationError"
+        # Safe message must NOT leak validation internals
+        message_lower = data["message"].lower()
+        assert "field" not in message_lower
+        assert "min_length" not in message_lower
+        assert "string should" not in message_lower
+
+    def test_check_ssh_generic_error_no_raw_details(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """POST /ssh_targets/{name}/check hides exception details."""
+        exc = Exception(
+            "Authentication failed for user admin@10.0.0.1:22"
+        )
+        mock_svc = MagicMock()
+        mock_svc.check_ssh_target.side_effect = exc
+        with patch("config_api.routes._config_service", mock_svc):
+            response = client.post(
+                "/config/ssh_targets/test-server/check",
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 500
+        data = response.json()
+        assert data["error"] is True
+        assert data["error_type"] == "SSHCheckError"
+        # Safe message must NOT leak credentials or addresses
+        assert "admin" not in data["message"]
+        assert "10.0.0.1" not in data["message"]
+
+    def test_put_config_oserror_no_raw_details(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """PUT /config hides OSError details from response."""
+        exc = OSError(13, "Permission denied", "/etc/ssh-mcp-config.json")
+        mock_svc = MagicMock()
+        mock_svc.write_config.side_effect = exc
+        with patch("config_api.routes._config_service", mock_svc):
+            response = client.put(
+                "/config",
+                json={"ssh_targets": {}, "block_patterns": []},
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 500
+        data = response.json()
+        assert data["error"] is True
+        assert data["error_type"] == "OSError"
+        # Safe message must NOT leak file paths or OS details
+        assert "Permission denied" not in data["message"]
+        assert "/etc/" not in data["message"]
+        assert "13" not in data["message"]
+
+    def test_restore_backup_json_error_no_raw_details(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """POST /backups/{name}/restore hides JSONDecodeError details."""
+        exc = json.JSONDecodeError(
+            "Expecting value", '{"broken": }', 1,
+        )
+        mock_svc = MagicMock()
+        mock_svc.backup_restore.side_effect = exc
+        with patch("config_api.routes._config_service", mock_svc):
+            response = client.post(
+                "/backups/ssh-mcp-config.20260101T000000Z.bak/restore",
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 500
+        data = response.json()
+        assert data["error"] is True
+        assert data["error_type"] == "JSONDecodeError"
+        # Safe message must NOT leak internal parse details
+        assert "Expecting value" not in data["message"]
+        assert '{"broken": }' not in data["message"]
+        assert "1" not in data["message"]
+
+    def test_error_responses_logged(
+        self, client: TestClient, auth_headers: dict[str, str],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Error responses log full exception details server-side."""
+        exc = json.JSONDecodeError(
+            "Expecting ',' delimiter", '{"key": "value"', 5,
+        )
+        mock_svc = MagicMock()
+        mock_svc.read_config.side_effect = exc
+        with patch("config_api.routes._config_service", mock_svc):
+            with caplog.at_level("WARNING", logger="config_api.routes"):
+                response = client.get("/config", headers=auth_headers)
+
+        assert response.status_code == 500
+        # Response is sanitized
+        data = response.json()
+        assert "Expecting" not in data["message"]
+        # But the log contains full exception details (exc_info=True)
+        assert "Expecting ',' delimiter" in caplog.text
