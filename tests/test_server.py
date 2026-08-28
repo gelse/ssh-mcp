@@ -1679,7 +1679,7 @@ class TestSshCheckConnection:
         assert "SSHTimeoutError" in payload["error_type"]
 
     def test_check_connection_target_not_found(self, tmp_path, monkeypatch):
-        """Unknown target name returns error with 'not found' message."""
+        """Unknown target name returns safe user_message, not internal details."""
         config = self._make_check_config()
         fn, _logger = self._wire_tool(tmp_path, config, monkeypatch)
 
@@ -1687,7 +1687,7 @@ class TestSshCheckConnection:
         payload = json.loads(result)
 
         assert payload["error"] is True
-        assert "not found" in payload["message"].lower()
+        assert payload["message"] == "SSH connection failed"
 
     def test_check_connection_default_checkcommand(self, tmp_path, monkeypatch):
         """Target without checkcommand uses DEFAULT_CHECK_COMMAND."""
@@ -1822,7 +1822,7 @@ class TestCatchAllExceptionSanitization:
         # Must return sanitized error
         assert payload["error"] is True
         assert payload["error_type"] == "MCPSSHError"
-        assert payload["message"] == "Internal server error"
+        assert payload["message"] == "An internal error occurred"
 
         # Must log the actual exception via file_logger
         error_entries = [
@@ -1858,7 +1858,7 @@ class TestCatchAllExceptionSanitization:
         assert self.SENSITIVE_DETAIL not in str(payload)
         assert payload["error"] is True
         assert payload["error_type"] == "MCPSSHError"
-        assert payload["message"] == "Internal server error"
+        assert payload["message"] == "An internal error occurred"
 
         error_entries = [
             c[0][0]
@@ -1907,7 +1907,7 @@ class TestCatchAllExceptionSanitization:
         assert self.SENSITIVE_DETAIL not in str(payload)
         assert payload["error"] is True
         assert payload["error_type"] == "MCPSSHError"
-        assert payload["message"] == "Internal server error"
+        assert payload["message"] == "An internal error occurred"
 
         error_entries = [
             c[0][0]
@@ -1960,7 +1960,7 @@ class TestCatchAllExceptionSanitization:
         assert self.SENSITIVE_DETAIL not in str(payload)
         assert payload["error"] is True
         assert payload["error_type"] == "MCPSSHError"
-        assert payload["message"] == "Internal server error"
+        assert payload["message"] == "An internal error occurred"
 
         error_entries = [
             c[0][0]
