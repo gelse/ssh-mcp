@@ -1194,9 +1194,28 @@ function renderApiKeyRules(container, apiKeys, defaultRules) {
           <label class="block text-sm font-medium text-gray-700 mb-1">Name</label>
           <input type="text" id="m-key-name" placeholder="e.g. deploy-key" class="w-full px-3 py-2 border rounded text-sm">
         </div>
-        <div>
+        <div class="relative">
           <label class="block text-sm font-medium text-gray-700 mb-1">Plaintext Key</label>
-          <input type="text" id="m-key-plaintext" placeholder="The secret API key" class="w-full px-3 py-2 border rounded text-sm">
+          <div class="relative">
+            <input type="password" id="m-key-plaintext" placeholder="The secret API key"
+                   autocomplete="off"
+                   class="w-full px-3 py-2 pr-10 border rounded text-sm">
+            <button type="button" id="m-key-toggle"
+                    class="absolute inset-y-0 right-0 px-3 flex items-center text-gray-500 hover:text-gray-700"
+                    aria-label="Show API key" aria-pressed="false"
+                    tabindex="-1">
+              <svg id="m-key-eye-open" class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                      d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                      d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+              </svg>
+              <svg id="m-key-eye-closed" class="h-5 w-5 hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                      d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.542-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.878 9.878L3 3m6.878 6.879L21 21"/>
+              </svg>
+            </button>
+          </div>
         </div>
       </div>
     `;
@@ -1236,6 +1255,21 @@ function renderApiKeyRules(container, apiKeys, defaultRules) {
       });
       showToast('API key created');
       renderRules();
+    }, (body) => {
+      const input = body.querySelector('#m-key-plaintext');
+      const toggle = body.querySelector('#m-key-toggle');
+      const eyeOpen = body.querySelector('#m-key-eye-open');
+      const eyeClosed = body.querySelector('#m-key-eye-closed');
+      if (toggle && input) {
+        toggle.addEventListener('click', () => {
+          const isPassword = input.type === 'password';
+          input.type = isPassword ? 'text' : 'password';
+          eyeOpen.classList.toggle('hidden', !isPassword);
+          eyeClosed.classList.toggle('hidden', isPassword);
+          toggle.setAttribute('aria-pressed', isPassword ? 'true' : 'false');
+          toggle.setAttribute('aria-label', isPassword ? 'Hide API key' : 'Show API key');
+        });
+      }
     });
   });
 }
