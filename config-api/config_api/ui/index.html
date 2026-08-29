@@ -101,10 +101,36 @@ function showLoading(container) {
 }
 
 // ===========================================================================
+// DOM Helpers
+// ===========================================================================
+
+function el(tag, className) {
+  const e = document.createElement(tag);
+  if (className) e.className = className;
+  return e;
+}
+
+function makeFormGroup(labelText, opts) {
+  const group = el('div');
+  const label = el('label', 'block text-sm font-medium text-gray-700 mb-1');
+  label.textContent = labelText;
+  const input = el(opts.type === 'textarea' ? 'textarea' : 'input',
+    opts.class || 'w-full px-3 py-2 border rounded text-sm');
+  input.id = opts.id;
+  if (opts.type && opts.type !== 'textarea') input.type = opts.type;
+  if (opts.placeholder) input.placeholder = opts.placeholder;
+  if (opts.value != null) input.value = opts.value;
+  if (opts.rows) input.rows = opts.rows;
+  group.appendChild(label);
+  group.appendChild(input);
+  return group;
+}
+
+// ===========================================================================
 // Modal Dialog
 // ===========================================================================
 
-function showModal(title, bodyHtml, onSave, onRender) {
+function showModal(title, buildBody, onSave, onRender) {
   const container = document.getElementById('modal-container');
 
   // Overlay
@@ -131,7 +157,8 @@ function showModal(title, bodyHtml, onSave, onRender) {
   // Body
   const body = document.createElement('div');
   body.className = 'px-6 py-4 overflow-y-auto flex-1';
-  body.innerHTML = bodyHtml;
+  const content = buildBody();
+  if (content) body.appendChild(content);
   if (onRender) onRender(body);
   card.appendChild(body);
 
@@ -487,43 +514,47 @@ async function renderTargets() {
 
       // Edit handler
       editBtn.addEventListener('click', () => {
-        const isEdit = true;
-        const modalBody = `
-          <div class="space-y-4">
-            <div>
-              <label class="block text-sm font-medium text-gray-700 mb-1">Name</label>
-              <input type="text" id="m-name" class="w-full px-3 py-2 border rounded text-sm" ${isEdit ? 'disabled' : ''}>
-            </div>
-            <div>
-              <label class="block text-sm font-medium text-gray-700 mb-1">Host</label>
-              <input type="text" id="m-host" class="w-full px-3 py-2 border rounded text-sm">
-            </div>
-            <div>
-              <label class="block text-sm font-medium text-gray-700 mb-1">Port</label>
-              <input type="number" id="m-port" value="${escapeHtml(String(target.port || 22))}" class="w-full px-3 py-2 border rounded text-sm">
-            </div>
-            <div>
-              <label class="block text-sm font-medium text-gray-700 mb-1">Username</label>
-              <input type="text" id="m-username" class="w-full px-3 py-2 border rounded text-sm">
-            </div>
-            <div>
-              <label class="block text-sm font-medium text-gray-700 mb-1">Password</label>
-              <input type="password" id="m-password" placeholder="Leave empty to keep unchanged" class="w-full px-3 py-2 border rounded text-sm">
-            </div>
-            <div>
-              <label class="block text-sm font-medium text-gray-700 mb-1">Private Key</label>
-              <textarea id="m-private-key" rows="3" placeholder="Leave empty to keep unchanged" class="w-full px-3 py-2 border rounded text-sm"></textarea>
-            </div>
-            <div>
-              <label class="block text-sm font-medium text-gray-700 mb-1">Check Command</label>
-              <input type="text" id="m-checkcommand" placeholder="echo ping"
-                     class="w-full px-3 py-2 border rounded text-sm">
-            </div>
-          </div>
-        `;
+        const div = el('div', 'space-y-4');
+        const nameInput = el('input', 'w-full px-3 py-2 border rounded text-sm');
+        nameInput.type = 'text';
+        nameInput.id = 'm-name';
+        nameInput.disabled = true;
+        const hostInput = el('input', 'w-full px-3 py-2 border rounded text-sm');
+        hostInput.type = 'text';
+        hostInput.id = 'm-host';
+        const portInput = el('input', 'w-full px-3 py-2 border rounded text-sm');
+        portInput.type = 'number';
+        portInput.id = 'm-port';
+        portInput.value = target.port || 22;
+        const usernameInput = el('input', 'w-full px-3 py-2 border rounded text-sm');
+        usernameInput.type = 'text';
+        usernameInput.id = 'm-username';
+        const passwordInput = el('input', 'w-full px-3 py-2 border rounded text-sm');
+        passwordInput.type = 'password';
+        passwordInput.id = 'm-password';
+        passwordInput.placeholder = 'Leave empty to keep unchanged';
+        const privateKeyTA = el('textarea', 'w-full px-3 py-2 border rounded text-sm');
+        privateKeyTA.id = 'm-private-key';
+        privateKeyTA.rows = 3;
+        privateKeyTA.placeholder = 'Leave empty to keep unchanged';
+        const checkCmdInput = el('input', 'w-full px-3 py-2 border rounded text-sm');
+        checkCmdInput.type = 'text';
+        checkCmdInput.id = 'm-checkcommand';
+        checkCmdInput.placeholder = 'echo ping';
+        div.appendChild(makeFormGroup('Name', { id: 'm-name' }));
+        div.children[0].querySelector('input').replaceWith(nameInput);
+        div.appendChild(makeFormGroup('Host', { id: 'm-host' }));
+        div.appendChild(makeFormGroup('Port', { id: 'm-port', type: 'number' }));
+        div.children[2].querySelector('input').replaceWith(portInput);
+        div.appendChild(makeFormGroup('Username', { id: 'm-username' }));
+        div.appendChild(makeFormGroup('Password', { id: 'm-password', type: 'password', placeholder: 'Leave empty to keep unchanged' }));
+        div.appendChild(makeFormGroup('Private Key', { id: 'm-private-key', type: 'textarea', rows: 3, placeholder: 'Leave empty to keep unchanged' }));
+        div.children[5].querySelector('textarea').replaceWith(privateKeyTA);
+        div.appendChild(makeFormGroup('Check Command', { id: 'm-checkcommand', placeholder: 'echo ping' }));
+        div.children[6].querySelector('input').replaceWith(checkCmdInput);
         showModal(
           'Edit Target',
-          modalBody,
+          () => div,
           async (body) => {
           const host = body.querySelector('#m-host').value.trim();
           const port = parseInt(body.querySelector('#m-port').value, 10) || 22;
@@ -598,40 +629,17 @@ async function renderTargets() {
 
     // Add Target handler
     addBtn.addEventListener('click', () => {
-      const modalBody = `
-        <div class="space-y-4">
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Name</label>
-            <input type="text" id="m-name" placeholder="e.g. my-server" class="w-full px-3 py-2 border rounded text-sm">
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Host</label>
-            <input type="text" id="m-host" placeholder="e.g. 192.168.1.10" class="w-full px-3 py-2 border rounded text-sm">
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Port</label>
-            <input type="number" id="m-port" value="22" class="w-full px-3 py-2 border rounded text-sm">
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Username</label>
-            <input type="text" id="m-username" placeholder="e.g. root" class="w-full px-3 py-2 border rounded text-sm">
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Password</label>
-            <input type="password" id="m-password" class="w-full px-3 py-2 border rounded text-sm">
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Private Key</label>
-            <textarea id="m-private-key" rows="3" class="w-full px-3 py-2 border rounded text-sm"></textarea>
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Check Command</label>
-            <input type="text" id="m-checkcommand" placeholder="echo ping"
-                   class="w-full px-3 py-2 border rounded text-sm">
-          </div>
-        </div>
-      `;
-      showModal('Add Target', modalBody, async (body) => {
+      showModal('Add Target', () => {
+        const div = el('div', 'space-y-4');
+        div.appendChild(makeFormGroup('Name', { id: 'm-name', placeholder: 'e.g. my-server' }));
+        div.appendChild(makeFormGroup('Host', { id: 'm-host', placeholder: 'e.g. 192.168.1.10' }));
+        div.appendChild(makeFormGroup('Port', { id: 'm-port', type: 'number', value: '22' }));
+        div.appendChild(makeFormGroup('Username', { id: 'm-username', placeholder: 'e.g. root' }));
+        div.appendChild(makeFormGroup('Password', { id: 'm-password', type: 'password' }));
+        div.appendChild(makeFormGroup('Private Key', { id: 'm-private-key', type: 'textarea', rows: 3 }));
+        div.appendChild(makeFormGroup('Check Command', { id: 'm-checkcommand', placeholder: 'echo ping' }));
+        return div;
+      }, async (body) => {
         const targetName = body.querySelector('#m-name').value.trim();
         const host = body.querySelector('#m-host').value.trim();
         const port = parseInt(body.querySelector('#m-port').value, 10) || 22;
@@ -752,14 +760,14 @@ async function renderPatterns() {
       row.appendChild(actionsCell);
 
       editBtn.addEventListener('click', () => {
-        const modalBody = `
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Pattern (regex)</label>
-            <input type="text" id="m-pattern" class="w-full px-3 py-2 border rounded text-sm font-mono">
-            <p id="m-pattern-error" class="text-red-600 text-xs mt-1 hidden"></p>
-          </div>
-        `;
-        showModal('Edit Pattern', modalBody, async (body) => {
+        showModal('Edit Pattern', () => {
+          const div = el('div');
+          div.appendChild(makeFormGroup('Pattern (regex)', { id: 'm-pattern', class: 'w-full px-3 py-2 border rounded text-sm font-mono' }));
+          const errP = el('p', 'text-red-600 text-xs mt-1 hidden');
+          errP.id = 'm-pattern-error';
+          div.appendChild(errP);
+          return div;
+        }, async (body) => {
           const newPattern = body.querySelector('#m-pattern').value.trim();
           const errEl = body.querySelector('#m-pattern-error');
           if (!newPattern) throw new Error('Pattern is required');
@@ -807,14 +815,14 @@ async function renderPatterns() {
     main.appendChild(container);
 
     addBtn.addEventListener('click', () => {
-      const modalBody = `
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Pattern (regex)</label>
-          <input type="text" id="m-pattern" placeholder="e.g. rm\\s+-rf" class="w-full px-3 py-2 border rounded text-sm font-mono">
-          <p id="m-pattern-error" class="text-red-600 text-xs mt-1 hidden"></p>
-        </div>
-      `;
-      showModal('Add Pattern', modalBody, async (body) => {
+      showModal('Add Pattern', () => {
+        const div = el('div');
+        div.appendChild(makeFormGroup('Pattern (regex)', { id: 'm-pattern', placeholder: 'e.g. rm\\s+-rf', class: 'w-full px-3 py-2 border rounded text-sm font-mono' }));
+        const errP = el('p', 'text-red-600 text-xs mt-1 hidden');
+        errP.id = 'm-pattern-error';
+        div.appendChild(errP);
+        return div;
+      }, async (body) => {
         const pattern = body.querySelector('#m-pattern').value.trim();
         const errEl = body.querySelector('#m-pattern-error');
         if (!pattern) throw new Error('Pattern is required');
@@ -971,19 +979,12 @@ function renderDefaultRules(container, rules) {
     row.appendChild(actionsCell);
 
     editBtn.addEventListener('click', () => {
-      const modalBody = `
-        <div class="space-y-4">
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Targets (comma-separated)</label>
-            <input type="text" id="m-targets" class="w-full px-3 py-2 border rounded text-sm">
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Commands (comma-separated, or * for all)</label>
-            <input type="text" id="m-commands" class="w-full px-3 py-2 border rounded text-sm">
-          </div>
-        </div>
-      `;
-      showModal('Edit Rule', modalBody, async (body) => {
+      showModal('Edit Rule', () => {
+        const div = el('div', 'space-y-4');
+        div.appendChild(makeFormGroup('Targets (comma-separated)', { id: 'm-targets' }));
+        div.appendChild(makeFormGroup('Commands (comma-separated, or * for all)', { id: 'm-commands' }));
+        return div;
+      }, async (body) => {
         const targets = body.querySelector('#m-targets').value.split(',').map(s => s.trim()).filter(Boolean);
         const commands = body.querySelector('#m-commands').value.split(',').map(s => s.trim()).filter(Boolean);
         if (!targets.length) throw new Error('At least one target is required');
@@ -1027,19 +1028,12 @@ function renderDefaultRules(container, rules) {
   container.appendChild(tableWrap);
 
   addBtn.addEventListener('click', () => {
-    const modalBody = `
-      <div class="space-y-4">
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Targets (comma-separated)</label>
-          <input type="text" id="m-targets" placeholder="e.g. server1, server2" class="w-full px-3 py-2 border rounded text-sm">
-        </div>
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Commands (comma-separated, or * for all)</label>
-          <input type="text" id="m-commands" placeholder="e.g. ls, df -h, *" class="w-full px-3 py-2 border rounded text-sm">
-        </div>
-      </div>
-    `;
-    showModal('Add Rule', modalBody, async (body) => {
+    showModal('Add Rule', () => {
+      const div = el('div', 'space-y-4');
+      div.appendChild(makeFormGroup('Targets (comma-separated)', { id: 'm-targets', placeholder: 'e.g. server1, server2' }));
+      div.appendChild(makeFormGroup('Commands (comma-separated, or * for all)', { id: 'm-commands', placeholder: 'e.g. ls, df -h, *' }));
+      return div;
+    }, async (body) => {
       const targets = body.querySelector('#m-targets').value.split(',').map(s => s.trim()).filter(Boolean);
       const commands = body.querySelector('#m-commands').value.split(',').map(s => s.trim()).filter(Boolean);
       if (!targets.length) throw new Error('At least one target is required');
@@ -1133,16 +1127,18 @@ function renderApiKeyRules(container, apiKeys, defaultRules) {
     row.appendChild(actionsCell);
 
     editBtn.addEventListener('click', () => {
-      const rulesJson = JSON.stringify(rules, null, 2);
-      const modalBody = `
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Rules (JSON array)</label>
-          <textarea id="m-rules" rows="8" class="w-full px-3 py-2 border rounded text-sm font-mono">${escapeHtml(rulesJson)}</textarea>
-          <p class="text-xs text-gray-500 mt-1">Format: [{"targets": ["..."], "commands": ["..."]}]</p>
-          <p id="m-rules-error" class="text-red-600 text-xs mt-1 hidden"></p>
-        </div>
-      `;
-      showModal(`Edit Rules: ${key.name || `Key ${idx}`}`, modalBody, async (body) => {
+      const editRuleTitle = `Edit Rules: ${key.name || `Key ${idx}`}`;
+      showModal(editRuleTitle, () => {
+        const div = el('div');
+        div.appendChild(makeFormGroup('Rules (JSON array)', { id: 'm-rules', type: 'textarea', rows: 8, class: 'w-full px-3 py-2 border rounded text-sm font-mono' }));
+        const helpP = el('p', 'text-xs text-gray-500 mt-1');
+        helpP.textContent = 'Format: [{"targets": ["..."], "commands": ["..."]}]';
+        div.appendChild(helpP);
+        const errP = el('p', 'text-red-600 text-xs mt-1 hidden');
+        errP.id = 'm-rules-error';
+        div.appendChild(errP);
+        return div;
+      }, async (body) => {
         const errEl = body.querySelector('#m-rules-error');
         let newRules;
         try {
@@ -1162,6 +1158,9 @@ function renderApiKeyRules(container, apiKeys, defaultRules) {
         }
         showToast('Rules updated');
         renderRules();
+      },
+      (body) => {
+        body.querySelector('#m-rules').value = JSON.stringify(rules, null, 2);
       });
     });
 
@@ -1188,37 +1187,67 @@ function renderApiKeyRules(container, apiKeys, defaultRules) {
 
   // Add API Key
   addBtn.addEventListener('click', () => {
-    const modalBody = `
-      <div class="space-y-4">
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Name</label>
-          <input type="text" id="m-key-name" placeholder="e.g. deploy-key" class="w-full px-3 py-2 border rounded text-sm">
-        </div>
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Plaintext Key</label>
-          <div class="relative">
-            <input type="password" id="m-key-plaintext" placeholder="The secret API key"
-                   autocomplete="off"
-                   class="w-full px-3 py-2 pr-10 border rounded text-sm">
-            <button type="button" id="m-key-toggle"
-                    class="absolute inset-y-0 right-0 px-3 flex items-center text-gray-500 hover:text-gray-700 focus:outline-none focus:text-gray-700"
-                    aria-label="Show API key" aria-pressed="false">
-              <svg id="m-key-eye-open" class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                      d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                      d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
-              </svg>
-              <svg id="m-key-eye-closed" class="h-5 w-5 hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                      d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.542-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.878 9.878L3 3m6.878 6.879L21 21"/>
-              </svg>
-            </button>
-          </div>
-        </div>
-      </div>
-    `;
-    showModal('Add API Key', modalBody, async (body) => {
+    showModal('Add API Key', () => {
+      const div = el('div', 'space-y-4');
+      div.appendChild(makeFormGroup('Name', { id: 'm-key-name', placeholder: 'e.g. deploy-key' }));
+
+      // Plaintext Key with eye-toggle
+      const keyGroup = el('div');
+      const keyLabel = el('label', 'block text-sm font-medium text-gray-700 mb-1');
+      keyLabel.textContent = 'Plaintext Key';
+      const relDiv = el('div', 'relative');
+      const keyInput = el('input', 'w-full px-3 py-2 pr-10 border rounded text-sm');
+      keyInput.type = 'password';
+      keyInput.id = 'm-key-plaintext';
+      keyInput.placeholder = 'The secret API key';
+      keyInput.autocomplete = 'off';
+      const toggleBtn = document.createElement('button');
+      toggleBtn.type = 'button';
+      toggleBtn.id = 'm-key-toggle';
+      toggleBtn.className = 'absolute inset-y-0 right-0 px-3 flex items-center text-gray-500 hover:text-gray-700 focus:outline-none focus:text-gray-700';
+      toggleBtn.setAttribute('aria-label', 'Show API key');
+      toggleBtn.setAttribute('aria-pressed', 'false');
+      const SVG_NS = 'http://www.w3.org/2000/svg';
+      const eyeOpen = document.createElementNS(SVG_NS, 'svg');
+      eyeOpen.id = 'm-key-eye-open';
+      eyeOpen.setAttribute('class', 'h-5 w-5');
+      eyeOpen.setAttribute('fill', 'none');
+      eyeOpen.setAttribute('stroke', 'currentColor');
+      eyeOpen.setAttribute('viewBox', '0 0 24 24');
+      const p1 = document.createElementNS(SVG_NS, 'path');
+      p1.setAttribute('stroke-linecap', 'round');
+      p1.setAttribute('stroke-linejoin', 'round');
+      p1.setAttribute('stroke-width', '2');
+      p1.setAttribute('d', 'M15 12a3 3 0 11-6 0 3 3 0 016 0z');
+      const p2 = document.createElementNS(SVG_NS, 'path');
+      p2.setAttribute('stroke-linecap', 'round');
+      p2.setAttribute('stroke-linejoin', 'round');
+      p2.setAttribute('stroke-width', '2');
+      p2.setAttribute('d', 'M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z');
+      eyeOpen.appendChild(p1);
+      eyeOpen.appendChild(p2);
+      const eyeClosed = document.createElementNS(SVG_NS, 'svg');
+      eyeClosed.id = 'm-key-eye-closed';
+      eyeClosed.setAttribute('class', 'h-5 w-5 hidden');
+      eyeClosed.setAttribute('fill', 'none');
+      eyeClosed.setAttribute('stroke', 'currentColor');
+      eyeClosed.setAttribute('viewBox', '0 0 24 24');
+      const p3 = document.createElementNS(SVG_NS, 'path');
+      p3.setAttribute('stroke-linecap', 'round');
+      p3.setAttribute('stroke-linejoin', 'round');
+      p3.setAttribute('stroke-width', '2');
+      p3.setAttribute('d', 'M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.542-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.878 9.878L3 3m6.878 6.879L21 21');
+      eyeClosed.appendChild(p3);
+      toggleBtn.appendChild(eyeOpen);
+      toggleBtn.appendChild(eyeClosed);
+      relDiv.appendChild(keyInput);
+      relDiv.appendChild(toggleBtn);
+      keyGroup.appendChild(keyLabel);
+      keyGroup.appendChild(relDiv);
+      div.appendChild(keyGroup);
+
+      return div;
+    }, async (body) => {
       const name = body.querySelector('#m-key-name').value.trim();
       const plaintext = body.querySelector('#m-key-plaintext').value.trim();
       if (!name) throw new Error('Name is required');
@@ -1240,17 +1269,29 @@ function renderApiKeyRules(container, apiKeys, defaultRules) {
         throw new Error(err.message || 'Failed to save');
       }
       // Show the plaintext key once
-      showModal('Key Created (save this now)', `
-        <div class="space-y-3">
-          <p class="text-sm text-gray-700">Your API key has been created. Copy it now — it will not be shown again.</p>
-          <div class="bg-gray-100 p-3 rounded font-mono text-sm break-all" id="m-created-key">${escapeHtml(plaintext)}</div>
-          <button id="m-copy-btn" class="text-blue-600 hover:text-blue-800 text-sm">Copy to clipboard</button>
-        </div>
-      `, async () => {
+      showModal('Key Created (save this now)', () => {
+        const div = el('div', 'space-y-3');
+        const infoP = el('p', 'text-sm text-gray-700');
+        infoP.textContent = 'Your API key has been created. Copy it now — it will not be shown again.';
+        div.appendChild(infoP);
+        const keyDiv = el('div', 'bg-gray-100 p-3 rounded font-mono text-sm break-all');
+        keyDiv.id = 'm-created-key';
+        keyDiv.textContent = plaintext;
+        div.appendChild(keyDiv);
+        const copyBtn = el('button', 'text-blue-600 hover:text-blue-800 text-sm');
+        copyBtn.id = 'm-copy-btn';
+        copyBtn.textContent = 'Copy to clipboard';
+        div.appendChild(copyBtn);
+        return div;
+      }, async () => {
         // Just close the modal
-      });
-      document.getElementById('m-copy-btn')?.addEventListener('click', () => {
-        navigator.clipboard.writeText(plaintext).then(() => showToast('Copied to clipboard'));
+      }, (body) => {
+        const copyBtn = body.querySelector('#m-copy-btn');
+        if (copyBtn) {
+          copyBtn.addEventListener('click', () => {
+            navigator.clipboard.writeText(plaintext).then(() => showToast('Copied to clipboard'));
+          });
+        }
       });
       showToast('API key created');
       renderRules();
@@ -1355,26 +1396,19 @@ function renderNetworkRules(container, networks) {
     row.appendChild(actionsCell);
 
     editBtn.addEventListener('click', () => {
-      const rulesJson = JSON.stringify(rules, null, 2);
-      const modalBody = `
-        <div class="space-y-4">
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Name</label>
-            <input type="text" id="m-net-name" class="w-full px-3 py-2 border rounded text-sm">
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">CIDR Range</label>
-            <input type="text" id="m-net-range" placeholder="e.g. 10.0.0.0/8" class="w-full px-3 py-2 border rounded text-sm font-mono">
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Rules (JSON array)</label>
-            <textarea id="m-net-rules" rows="6" class="w-full px-3 py-2 border rounded text-sm font-mono">${escapeHtml(rulesJson)}</textarea>
-            <p class="text-xs text-gray-500 mt-1">Format: [{"targets": ["..."], "commands": ["..."]}]</p>
-            <p id="m-net-rules-error" class="text-red-600 text-xs mt-1 hidden"></p>
-          </div>
-        </div>
-      `;
-      showModal('Edit Network Rule', modalBody, async (body) => {
+      showModal('Edit Network Rule', () => {
+        const div = el('div', 'space-y-4');
+        div.appendChild(makeFormGroup('Name', { id: 'm-net-name' }));
+        div.appendChild(makeFormGroup('CIDR Range', { id: 'm-net-range', placeholder: 'e.g. 10.0.0.0/8', class: 'w-full px-3 py-2 border rounded text-sm font-mono' }));
+        div.appendChild(makeFormGroup('Rules (JSON array)', { id: 'm-net-rules', type: 'textarea', rows: 6, class: 'w-full px-3 py-2 border rounded text-sm font-mono' }));
+        const helpP = el('p', 'text-xs text-gray-500 mt-1');
+        helpP.textContent = 'Format: [{"targets": ["..."], "commands": ["..."]}]';
+        div.children[2].appendChild(helpP);
+        const errP = el('p', 'text-red-600 text-xs mt-1 hidden');
+        errP.id = 'm-net-rules-error';
+        div.children[2].appendChild(errP);
+        return div;
+      }, async (body) => {
         const errEl = body.querySelector('#m-net-rules-error');
         const name = body.querySelector('#m-net-name').value.trim();
         const range = body.querySelector('#m-net-range').value.trim();
@@ -1402,6 +1436,7 @@ function renderNetworkRules(container, networks) {
         (body) => {
           body.querySelector('#m-net-name').value = net.name || '';
           body.querySelector('#m-net-range').value = net.range || '';
+          body.querySelector('#m-net-rules').value = JSON.stringify(rules, null, 2);
         }
       );
     });
@@ -1428,25 +1463,19 @@ function renderNetworkRules(container, networks) {
   container.appendChild(tableWrap);
 
   addBtn.addEventListener('click', () => {
-    const modalBody = `
-      <div class="space-y-4">
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Name</label>
-          <input type="text" id="m-net-name" placeholder="e.g. office-network" class="w-full px-3 py-2 border rounded text-sm">
-        </div>
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">CIDR Range</label>
-          <input type="text" id="m-net-range" placeholder="e.g. 10.0.0.0/8" class="w-full px-3 py-2 border rounded text-sm font-mono">
-        </div>
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1">Rules (JSON array)</label>
-          <textarea id="m-net-rules" rows="6" placeholder='[{"targets": ["server1"], "commands": ["ls"]}]' class="w-full px-3 py-2 border rounded text-sm font-mono">[]</textarea>
-          <p class="text-xs text-gray-500 mt-1">Format: [{"targets": ["..."], "commands": ["..."]}]</p>
-          <p id="m-net-rules-error" class="text-red-600 text-xs mt-1 hidden"></p>
-        </div>
-      </div>
-    `;
-    showModal('Add Network Rule', modalBody, async (body) => {
+    showModal('Add Network Rule', () => {
+      const div = el('div', 'space-y-4');
+      div.appendChild(makeFormGroup('Name', { id: 'm-net-name', placeholder: 'e.g. office-network' }));
+      div.appendChild(makeFormGroup('CIDR Range', { id: 'm-net-range', placeholder: 'e.g. 10.0.0.0/8', class: 'w-full px-3 py-2 border rounded text-sm font-mono' }));
+      div.appendChild(makeFormGroup('Rules (JSON array)', { id: 'm-net-rules', type: 'textarea', rows: 6, class: 'w-full px-3 py-2 border rounded text-sm font-mono', placeholder: '[{"targets": ["server1"], "commands": ["ls"]}]', value: '[]' }));
+      const helpP = el('p', 'text-xs text-gray-500 mt-1');
+      helpP.textContent = 'Format: [{"targets": ["..."], "commands": ["..."]}]';
+      div.children[2].appendChild(helpP);
+      const errP = el('p', 'text-red-600 text-xs mt-1 hidden');
+      errP.id = 'm-net-rules-error';
+      div.children[2].appendChild(errP);
+      return div;
+    }, async (body) => {
       const errEl = body.querySelector('#m-net-rules-error');
       const name = body.querySelector('#m-net-name').value.trim();
       const range = body.querySelector('#m-net-range').value.trim();
