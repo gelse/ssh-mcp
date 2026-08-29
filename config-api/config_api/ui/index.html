@@ -519,20 +519,10 @@ async function renderTargets() {
         nameInput.type = 'text';
         nameInput.id = 'm-name';
         nameInput.disabled = true;
-        const hostInput = el('input', 'w-full px-3 py-2 border rounded text-sm');
-        hostInput.type = 'text';
-        hostInput.id = 'm-host';
         const portInput = el('input', 'w-full px-3 py-2 border rounded text-sm');
         portInput.type = 'number';
         portInput.id = 'm-port';
         portInput.value = target.port || 22;
-        const usernameInput = el('input', 'w-full px-3 py-2 border rounded text-sm');
-        usernameInput.type = 'text';
-        usernameInput.id = 'm-username';
-        const passwordInput = el('input', 'w-full px-3 py-2 border rounded text-sm');
-        passwordInput.type = 'password';
-        passwordInput.id = 'm-password';
-        passwordInput.placeholder = 'Leave empty to keep unchanged';
         const privateKeyTA = el('textarea', 'w-full px-3 py-2 border rounded text-sm');
         privateKeyTA.id = 'm-private-key';
         privateKeyTA.rows = 3;
@@ -1289,7 +1279,10 @@ function renderApiKeyRules(container, apiKeys, defaultRules) {
         const copyBtn = body.querySelector('#m-copy-btn');
         if (copyBtn) {
           copyBtn.addEventListener('click', () => {
-            navigator.clipboard.writeText(plaintext).then(() => showToast('Copied to clipboard'));
+            if (!navigator.clipboard) { showToast('Clipboard unavailable', 'error'); return; }
+            navigator.clipboard.writeText(plaintext)
+              .then(() => showToast('Copied to clipboard'))
+              .catch(() => showToast('Failed to copy', 'error'));
           });
         }
       });
