@@ -26,6 +26,7 @@ Covers:
 from __future__ import annotations
 
 import json
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -1265,3 +1266,380 @@ class TestDeleteBackup:
             headers=auth_headers,
         )
         assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Error sanitization — verify no internal details leak in responses
+# ---------------------------------------------------------------------------
+
+
+class TestErrorSanitization:
+    """Tests that error responses sanitize internal details.
+
+    Verifies that exception messages, file paths, IPs, usernames, and
+    other sensitive information are NOT leaked in HTTP response bodies,
+    while the full details ARE logged server-side.
+    """
+
+    def test_get_config_json_error_no_raw_details(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """GET /config hides raw JSONDecodeError details from response."""
+        exc = json.JSONDecodeError(
+            "Expecting ',' delimiter", '{"key": "value"', 5,
+        )
+        mock_svc = MagicMock()
+        mock_svc.read_config.side_effect = exc
+        with patch("config_api.routes._config_service", mock_svc):
+            response = client.get("/config", headers=auth_headers)
+
+        assert response.status_code == 500
+        data = response.json()
+        assert data["error"] is True
+        assert data["error_type"] == "JSONDecodeError"
+        # Safe message must NOT leak internal details
+        assert "Expecting" not in data["message"]
+        assert "delimiter" not in data["message"]
+        assert "5" not in data["message"]
+
+    def test_hash_key_pydantic_error_no_raw_details(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """POST /hash-key hides Pydantic ValidationError details."""
+        response = client.post(
+            "/hash-key",
+            json={"key": ""},
+            headers=auth_headers,
+        )
+        assert response.status_code == 422
+        data = response.json()
+        assert data["error"] is True
+        assert data["error_type"] == "ValidationError"
+        # Safe message must NOT leak validation internals
+        message_lower = data["message"].lower()
+        assert "field" not in message_lower
+        assert "min_length" not in message_lower
+        assert "string should" not in message_lower
+
+    def test_check_ssh_generic_error_no_raw_details(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """POST /ssh_targets/{name}/check hides exception details."""
+        exc = Exception(
+            "Authentication failed for user admin@10.0.0.1:22"
+        )
+        mock_svc = MagicMock()
+        mock_svc.check_ssh_target.side_effect = exc
+        with patch("config_api.routes._config_service", mock_svc):
+            response = client.post(
+                "/config/ssh_targets/test-server/check",
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 500
+        data = response.json()
+        assert data["error"] is True
+        assert data["error_type"] == "SSHCheckError"
+        # Safe message must NOT leak credentials or addresses
+        assert "admin" not in data["message"]
+        assert "10.0.0.1" not in data["message"]
+
+    def test_put_config_oserror_no_raw_details(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """PUT /config hides OSError details from response."""
+        exc = OSError(13, "Permission denied", "/etc/ssh-mcp-config.json")
+        mock_svc = MagicMock()
+        mock_svc.write_config.side_effect = exc
+        with patch("config_api.routes._config_service", mock_svc):
+            response = client.put(
+                "/config",
+                json={"ssh_targets": {}, "block_patterns": []},
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 500
+        data = response.json()
+        assert data["error"] is True
+        assert data["error_type"] == "OSError"
+        # Safe message must NOT leak file paths or OS details
+        assert "Permission denied" not in data["message"]
+        assert "/etc/" not in data["message"]
+        assert "13" not in data["message"]
+
+    def test_restore_backup_json_error_no_raw_details(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """POST /backups/{name}/restore hides JSONDecodeError details."""
+        exc = json.JSONDecodeError(
+            "Expecting value", '{"broken": }', 1,
+        )
+        mock_svc = MagicMock()
+        mock_svc.backup_restore.side_effect = exc
+        with patch("config_api.routes._config_service", mock_svc):
+            response = client.post(
+                "/backups/ssh-mcp-config.20260101T000000Z.bak/restore",
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 500
+        data = response.json()
+        assert data["error"] is True
+        assert data["error_type"] == "JSONDecodeError"
+        # Safe message must NOT leak internal parse details
+        assert "Expecting value" not in data["message"]
+        assert '{"broken": }' not in data["message"]
+        assert "1" not in data["message"]
+
+    def test_error_responses_logged(
+        self, client: TestClient, auth_headers: dict[str, str],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Error responses log full exception details server-side."""
+        exc = json.JSONDecodeError(
+            "Expecting ',' delimiter", '{"key": "value"', 5,
+        )
+        mock_svc = MagicMock()
+        mock_svc.read_config.side_effect = exc
+        with patch("config_api.routes._config_service", mock_svc):
+            with caplog.at_level("WARNING", logger="config_api.routes"):
+                response = client.get("/config", headers=auth_headers)
+
+        assert response.status_code == 500
+        # Response is sanitized
+        data = response.json()
+        assert "Expecting" not in data["message"]
+        # But the log contains full exception details (exc_info=True)
+        assert "Expecting ',' delimiter" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# POST /api/auth/login
+# ---------------------------------------------------------------------------
+
+
+class TestLoginEndpoint:
+    """Tests for POST /auth/login."""
+
+    def test_login_success(
+        self, client: TestClient, test_token: str,
+    ) -> None:
+        """Valid token returns 200 and sets session cookie."""
+        response = client.post(
+            "/auth/login", json={"token": test_token},
+        )
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok"}
+        # Verify session cookie is set
+        assert "config_api_session" in response.cookies
+
+    def test_login_sets_httponly_cookie(
+        self, client: TestClient, test_token: str,
+    ) -> None:
+        """Session cookie is HttpOnly."""
+        response = client.post(
+            "/auth/login", json={"token": test_token},
+        )
+        cookie = response.cookies.get("config_api_session")
+        assert cookie is not None
+
+    def test_login_invalid_token(self, client: TestClient) -> None:
+        """Wrong token returns 401."""
+        response = client.post(
+            "/auth/login", json={"token": "wrong-token"},
+        )
+        assert response.status_code == 401
+        data = response.json()
+        assert data["error"] is True
+        assert data["message"] == "Invalid token"
+
+    def test_login_missing_token_body(self, client: TestClient) -> None:
+        """Missing 'token' field returns 401."""
+        response = client.post(
+            "/auth/login", json={"not_token": "value"},
+        )
+        assert response.status_code == 401
+        data = response.json()
+        assert data["error"] is True
+
+    def test_login_empty_token(self, client: TestClient) -> None:
+        """Empty token string returns 401."""
+        response = client.post(
+            "/auth/login", json={"token": ""},
+        )
+        assert response.status_code == 401
+
+    def test_login_invalid_json(self, client: TestClient) -> None:
+        """Malformed JSON body returns 401."""
+        response = client.post(
+            "/auth/login",
+            content="not json",
+            headers={"Content-Type": "application/json"},
+        )
+        assert response.status_code == 401
+
+    def test_login_non_object_body(self, client: TestClient) -> None:
+        """JSON array body returns 401."""
+        response = client.post(
+            "/auth/login", json=["token-value"],
+        )
+        assert response.status_code == 401
+
+    def test_login_cookie_allows_config_access(
+        self, client: TestClient, test_token: str,
+    ) -> None:
+        """Login cookie can be used to access protected routes."""
+        from config_api.auth import _sessions
+
+        session_id = "a" * 64
+        _sessions[session_id] = __import__("time").time()
+        try:
+            response = client.get(
+                "/config",
+                cookies={"config_api_session": session_id},
+            )
+            assert response.status_code == 200
+            assert "ssh_targets" in response.json()
+        finally:
+            _sessions.pop(session_id, None)
+
+
+# ---------------------------------------------------------------------------
+# POST /api/auth/logout
+# ---------------------------------------------------------------------------
+
+
+class TestLogoutEndpoint:
+    """Tests for POST /auth/logout."""
+
+    def test_logout_clears_cookie(
+        self, client: TestClient, test_token: str,
+    ) -> None:
+        """Logout clears the session cookie."""
+        from config_api.auth import _sessions
+
+        session_id = "b" * 64
+        _sessions[session_id] = __import__("time").time()
+        try:
+            response = client.post(
+                "/auth/logout",
+                cookies={"config_api_session": session_id},
+            )
+            assert response.status_code == 200
+            assert response.json() == {"status": "ok"}
+
+            # Verify the cookie was cleared (max-age=0 or expired)
+            set_cookie = response.headers.get("set-cookie", "")
+            assert "config_api_session" in set_cookie
+        finally:
+            _sessions.pop(session_id, None)
+
+    def test_logout_revokes_session(
+        self, client: TestClient, test_token: str,
+    ) -> None:
+        """After logout, the session cookie no longer grants access."""
+        from config_api.auth import _sessions
+
+        session_id = "c" * 64
+        _sessions[session_id] = __import__("time").time()
+
+        # Logout
+        client.post(
+            "/auth/logout",
+            cookies={"config_api_session": session_id},
+        )
+
+        # Session should be revoked
+        assert session_id not in _sessions
+
+        # Try to access protected route with the revoked session cookie
+        response = client.get(
+            "/config",
+            cookies={"config_api_session": session_id},
+        )
+        assert response.status_code == 401
+
+    def test_logout_requires_auth(self, client: TestClient) -> None:
+        """Logout without any auth returns 401."""
+        response = client.post("/auth/logout")
+        assert response.status_code == 401
+
+    def test_logout_with_bearer_token(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """Logout works with Bearer token auth (no session cookie to clear)."""
+        response = client.post(
+            "/auth/logout", headers=auth_headers,
+        )
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok"}
+
+    def test_logout_no_session_cookie_is_noop(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """Logout with Bearer auth but no session cookie is a no-op."""
+        response = client.post(
+            "/auth/logout", headers=auth_headers,
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data == {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# GET /api/auth/session
+# ---------------------------------------------------------------------------
+
+
+class TestSessionEndpoint:
+    """Tests for GET /auth/session."""
+
+    def test_session_valid_with_bearer(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """Valid Bearer token returns authenticated: true."""
+        response = client.get("/auth/session", headers=auth_headers)
+        assert response.status_code == 200
+        assert response.json() == {"authenticated": True}
+
+    def test_session_valid_with_cookie(
+        self, client: TestClient, test_token: str,
+    ) -> None:
+        """Valid session cookie returns authenticated: true."""
+        from config_api.auth import _sessions
+
+        session_id = "d" * 64
+        _sessions[session_id] = __import__("time").time()
+        try:
+            response = client.get(
+                "/auth/session",
+                cookies={"config_api_session": session_id},
+            )
+            assert response.status_code == 200
+            assert response.json() == {"authenticated": True}
+        finally:
+            _sessions.pop(session_id, None)
+
+    def test_session_invalid_token(self, client: TestClient) -> None:
+        """Invalid Bearer token returns 401."""
+        response = client.get(
+            "/auth/session",
+            headers={"Authorization": "Bearer wrong-token"},
+        )
+        assert response.status_code == 401
+
+    def test_session_no_auth(self, client: TestClient) -> None:
+        """Missing auth returns 401."""
+        response = client.get("/auth/session")
+        assert response.status_code == 401
+
+    def test_session_expired_cookie(
+        self, client: TestClient, test_token: str,
+    ) -> None:
+        """Expired session cookie returns 401."""
+        # Use a non-existent session ID (simulates expired/missing)
+        response = client.get(
+            "/auth/session",
+            cookies={"config_api_session": "deadbeef" * 8},
+        )
+        assert response.status_code == 401

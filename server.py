@@ -932,7 +932,8 @@ def _register_tools(
         """Build a structured error response for an MCPSSHError.
 
         Returns a dict with the ``error`` flag, the concrete exception
-        type name, a human-readable message, a ``retryable`` flag, and a
+        type name, the safe ``user_message`` (falling back to ``str(exc)``
+        for non-MCPSSHError exceptions), a ``retryable`` flag, and a
         ``status_code`` reflecting the intended HTTP status (503 for a
         :class:`ServiceUnavailableError`, 200 otherwise).  The
         ``request_id`` is taken from the current request context so errors
@@ -946,7 +947,7 @@ def _register_tools(
         return {
             "error": True,
             "error_type": type(exc).__name__,
-            "message": str(exc),
+            "message": getattr(exc, "user_message", str(exc)),
             "retryable": isinstance(exc, SSHTimeoutError),
             "status_code": status_code,
             "request_id": get_request_id(),
@@ -1210,10 +1211,27 @@ def _register_tools(
             return json.dumps(_format_error(e))
         except Exception as e:
             _finish_log_entry(log_entry, start_time, -1, "ssh_execute_command")
+            file_logger.log(
+                {
+                    "timestamp": datetime.datetime.now(
+                        datetime.timezone.utc
+                    ).isoformat(),
+                    "event": "internal_error",
+                    "tool": "ssh_execute_command",
+                    "request_id": get_request_id(),
+                    "log_level": "ERROR",
+                    "log_format_version": LOG_FORMAT_VERSION,
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                }
+            )
+            stdlib_logger.error(
+                "Unhandled exception in %s: %s",
+                "ssh_execute_command",
+                e,
+            )
             return json.dumps(
-                _format_error(
-                    MCPSSHError(f"Internal server error: {e}")
-                )
+                _format_error(MCPSSHError("Internal server error"))
             )
 
     @mcp.tool(annotations=ToolAnnotations(
@@ -1322,10 +1340,27 @@ def _register_tools(
             return json.dumps(_format_error(e))
         except Exception as e:
             _finish_log_entry(log_entry, start_time, -1, "ssh_check_connection")
+            file_logger.log(
+                {
+                    "timestamp": datetime.datetime.now(
+                        datetime.timezone.utc
+                    ).isoformat(),
+                    "event": "internal_error",
+                    "tool": "ssh_check_connection",
+                    "request_id": get_request_id(),
+                    "log_level": "ERROR",
+                    "log_format_version": LOG_FORMAT_VERSION,
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                }
+            )
+            stdlib_logger.error(
+                "Unhandled exception in %s: %s",
+                "ssh_check_connection",
+                e,
+            )
             return json.dumps(
-                _format_error(
-                    MCPSSHError(f"Internal server error: {e}")
-                )
+                _format_error(MCPSSHError("Internal server error"))
             )
 
     @mcp.tool(annotations=ToolAnnotations(
@@ -1457,10 +1492,27 @@ def _register_tools(
             return json.dumps(_format_error(e))
         except Exception as e:
             _finish_log_entry(log_entry, start_time, -1, "ssh_download_file")
+            file_logger.log(
+                {
+                    "timestamp": datetime.datetime.now(
+                        datetime.timezone.utc
+                    ).isoformat(),
+                    "event": "internal_error",
+                    "tool": "ssh_download_file",
+                    "request_id": get_request_id(),
+                    "log_level": "ERROR",
+                    "log_format_version": LOG_FORMAT_VERSION,
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                }
+            )
+            stdlib_logger.error(
+                "Unhandled exception in %s: %s",
+                "ssh_download_file",
+                e,
+            )
             return json.dumps(
-                _format_error(
-                    MCPSSHError(f"Internal server error: {e}")
-                )
+                _format_error(MCPSSHError("Internal server error"))
             )
 
     @mcp.tool(annotations=ToolAnnotations(
@@ -1609,10 +1661,27 @@ def _register_tools(
             return json.dumps(_format_error(e))
         except Exception as e:
             _finish_log_entry(log_entry, start_time, -1, "ssh_upload_file")
+            file_logger.log(
+                {
+                    "timestamp": datetime.datetime.now(
+                        datetime.timezone.utc
+                    ).isoformat(),
+                    "event": "internal_error",
+                    "tool": "ssh_upload_file",
+                    "request_id": get_request_id(),
+                    "log_level": "ERROR",
+                    "log_format_version": LOG_FORMAT_VERSION,
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                }
+            )
+            stdlib_logger.error(
+                "Unhandled exception in %s: %s",
+                "ssh_upload_file",
+                e,
+            )
             return json.dumps(
-                _format_error(
-                    MCPSSHError(f"Internal server error: {e}")
-                )
+                _format_error(MCPSSHError("Internal server error"))
             )
 
 

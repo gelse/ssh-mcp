@@ -37,6 +37,7 @@ from lib.constants import (
 )
 from lib.exceptions import (
     FileTransferError,
+    PathValidationError,
     SSHAuthenticationError,
     SSHConnectionError,
     SSHTimeoutError,
@@ -1679,7 +1680,7 @@ class TestSshCheckConnection:
         assert "SSHTimeoutError" in payload["error_type"]
 
     def test_check_connection_target_not_found(self, tmp_path, monkeypatch):
-        """Unknown target name returns error with 'not found' message."""
+        """Unknown target name returns safe user_message, not internal details."""
         config = self._make_check_config()
         fn, _logger = self._wire_tool(tmp_path, config, monkeypatch)
 
@@ -1687,7 +1688,7 @@ class TestSshCheckConnection:
         payload = json.loads(result)
 
         assert payload["error"] is True
-        assert "not found" in payload["message"].lower()
+        assert payload["message"] == "SSH connection failed"
 
     def test_check_connection_default_checkcommand(self, tmp_path, monkeypatch):
         """Target without checkcommand uses DEFAULT_CHECK_COMMAND."""
@@ -1724,3 +1725,481 @@ class TestSshCheckConnection:
         assert entry["command"] == "echo ping"
         assert "request_id" in entry
         assert "source_ip" in entry
+
+
+# ---------------------------------------------------------------------------
+# Catch-all exception sanitization (issue #8)
+#
+# The catch-all ``except Exception`` handlers must NOT leak internal details
+# (file paths, connection strings, paramiko error text) to MCP clients.
+# The actual exception is logged via file_logger and stdlib_logger for
+# diagnostics, but the client sees only "Internal server error".
+# ---------------------------------------------------------------------------
+
+
+class TestCatchAllExceptionSanitization:
+    """Catch-all handlers must sanitize exception details from MCP responses.
+
+    Each tool handler's ``except Exception`` block must:
+    1. Return ``"Internal server error"`` as the message (no raw exception text)
+    2. Log the actual exception via ``file_logger.log`` with ``event: internal_error``
+    3. Log via ``stdlib_logger.error`` for standard logging output
+    """
+
+    SENSITIVE_DETAIL = "secret path /home/user/.ssh/id_rsa"
+
+    @staticmethod
+    def _make_raising_ssh_manager():
+        """Return an SSH client manager whose ``connect()`` raises a generic Exception."""
+        manager = MagicMock()
+        manager.connect.side_effect = Exception(
+            TestCatchAllExceptionSanitization.SENSITIVE_DETAIL
+        )
+        return manager
+
+    @staticmethod
+    def _make_check_config(**target_overrides):
+        """Create a config dict with a target that has a checkcommand."""
+        return _make_minimal_config(
+            **{
+                "ssh_targets": {
+                    "testbox": {
+                        "host": "192.168.1.100",
+                        "port": 22,
+                        "username": "testuser",
+                        "password": "testpass",
+                        "checkcommand": "echo ping",
+                        **target_overrides,
+                    }
+                },
+            }
+        )
+
+    @staticmethod
+    def _wire_tool(tmp_path, config, monkeypatch, tool_name, ssh_client_manager):
+        """Register a tool handler and return (fn, file_logger, stdlib_logger)."""
+        from lib.config import ConfigManager
+
+        _write_config(tmp_path, config)
+        mgr = ConfigManager(str(tmp_path))
+        mgr.reload()
+        auth_mgr = AuthorizationManager(mgr)
+
+        mcp = FastMCP("test")
+        file_logger = MagicMock()
+        stdlib_logger = MagicMock()
+        file_transfer = MagicMock()
+        executor = _SyncExecutor()
+
+        server._register_tools(
+            mcp,
+            mgr,
+            auth_mgr,
+            file_logger,
+            stdlib_logger,
+            ssh_client_manager,
+            file_transfer,
+            "",  # ssh_key_path
+            50000,  # max_command_output
+            executor,
+        )
+        tool = asyncio.run(mcp.get_tool(tool_name))
+        return tool.fn, file_logger, stdlib_logger
+
+    def test_execute_command_swallows_exception_details(self, tmp_path, monkeypatch):
+        """ssh_execute_command catch-all must not leak exception text."""
+        config = _make_minimal_config()
+        ssh_cm = self._make_raising_ssh_manager()
+        fn, file_logger, stdlib_logger = self._wire_tool(
+            tmp_path, config, monkeypatch, "ssh_execute_command", ssh_cm
+        )
+
+        result = fn(server_name="testserver", command="hostname")
+        payload = json.loads(result)
+
+        # Must NOT leak the sensitive detail
+        assert self.SENSITIVE_DETAIL not in payload.get("message", "")
+        assert self.SENSITIVE_DETAIL not in str(payload)
+        # Must return sanitized error
+        assert payload["error"] is True
+        assert payload["error_type"] == "MCPSSHError"
+        assert payload["message"] == "An internal error occurred"
+
+        # Must log the actual exception via file_logger
+        error_entries = [
+            c[0][0]
+            for c in file_logger.log.call_args_list
+            if isinstance(c[0][0], dict)
+            and c[0][0].get("event") == "internal_error"
+        ]
+        assert len(error_entries) >= 1
+        err_entry = error_entries[-1]
+        assert err_entry["tool"] == "ssh_execute_command"
+        assert err_entry["error_type"] == "Exception"
+        assert err_entry["error_message"] == self.SENSITIVE_DETAIL
+        assert err_entry["log_level"] == "ERROR"
+
+        # Must log via stdlib_logger.error
+        stdlib_logger.error.assert_called()
+        error_call_args = str(stdlib_logger.error.call_args)
+        assert "ssh_execute_command" in error_call_args
+
+    def test_check_connection_swallows_exception_details(self, tmp_path, monkeypatch):
+        """ssh_check_connection catch-all must not leak exception text."""
+        config = self._make_check_config()
+        ssh_cm = self._make_raising_ssh_manager()
+        fn, file_logger, stdlib_logger = self._wire_tool(
+            tmp_path, config, monkeypatch, "ssh_check_connection", ssh_cm
+        )
+
+        result = fn(server_name="testbox")
+        payload = json.loads(result)
+
+        assert self.SENSITIVE_DETAIL not in payload.get("message", "")
+        assert self.SENSITIVE_DETAIL not in str(payload)
+        assert payload["error"] is True
+        assert payload["error_type"] == "MCPSSHError"
+        assert payload["message"] == "An internal error occurred"
+
+        error_entries = [
+            c[0][0]
+            for c in file_logger.log.call_args_list
+            if isinstance(c[0][0], dict)
+            and c[0][0].get("event") == "internal_error"
+        ]
+        assert len(error_entries) >= 1
+        err_entry = error_entries[-1]
+        assert err_entry["tool"] == "ssh_check_connection"
+        assert err_entry["error_type"] == "Exception"
+        assert err_entry["error_message"] == self.SENSITIVE_DETAIL
+
+        stdlib_logger.error.assert_called()
+
+    def test_download_file_swallows_exception_details(self, tmp_path, monkeypatch):
+        """ssh_download_file catch-all must not leak exception text."""
+        # download authorization checks for 'cat' — must be in allowed_commands
+        config = _make_minimal_config(
+            ssh_targets={
+                "testbox": {
+                    "host": "192.168.1.100",
+                    "port": 22,
+                    "username": "testuser",
+                    "password": "testpass",
+                    "checkcommand": "echo ping",
+                },
+            },
+            allowed_commands={
+                "default": [
+                    {"targets": ["*"], "commands": ["hostname", "uptime", "df", "cat"]},
+                ],
+                "api_keys": [],
+                "networks": [],
+            },
+        )
+        ssh_cm = self._make_raising_ssh_manager()
+        fn, file_logger, stdlib_logger = self._wire_tool(
+            tmp_path, config, monkeypatch, "ssh_download_file", ssh_cm
+        )
+
+        result = fn(server_name="testbox", remote_path="/tmp/test.txt")
+        payload = json.loads(result)
+
+        assert self.SENSITIVE_DETAIL not in payload.get("message", "")
+        assert self.SENSITIVE_DETAIL not in str(payload)
+        assert payload["error"] is True
+        assert payload["error_type"] == "MCPSSHError"
+        assert payload["message"] == "An internal error occurred"
+
+        error_entries = [
+            c[0][0]
+            for c in file_logger.log.call_args_list
+            if isinstance(c[0][0], dict)
+            and c[0][0].get("event") == "internal_error"
+        ]
+        assert len(error_entries) >= 1
+        err_entry = error_entries[-1]
+        assert err_entry["tool"] == "ssh_download_file"
+        assert err_entry["error_type"] == "Exception"
+        assert err_entry["error_message"] == self.SENSITIVE_DETAIL
+
+        stdlib_logger.error.assert_called()
+
+    def test_upload_file_swallows_exception_details(self, tmp_path, monkeypatch):
+        """ssh_upload_file catch-all must not leak exception text."""
+        # upload authorization checks for 'tee' — must be in allowed_commands
+        config = _make_minimal_config(
+            ssh_targets={
+                "testbox": {
+                    "host": "192.168.1.100",
+                    "port": 22,
+                    "username": "testuser",
+                    "password": "testpass",
+                    "checkcommand": "echo ping",
+                },
+            },
+            allowed_commands={
+                "default": [
+                    {"targets": ["*"], "commands": ["hostname", "uptime", "df", "tee"]},
+                ],
+                "api_keys": [],
+                "networks": [],
+            },
+        )
+        ssh_cm = self._make_raising_ssh_manager()
+        fn, file_logger, stdlib_logger = self._wire_tool(
+            tmp_path, config, monkeypatch, "ssh_upload_file", ssh_cm
+        )
+
+        result = fn(
+            server_name="testbox",
+            remote_path="/tmp/test.txt",
+            content="hello",
+        )
+        payload = json.loads(result)
+
+        assert self.SENSITIVE_DETAIL not in payload.get("message", "")
+        assert self.SENSITIVE_DETAIL not in str(payload)
+        assert payload["error"] is True
+        assert payload["error_type"] == "MCPSSHError"
+        assert payload["message"] == "An internal error occurred"
+
+        error_entries = [
+            c[0][0]
+            for c in file_logger.log.call_args_list
+            if isinstance(c[0][0], dict)
+            and c[0][0].get("event") == "internal_error"
+        ]
+        assert len(error_entries) >= 1
+        err_entry = error_entries[-1]
+        assert err_entry["tool"] == "ssh_upload_file"
+        assert err_entry["error_type"] == "Exception"
+        assert err_entry["error_message"] == self.SENSITIVE_DETAIL
+
+        stdlib_logger.error.assert_called()
+
+
+class TestUserMessageSanitization:
+    """``_format_error`` must use ``user_message`` instead of ``str(exc)``.
+
+    Each ``MCPSSHError`` subclass carries a safe ``DEFAULT_USER_MESSAGE``
+    that should appear in the ``message`` field of the structured error
+    response.  The full internal detail (hostnames, ports, file paths,
+    paramiko strings, commands) must NEVER leak through ``message``.
+
+    These tests catch regressions if someone accidentally reverts to
+    ``str(exc)`` inside ``_format_error``.
+    """
+
+    @staticmethod
+    def _make_ssh_manager_raise(exc: Exception) -> MagicMock:
+        """Return a mock SSH client manager whose ``connect()`` raises *exc*."""
+        manager = MagicMock()
+        manager.connect.side_effect = exc
+        return manager
+
+    @staticmethod
+    def _wire_and_call(tmp_path, monkeypatch, config, ssh_cm, tool_name, **tool_kwargs):
+        """Wire *tool_name*, call it, and return the parsed JSON payload."""
+        from lib.config import ConfigManager
+
+        _write_config(tmp_path, config)
+        mgr = ConfigManager(str(tmp_path))
+        mgr.reload()
+        auth_mgr = AuthorizationManager(mgr)
+
+        mcp = FastMCP("test")
+        file_logger = MagicMock()
+        stdlib_logger = MagicMock()
+        file_transfer = MagicMock()
+        executor = _SyncExecutor()
+
+        server._register_tools(
+            mcp,
+            mgr,
+            auth_mgr,
+            file_logger,
+            stdlib_logger,
+            ssh_cm,
+            file_transfer,
+            "",  # ssh_key_path
+            50000,  # max_command_output
+            executor,
+        )
+        tool = asyncio.run(mcp.get_tool(tool_name))
+        result = tool.fn(**tool_kwargs)
+        return json.loads(result)
+
+    # ------------------------------------------------------------------
+    # Tests
+    # ------------------------------------------------------------------
+
+    def test_ssh_connection_error_hides_hostname(self, tmp_path, monkeypatch):
+        """SSHConnectionError must not leak hostname/port in message."""
+        exc = SSHConnectionError(
+            "Server 'prod-db-01.internal.example.com' not found. "
+            "Available: staging, dev"
+        )
+        # Verify str(exc) carries full detail for logging
+        assert "prod-db-01.internal.example.com" in str(exc)
+
+        ssh_cm = self._make_ssh_manager_raise(exc)
+        config = _make_minimal_config()
+        payload = self._wire_and_call(
+            tmp_path, monkeypatch, config, ssh_cm,
+            "ssh_execute_command",
+            server_name="testserver", command="hostname",
+        )
+
+        assert payload["error"] is True
+        assert payload["error_type"] == "SSHConnectionError"
+        assert payload["message"] == "SSH connection failed"
+        # Must NOT leak the hostname
+        assert "prod-db-01" not in payload["message"]
+        assert "internal.example.com" not in payload["message"]
+
+    def test_ssh_authentication_error_hides_paramiko_detail(self, tmp_path, monkeypatch):
+        """SSHAuthenticationError must not leak paramiko strings in message."""
+        exc = SSHAuthenticationError(
+            "paramiko.AuthenticationException: auth failed for user admin"
+        )
+        assert "paramiko" in str(exc)
+
+        ssh_cm = self._make_ssh_manager_raise(exc)
+        config = _make_minimal_config()
+        payload = self._wire_and_call(
+            tmp_path, monkeypatch, config, ssh_cm,
+            "ssh_execute_command",
+            server_name="testserver", command="hostname",
+        )
+
+        assert payload["error"] is True
+        assert payload["error_type"] == "SSHAuthenticationError"
+        assert payload["message"] == "SSH authentication failed"
+        assert "paramiko" not in payload["message"]
+        assert "AuthenticationException" not in payload["message"]
+
+    def test_ssh_timeout_error_hides_command(self, tmp_path, monkeypatch):
+        """SSHTimeoutError must not leak the command that timed out."""
+        exc = SSHTimeoutError(
+            "Command 'rm -rf /' timed out after 30s"
+        )
+        assert "rm -rf /" in str(exc)
+
+        ssh_cm = self._make_ssh_manager_raise(exc)
+        config = _make_minimal_config()
+        payload = self._wire_and_call(
+            tmp_path, monkeypatch, config, ssh_cm,
+            "ssh_execute_command",
+            server_name="testserver", command="hostname",
+        )
+
+        assert payload["error"] is True
+        assert payload["error_type"] == "SSHTimeoutError"
+        assert payload["message"] == "Operation timed out"
+        assert "rm -rf" not in payload["message"]
+        assert "30s" not in payload["message"]
+        # SSHTimeoutError is retryable
+        assert payload["retryable"] is True
+
+    def test_file_transfer_error_hides_file_path(self, tmp_path, monkeypatch):
+        """FileTransferError must not leak file paths in message."""
+        exc = FileTransferError(
+            "Download failed: /etc/shadow"
+        )
+        assert "/etc/shadow" in str(exc)
+
+        ssh_cm = self._make_ssh_manager_raise(exc)
+        config = _make_minimal_config(
+            ssh_targets={
+                "testbox": {
+                    "host": "192.168.1.100",
+                    "port": 22,
+                    "username": "testuser",
+                    "password": "testpass",
+                },
+            },
+            allowed_commands={
+                "default": [
+                    {"targets": ["*"], "commands": ["hostname", "cat"]},
+                ],
+                "api_keys": [],
+                "networks": [],
+            },
+        )
+        payload = self._wire_and_call(
+            tmp_path, monkeypatch, config, ssh_cm,
+            "ssh_download_file",
+            server_name="testbox", remote_path="/tmp/test.txt",
+        )
+
+        assert payload["error"] is True
+        assert payload["error_type"] == "FileTransferError"
+        assert payload["message"] == "File transfer failed"
+        assert "/etc/shadow" not in payload["message"]
+
+    def test_path_validation_error_hides_traversal_detail(self, tmp_path, monkeypatch):
+        """PathValidationError must not leak path-traversal detail in message."""
+        exc = PathValidationError(
+            "Path traversal detected: ../../etc/passwd"
+        )
+        assert "../../etc/passwd" in str(exc)
+
+        ssh_cm = self._make_ssh_manager_raise(exc)
+        config = _make_minimal_config(
+            ssh_targets={
+                "testbox": {
+                    "host": "192.168.1.100",
+                    "port": 22,
+                    "username": "testuser",
+                    "password": "testpass",
+                },
+            },
+            allowed_commands={
+                "default": [
+                    {"targets": ["*"], "commands": ["hostname", "cat"]},
+                ],
+                "api_keys": [],
+                "networks": [],
+            },
+        )
+        payload = self._wire_and_call(
+            tmp_path, monkeypatch, config, ssh_cm,
+            "ssh_download_file",
+            server_name="testbox", remote_path="/tmp/test.txt",
+        )
+
+        assert payload["error"] is True
+        assert payload["error_type"] == "PathValidationError"
+        assert payload["message"] == "Invalid file path"
+        assert "traversal" not in payload["message"]
+        assert "passwd" not in payload["message"]
+
+    def test_str_exc_preserves_full_detail_for_logging(self):
+        """``str(exc)`` must still carry the full internal message."""
+        cases = [
+            (
+                SSHConnectionError("Server 'prod-db-01' not found"),
+                "prod-db-01",
+            ),
+            (
+                SSHAuthenticationError("paramiko auth failed"),
+                "paramiko",
+            ),
+            (
+                SSHTimeoutError("Command 'ls' timed out after 10s"),
+                "timed out",
+            ),
+            (
+                FileTransferError("Download failed: /etc/shadow"),
+                "/etc/shadow",
+            ),
+            (
+                PathValidationError("Path traversal: ../../etc/passwd"),
+                "../../etc/passwd",
+            ),
+        ]
+        for exc, expected_substring in cases:
+            assert expected_substring in str(exc), (
+                f"str({type(exc).__name__}) must contain "
+                f"{expected_substring!r} for logging, got {str(exc)!r}"
+            )

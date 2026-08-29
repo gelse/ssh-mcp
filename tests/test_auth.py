@@ -442,6 +442,91 @@ class TestCheckCommandNetwork:
 
 
 # ---------------------------------------------------------------------------
+# TestNetworkHostBitsWarning
+# ---------------------------------------------------------------------------
+
+
+class TestNetworkHostBitsWarning:
+    """Tests that _check_network_host_bits warns about CIDR ranges with host bits set."""
+
+    def test_warns_when_ipv4_host_bits_collapsed(self, tmp_path, caplog):
+        """Config with 192.168.1.100/24 should warn: host bits silently ignored."""
+        cfg = _minimal_auth_config()
+        cfg["allowed_commands"]["networks"] = [
+            {
+                "name": "mynetwork",
+                "range": "192.168.1.100/24",
+                "rules": [{"targets": ["*"], "commands": ["*"]}],
+            }
+        ]
+        with caplog.at_level("WARNING", logger="lib.auth"):
+            _make_auth_manager(tmp_path, cfg)
+        assert "192.168.1.100/24" in caplog.text
+        assert "192.168.1.0/24" in caplog.text
+
+    def test_warns_when_ipv6_host_bits_collapsed(self, tmp_path, caplog):
+        """Config with fe80::1/64 should warn: host bits silently ignored."""
+        cfg = _minimal_auth_config()
+        cfg["allowed_commands"]["networks"] = [
+            {
+                "name": "ipv6net",
+                "range": "fe80::1/64",
+                "rules": [{"targets": ["*"], "commands": ["*"]}],
+            }
+        ]
+        with caplog.at_level("WARNING", logger="lib.auth"):
+            _make_auth_manager(tmp_path, cfg)
+        assert "fe80::1/64" in caplog.text
+
+    def test_no_warning_for_clean_cidr(self, tmp_path, caplog):
+        """Config with 10.42.43.0/24 should NOT warn — host bits are zero."""
+        cfg = _minimal_auth_config()
+        cfg["allowed_commands"]["networks"] = [
+            {
+                "name": "clean",
+                "range": "10.42.43.0/24",
+                "rules": [{"targets": ["*"], "commands": ["*"]}],
+            }
+        ]
+        with caplog.at_level("WARNING", logger="lib.auth"):
+            _make_auth_manager(tmp_path, cfg)
+        assert "has host bits set" not in caplog.text
+
+    def test_no_warning_for_host_address_cidr(self, tmp_path, caplog):
+        """Config with 192.168.1.100/32 should NOT warn — /32 means all bits
+        are network bits by definition (single-host rule)."""
+        cfg = _minimal_auth_config()
+        cfg["allowed_commands"]["networks"] = [
+            {
+                "name": "single-host",
+                "range": "192.168.1.100/32",
+                "rules": [{"targets": ["*"], "commands": ["*"]}],
+            }
+        ]
+        with caplog.at_level("WARNING", logger="lib.auth"):
+            _make_auth_manager(tmp_path, cfg)
+        assert "has host bits set" not in caplog.text
+
+    def test_warning_message_content(self, tmp_path, caplog):
+        """Warning message should include original range, host-part IP, and
+        corrected CIDR notation."""
+        cfg = _minimal_auth_config()
+        cfg["allowed_commands"]["networks"] = [
+            {
+                "name": "testnet",
+                "range": "172.16.5.200/16",
+                "rules": [{"targets": ["*"], "commands": ["*"]}],
+            }
+        ]
+        with caplog.at_level("WARNING", logger="lib.auth"):
+            _make_auth_manager(tmp_path, cfg)
+        # 172.16.5.200/16 collapses to 172.16.0.0/16; host-part = 5.200
+        assert "172.16.5.200/16" in caplog.text  # original range
+        assert "172.16.0.0/16" in caplog.text  # corrected CIDR
+        assert "will be ignored" in caplog.text
+
+
+# ---------------------------------------------------------------------------
 # TestCheckCommandChainedCommands
 # ---------------------------------------------------------------------------
 
