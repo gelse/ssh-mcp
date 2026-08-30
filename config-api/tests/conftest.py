@@ -132,3 +132,20 @@ def client(app) -> TestClient:  # noqa: ANN001
 def auth_headers(test_token: str) -> dict[str, str]:
     """Return headers with a valid Bearer token."""
     return {"Authorization": f"Bearer {test_token}"}
+
+
+@pytest.fixture()
+def auth_cookie():  # noqa: ANN201
+    """Create a valid session and return a cookie dict for TestClient.
+
+    The session is registered in the in-memory store so that
+    ``verify_token()`` accepts it.  Cleanup is automatic.
+    """
+    import time
+
+    from config_api import auth as auth_mod
+
+    session_id = "e" * 64  # valid hex-like string
+    auth_mod._sessions[session_id] = time.time()
+    yield {"config_api_session": session_id}
+    auth_mod._sessions.pop(session_id, None)

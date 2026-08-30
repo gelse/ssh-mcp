@@ -102,6 +102,7 @@ from lib.exceptions import (
     SecretsError,
     ServiceUnavailableError,
     ShutdownError,
+    SSHAuthenticationError,
     SSHConnectionError,
 )
 from lib.file_transfer import FileTransferService

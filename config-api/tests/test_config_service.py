@@ -673,6 +673,85 @@ class TestWriteSection:
         result = service.write_section("block_patterns", new_patterns)
         assert result["block_patterns"] == new_patterns
 
+    def test_allowed_commands_partial_networks_preserves_default(
+        self, service: "ConfigService",
+    ) -> None:
+        """Writing only 'networks' to allowed_commands preserves 'default' rules."""
+        new_networks = [
+            {
+                "name": "internal",
+                "range": "10.0.0.0/8",
+                "rules": [{"targets": ["*"], "commands": ["echo"]}],
+            },
+        ]
+        result = service.write_section("allowed_commands", {"networks": new_networks})
+        assert result["allowed_commands"]["networks"] == new_networks
+        assert result["allowed_commands"]["default"] == [
+            {"targets": ["*"], "commands": ["echo", "whoami"]},
+        ]
+
+    def test_allowed_commands_partial_default_preserves_networks(
+        self, service: "ConfigService",
+    ) -> None:
+        """Writing only 'default' to allowed_commands preserves 'networks'."""
+        new_default = [
+            {"targets": ["*"], "commands": ["ls", "cat"]},
+        ]
+        result = service.write_section("allowed_commands", {"default": new_default})
+        assert result["allowed_commands"]["default"] == new_default
+        assert result["allowed_commands"]["networks"] == []
+
+    def test_allowed_commands_partial_api_keys_preserves_default(
+        self, service: "ConfigService",
+    ) -> None:
+        """Writing only 'api_keys' to allowed_commands preserves 'default' rules."""
+        new_api_keys = [
+            {
+                "name": "ci-runner",
+                "key_hash": "pbkdf2:sha256:100000$abc123$abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+                "rules": [{"targets": ["*"], "commands": ["echo"]}],
+            },
+        ]
+        result = service.write_section("allowed_commands", {"api_keys": new_api_keys})
+        assert len(result["allowed_commands"]["api_keys"]) == 1
+        assert result["allowed_commands"]["api_keys"][0]["name"] == "ci-runner"
+        assert result["allowed_commands"]["api_keys"][0]["rules"] == [
+            {"targets": ["*"], "commands": ["echo"]},
+        ]
+        assert result["allowed_commands"]["default"] == [
+            {"targets": ["*"], "commands": ["echo", "whoami"]},
+        ]
+
+    def test_allowed_commands_full_replacement_still_works(
+        self, service: "ConfigService",
+    ) -> None:
+        """Writing a complete allowed_commands dict replaces all sub-keys."""
+        full_allowed = {
+            "default": [{"targets": ["*"], "commands": ["date"]}],
+            "api_keys": [],
+            "networks": [],
+        }
+        result = service.write_section("allowed_commands", full_allowed)
+        assert result["allowed_commands"]["default"] == full_allowed["default"]
+        assert result["allowed_commands"]["api_keys"] == full_allowed["api_keys"]
+        assert result["allowed_commands"]["networks"] == full_allowed["networks"]
+
+    def test_ssh_targets_still_full_replace(
+        self, service: "ConfigService",
+    ) -> None:
+        """write_section('ssh_targets', ...) still does full replacement (no merge)."""
+        new_targets = {
+            "brand-new-server": {
+                "host": "192.168.1.100",
+                "port": 22,
+                "username": "root",
+                "password": "pw",
+            },
+        }
+        result = service.write_section("ssh_targets", new_targets)
+        assert "brand-new-server" in result["ssh_targets"]
+        assert "test-server" not in result["ssh_targets"]
+
 
 # ---------------------------------------------------------------------------
 # _create_backup

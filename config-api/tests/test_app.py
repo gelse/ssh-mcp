@@ -192,3 +192,221 @@ class TestCreateApp:
         client = TestClient(app)
         resp = client.get("/config")
         assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Cookie-based authentication integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestCookieAuth:
+    """End-to-end tests verifying cookie-based auth through the full app.
+
+    These tests exercise the login → cookie → protected endpoint flow
+    using create_app() and TestClient, ensuring the session cookie is
+    correctly set, validated, and rejected.
+    """
+
+    def test_login_endpoint_accessible_without_auth(
+        self, tmp_path: Path,
+    ) -> None:
+        """/auth/login is accessible without any auth header or cookie."""
+        _write_config(tmp_path, _minimal_config())
+        # Set token so get_token() works inside the login handler
+        from config_api import auth as auth_mod
+
+        auth_mod._token = "app-test-token"
+        app = create_app(config_dir=str(tmp_path))
+        client = TestClient(app)
+        response = client.post(
+            "/auth/login", json={"token": "app-test-token"},
+        )
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok"}
+        # Session cookie must be set on the response
+        assert "config_api_session" in response.cookies
+
+    def test_login_sets_httponly_session_cookie(
+        self, tmp_path: Path,
+    ) -> None:
+        """/auth/login sets an HttpOnly session cookie on success."""
+        _write_config(tmp_path, _minimal_config())
+        from config_api import auth as auth_mod
+
+        auth_mod._token = "app-test-token"
+        app = create_app(config_dir=str(tmp_path))
+        client = TestClient(app)
+        response = client.post(
+            "/auth/login", json={"token": "app-test-token"},
+        )
+        assert response.status_code == 200
+        cookie = response.cookies.get("config_api_session")
+        assert cookie is not None
+        assert len(cookie) > 0
+
+    def test_login_wrong_token_returns_401(self, tmp_path: Path) -> None:
+        """/auth/login rejects an invalid token with 401."""
+        _write_config(tmp_path, _minimal_config())
+        from config_api import auth as auth_mod
+
+        auth_mod._token = "app-test-token"
+        app = create_app(config_dir=str(tmp_path))
+        client = TestClient(app)
+        response = client.post(
+            "/auth/login", json={"token": "wrong-token"},
+        )
+        assert response.status_code == 401
+        data = response.json()
+        assert data["error"] is True
+        assert data["message"] == "Invalid token"
+
+    def test_cookie_auth_grants_access_to_protected_endpoint(
+        self, tmp_path: Path,
+    ) -> None:
+        """Login → receive cookie → use cookie on /config → 200."""
+        _write_config(tmp_path, _minimal_config())
+        from config_api import auth as auth_mod
+
+        auth_mod._token = "app-test-token"
+        app = create_app(config_dir=str(tmp_path))
+        client = TestClient(app)
+
+        # Step 1: login
+        login_resp = client.post(
+            "/auth/login", json={"token": "app-test-token"},
+        )
+        assert login_resp.status_code == 200
+
+        # Step 2: use the session cookie on a protected endpoint
+        session_cookie = login_resp.cookies.get("config_api_session")
+        assert session_cookie is not None
+
+        config_resp = client.get(
+            "/config",
+            cookies={"config_api_session": session_cookie},
+        )
+        assert config_resp.status_code == 200
+        data = config_resp.json()
+        assert "ssh_targets" in data
+        assert "block_patterns" in data
+
+    def test_cookie_auth_on_auth_session_endpoint(
+        self, tmp_path: Path,
+    ) -> None:
+        """Login → use cookie on /auth/session → returns authenticated."""
+        _write_config(tmp_path, _minimal_config())
+        from config_api import auth as auth_mod
+
+        auth_mod._token = "app-test-token"
+        app = create_app(config_dir=str(tmp_path))
+        client = TestClient(app)
+
+        login_resp = client.post(
+            "/auth/login", json={"token": "app-test-token"},
+        )
+        assert login_resp.status_code == 200
+        session_cookie = login_resp.cookies.get("config_api_session")
+
+        session_resp = client.get(
+            "/auth/session",
+            cookies={"config_api_session": session_cookie},
+        )
+        assert session_resp.status_code == 200
+        assert session_resp.json() == {"authenticated": True}
+
+    def test_expired_session_cookie_returns_401(
+        self, tmp_path: Path,
+    ) -> None:
+        """An expired session cookie is rejected with 401."""
+        import time
+
+        _write_config(tmp_path, _minimal_config())
+        from config_api import auth as auth_mod
+
+        auth_mod._token = "app-test-token"
+        app = create_app(config_dir=str(tmp_path))
+        client = TestClient(app)
+
+        # Manually inject an expired session
+        expired_id = "f" * 64
+        auth_mod._sessions[expired_id] = (
+            time.time() - auth_mod.CONFIG_API_SESSION_MAX_AGE_SECONDS - 10
+        )
+        try:
+            response = client.get(
+                "/config",
+                cookies={"config_api_session": expired_id},
+            )
+            assert response.status_code == 401
+        finally:
+            auth_mod._sessions.pop(expired_id, None)
+
+    def test_unknown_session_cookie_returns_401(
+        self, tmp_path: Path,
+    ) -> None:
+        """A session cookie with an unknown ID is rejected with 401."""
+        _write_config(tmp_path, _minimal_config())
+        from config_api import auth as auth_mod
+
+        auth_mod._token = "app-test-token"
+        app = create_app(config_dir=str(tmp_path))
+        client = TestClient(app)
+
+        response = client.get(
+            "/config",
+            cookies={"config_api_session": "deadbeef" * 8},
+        )
+        assert response.status_code == 401
+
+    def test_bearer_auth_still_works_backward_compat(
+        self, tmp_path: Path,
+    ) -> None:
+        """Bearer token auth continues to work alongside cookie auth."""
+        _write_config(tmp_path, _minimal_config())
+        from config_api import auth as auth_mod
+
+        auth_mod._token = "app-test-token"
+        app = create_app(config_dir=str(tmp_path))
+        client = TestClient(app)
+
+        response = client.get(
+            "/config",
+            headers={"Authorization": "Bearer app-test-token"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "ssh_targets" in data
+
+    def test_logout_clears_session_cookie(
+        self, tmp_path: Path,
+    ) -> None:
+        """Login → logout → cookie is cleared and session revoked."""
+        _write_config(tmp_path, _minimal_config())
+        from config_api import auth as auth_mod
+
+        auth_mod._token = "app-test-token"
+        app = create_app(config_dir=str(tmp_path))
+        client = TestClient(app)
+
+        # Login
+        login_resp = client.post(
+            "/auth/login", json={"token": "app-test-token"},
+        )
+        assert login_resp.status_code == 200
+        session_cookie = login_resp.cookies.get("config_api_session")
+        assert session_cookie is not None
+
+        # Logout
+        logout_resp = client.post(
+            "/auth/logout",
+            cookies={"config_api_session": session_cookie},
+        )
+        assert logout_resp.status_code == 200
+        assert logout_resp.json() == {"status": "ok"}
+
+        # Session should be revoked — accessing protected route fails
+        config_resp = client.get(
+            "/config",
+            cookies={"config_api_session": session_cookie},
+        )
+        assert config_resp.status_code == 401

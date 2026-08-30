@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 
 from config_api.auth import load_token
 from config_api.config_service import ConfigService
-from config_api.routes import init_config_service, router
+from config_api.routes import auth_router, init_config_service, router
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +114,7 @@ def create_app(
     )
 
     # Mount routes
+    app.include_router(auth_router)
     app.include_router(router)
 
     # Store service reference for shutdown/cleanup
