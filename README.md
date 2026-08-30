@@ -978,3 +978,33 @@ The project has no `ruff`, `mypy`, `pyright`, or `flake8` configuration. Formatt
 ## License
 
 MIT License — see [`LICENSE`](LICENSE) for details.
+
+---
+
+## FAQ
+
+### The config-api Web Dashboard won't stay logged in over HTTP — `/api/auth/session` returns `401`
+
+**Symptom:** Login with the API key succeeds, but after redirect the dashboard immediately
+shows the login screen and the browser reports `GET /api/auth/session 401 (Unauthorized)`.
+
+**Cause:** The config-api session cookie is created with the `Secure` flag on by default.
+When you access the dashboard over plain `http://` (no TLS), modern browsers **refuse
+to store or send a `Secure` cookie over non-HTTPS connections**. The cookie is never
+persisted, so the next request carries no session and `/api/auth/session` returns `401`.
+
+If you access the dashboard over `http://`, make sure the `Secure` flag is disabled by
+setting the environment variable in your `.env` file **and** restarting the container:
+
+```dotenv
+CONFIG_API_SESSION_COOKIE_SECURE=false
+```
+
+Because [`compose.yaml`](compose.yaml) defaults the value to `true`
+(`${CONFIG_API_SESSION_COOKIE_SECURE:-true}`), the variable must be present in `.env` —
+adding it only to your shell does not apply. A container restart is required for the
+change to take effect.
+
+> **Note:** Disabling `Secure` weakens cookie security and should be limited to local /
+> HTTP-only development. When the dashboard is served behind TLS (HTTPS), keep
+> `CONFIG_API_SESSION_COOKIE_SECURE=true` (the default).
