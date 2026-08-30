@@ -421,6 +421,41 @@ class TestPutConfigSection:
         data = response.json()
         assert "persist-server" in data["data"]
 
+    def test_put_config_section_allowed_commands_merges(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """PUT allowed_commands with only 'networks' preserves 'default' rules."""
+        # GET allowed_commands to confirm default rules exist
+        get_resp = client.get(
+            "/config/allowed_commands", headers=auth_headers,
+        )
+        assert get_resp.status_code == 200
+        original_default = get_resp.json()["data"]["default"]
+        assert len(original_default) > 0
+
+        # PUT only the networks sub-key
+        new_networks = [
+            {
+                "name": "internal",
+                "range": "10.0.0.0/8",
+                "rules": [{"targets": ["*"], "commands": ["echo"]}],
+            },
+        ]
+        put_resp = client.put(
+            "/config/allowed_commands",
+            json={"networks": new_networks},
+            headers=auth_headers,
+        )
+        assert put_resp.status_code == 200
+
+        # GET again — default rules should be preserved, networks updated
+        get_resp2 = client.get(
+            "/config/allowed_commands", headers=auth_headers,
+        )
+        data = get_resp2.json()["data"]
+        assert data["default"] == original_default
+        assert data["networks"] == new_networks
+
 
 # ---------------------------------------------------------------------------
 # POST /api/hash-key

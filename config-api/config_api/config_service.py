@@ -445,8 +445,17 @@ class ConfigService:
         # Read current config
         current = self.read_config()
 
-        # Replace section
-        current[section] = data
+        # Merge allowed_commands sub-keys to preserve untouched siblings
+        # (e.g. updating "networks" should not wipe "default" or "api_keys")
+        if section == "allowed_commands":
+            existing = current.get(section)
+            if isinstance(existing, dict) and isinstance(data, dict):
+                existing.update(data)
+                current[section] = existing
+            else:
+                current[section] = data
+        else:
+            current[section] = data
 
         # Validate and write (write_config handles stripping + validation)
         return self.write_config(current)
