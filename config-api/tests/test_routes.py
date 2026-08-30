@@ -26,6 +26,7 @@ Covers:
 from __future__ import annotations
 
 import json
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -1537,6 +1538,151 @@ class TestLoginEndpoint:
             assert "ssh_targets" in response.json()
         finally:
             _sessions.pop(session_id, None)
+
+
+# ---------------------------------------------------------------------------
+# CONFIG_API_SESSION_COOKIE_SECURE env var override
+# ---------------------------------------------------------------------------
+
+
+class TestCookieSecureOverride:
+    """Tests for CONFIG_API_SESSION_COOKIE_SECURE env var override."""
+
+    def test_default_cookie_secure_is_true(
+        self, client: TestClient, test_token: str,
+    ) -> None:
+        """Without env var override, cookie is Secure (constant default)."""
+        import config_api.routes as routes_mod
+
+        original = routes_mod.COOKIE_SECURE
+        try:
+            routes_mod.COOKIE_SECURE = True
+            response = client.post(
+                "/auth/login", json={"token": test_token},
+            )
+            assert response.status_code == 200
+            set_cookie = response.headers.get("set-cookie", "")
+            assert "Secure" in set_cookie
+        finally:
+            routes_mod.COOKIE_SECURE = original
+
+    def test_cookie_secure_false_disables_secure_flag(
+        self, client: TestClient, test_token: str,
+    ) -> None:
+        """Setting COOKIE_SECURE=False removes the Secure flag."""
+        import config_api.routes as routes_mod
+
+        original = routes_mod.COOKIE_SECURE
+        try:
+            routes_mod.COOKIE_SECURE = False
+            response = client.post(
+                "/auth/login", json={"token": test_token},
+            )
+            assert response.status_code == 200
+            set_cookie = response.headers.get("set-cookie", "")
+            cookie_parts = [
+                p.strip().split("=")[0].strip()
+                for p in set_cookie.split(";")
+            ]
+            assert "Secure" not in cookie_parts
+        finally:
+            routes_mod.COOKIE_SECURE = original
+
+    def test_cookie_secure_true_keeps_secure_flag(
+        self, client: TestClient, test_token: str,
+    ) -> None:
+        """Setting COOKIE_SECURE=True keeps the Secure flag."""
+        import config_api.routes as routes_mod
+
+        original = routes_mod.COOKIE_SECURE
+        try:
+            routes_mod.COOKIE_SECURE = True
+            response = client.post(
+                "/auth/login", json={"token": test_token},
+            )
+            assert response.status_code == 200
+            set_cookie = response.headers.get("set-cookie", "")
+            assert "Secure" in set_cookie
+        finally:
+            routes_mod.COOKIE_SECURE = original
+
+    def test_env_var_false_sets_cookie_secure_false(self) -> None:
+        """CONFIG_API_SESSION_COOKIE_SECURE=false env var disables Secure."""
+        import importlib
+
+        import config_api.routes as routes_mod
+
+        original = getattr(routes_mod, "COOKIE_SECURE", None)
+        try:
+            with patch.dict(
+                os.environ,
+                {"CONFIG_API_SESSION_COOKIE_SECURE": "false"},
+            ):
+                importlib.reload(routes_mod)
+                assert routes_mod.COOKIE_SECURE is False
+        finally:
+            if original is not None:
+                routes_mod.COOKIE_SECURE = original
+            importlib.reload(routes_mod)
+
+    def test_env_var_zero_sets_cookie_secure_false(self) -> None:
+        """CONFIG_API_SESSION_COOKIE_SECURE=0 env var disables Secure."""
+        import importlib
+
+        import config_api.routes as routes_mod
+
+        original = getattr(routes_mod, "COOKIE_SECURE", None)
+        try:
+            with patch.dict(
+                os.environ,
+                {"CONFIG_API_SESSION_COOKIE_SECURE": "0"},
+            ):
+                importlib.reload(routes_mod)
+                assert routes_mod.COOKIE_SECURE is False
+        finally:
+            if original is not None:
+                routes_mod.COOKIE_SECURE = original
+            importlib.reload(routes_mod)
+
+    def test_env_var_true_sets_cookie_secure_true(self) -> None:
+        """CONFIG_API_SESSION_COOKIE_SECURE=true env var keeps Secure."""
+        import importlib
+
+        import config_api.routes as routes_mod
+
+        original = getattr(routes_mod, "COOKIE_SECURE", None)
+        try:
+            with patch.dict(
+                os.environ,
+                {"CONFIG_API_SESSION_COOKIE_SECURE": "true"},
+            ):
+                importlib.reload(routes_mod)
+                assert routes_mod.COOKIE_SECURE is True
+        finally:
+            if original is not None:
+                routes_mod.COOKIE_SECURE = original
+            importlib.reload(routes_mod)
+
+    def test_env_var_unset_uses_constant_default(self) -> None:
+        """No env var set falls back to CONFIG_API_SESSION_COOKIE_SECURE."""
+        import importlib
+
+        import config_api.routes as routes_mod
+        from lib.constants import CONFIG_API_SESSION_COOKIE_SECURE
+
+        original = getattr(routes_mod, "COOKIE_SECURE", None)
+        try:
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("CONFIG_API_SESSION_COOKIE_SECURE", None)
+                importlib.reload(routes_mod)
+                assert (
+                    routes_mod.COOKIE_SECURE
+                    == CONFIG_API_SESSION_COOKIE_SECURE
+                )
+        finally:
+            if original is not None:
+                routes_mod.COOKIE_SECURE = original
+            importlib.reload(routes_mod)
 
 
 # ---------------------------------------------------------------------------
