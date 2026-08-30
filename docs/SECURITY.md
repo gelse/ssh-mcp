@@ -691,10 +691,18 @@ other sessions or the underlying token.
 | `Path`       | `/api`                                   | Scoped to config-api routes only                    |
 | `Max-Age`    | `3600` (1 hour)                          | Hard server-side expiry via cookie lifetime         |
 
-The `Secure` flag defaults to `true` and can be changed via
-`CONFIG_API_SESSION_COOKIE_SECURE` in [`lib/constants.py`](lib/constants.py).
-Set it to `false` only for local development behind an explicit TLS-terminating
-proxy.
+The `Secure` flag defaults to `true` (set in
+[`lib/constants.py`](lib/constants.py)). At runtime the
+`CONFIG_API_SESSION_COOKIE_SECURE` environment variable overrides this
+default — any falsy token (`false`, `0`, `no`, `off`, `disabled`, or an
+empty string) disables the flag. When the environment variable is not set,
+the `lib/constants.py` constant is used as the fallback.
+
+To disable the `Secure` flag for HTTP-only local development, set:
+
+```
+CONFIG_API_SESSION_COOKIE_SECURE=false
+```
 
 ### Idle Timeout
 

@@ -1684,6 +1684,139 @@ class TestCookieSecureOverride:
                 routes_mod.COOKIE_SECURE = original
             importlib.reload(routes_mod)
 
+    def test_env_var_off_sets_cookie_secure_false(self) -> None:
+        """CONFIG_API_SESSION_COOKIE_SECURE=off env var disables Secure."""
+        import importlib
+
+        import config_api.routes as routes_mod
+
+        original = getattr(routes_mod, "COOKIE_SECURE", None)
+        try:
+            with patch.dict(
+                os.environ,
+                {"CONFIG_API_SESSION_COOKIE_SECURE": "off"},
+            ):
+                importlib.reload(routes_mod)
+                assert routes_mod.COOKIE_SECURE is False
+        finally:
+            if original is not None:
+                routes_mod.COOKIE_SECURE = original
+            importlib.reload(routes_mod)
+
+    def test_env_var_disabled_sets_cookie_secure_false(self) -> None:
+        """CONFIG_API_SESSION_COOKIE_SECURE=disabled env var disables Secure."""
+        import importlib
+
+        import config_api.routes as routes_mod
+
+        original = getattr(routes_mod, "COOKIE_SECURE", None)
+        try:
+            with patch.dict(
+                os.environ,
+                {"CONFIG_API_SESSION_COOKIE_SECURE": "disabled"},
+            ):
+                importlib.reload(routes_mod)
+                assert routes_mod.COOKIE_SECURE is False
+        finally:
+            if original is not None:
+                routes_mod.COOKIE_SECURE = original
+            importlib.reload(routes_mod)
+
+    def test_env_var_empty_string_sets_cookie_secure_false(self) -> None:
+        """CONFIG_API_SESSION_COOKIE_SECURE='' env var disables Secure."""
+        import importlib
+
+        import config_api.routes as routes_mod
+
+        original = getattr(routes_mod, "COOKIE_SECURE", None)
+        try:
+            with patch.dict(
+                os.environ,
+                {"CONFIG_API_SESSION_COOKIE_SECURE": ""},
+            ):
+                importlib.reload(routes_mod)
+                assert routes_mod.COOKIE_SECURE is False
+        finally:
+            if original is not None:
+                routes_mod.COOKIE_SECURE = original
+            importlib.reload(routes_mod)
+
+    def test_env_var_whitespace_padded_false_strips(self) -> None:
+        """CONFIG_API_SESSION_COOKIE_SECURE=' false ' strips whitespace."""
+        import importlib
+
+        import config_api.routes as routes_mod
+
+        original = getattr(routes_mod, "COOKIE_SECURE", None)
+        try:
+            with patch.dict(
+                os.environ,
+                {"CONFIG_API_SESSION_COOKIE_SECURE": " false "},
+            ):
+                importlib.reload(routes_mod)
+                assert routes_mod.COOKIE_SECURE is False
+        finally:
+            if original is not None:
+                routes_mod.COOKIE_SECURE = original
+            importlib.reload(routes_mod)
+
+    def test_env_var_whitespace_padded_no_strips(self) -> None:
+        """CONFIG_API_SESSION_COOKIE_SECURE=' no ' strips whitespace."""
+        import importlib
+
+        import config_api.routes as routes_mod
+
+        original = getattr(routes_mod, "COOKIE_SECURE", None)
+        try:
+            with patch.dict(
+                os.environ,
+                {"CONFIG_API_SESSION_COOKIE_SECURE": " no "},
+            ):
+                importlib.reload(routes_mod)
+                assert routes_mod.COOKIE_SECURE is False
+        finally:
+            if original is not None:
+                routes_mod.COOKIE_SECURE = original
+            importlib.reload(routes_mod)
+
+    def test_env_var_mixed_case_false_disables(self) -> None:
+        """CONFIG_API_SESSION_COOKIE_SECURE=False disables Secure (case-insensitive)."""
+        import importlib
+
+        import config_api.routes as routes_mod
+
+        original = getattr(routes_mod, "COOKIE_SECURE", None)
+        try:
+            with patch.dict(
+                os.environ,
+                {"CONFIG_API_SESSION_COOKIE_SECURE": "False"},
+            ):
+                importlib.reload(routes_mod)
+                assert routes_mod.COOKIE_SECURE is False
+        finally:
+            if original is not None:
+                routes_mod.COOKIE_SECURE = original
+            importlib.reload(routes_mod)
+
+    def test_env_var_mixed_case_no_disables(self) -> None:
+        """CONFIG_API_SESSION_COOKIE_SECURE=NO disables Secure (case-insensitive)."""
+        import importlib
+
+        import config_api.routes as routes_mod
+
+        original = getattr(routes_mod, "COOKIE_SECURE", None)
+        try:
+            with patch.dict(
+                os.environ,
+                {"CONFIG_API_SESSION_COOKIE_SECURE": "NO"},
+            ):
+                importlib.reload(routes_mod)
+                assert routes_mod.COOKIE_SECURE is False
+        finally:
+            if original is not None:
+                routes_mod.COOKIE_SECURE = original
+            importlib.reload(routes_mod)
+
 
 # ---------------------------------------------------------------------------
 # POST /api/auth/logout

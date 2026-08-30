@@ -743,6 +743,7 @@ Set these environment variables in your `compose.yaml` or `.env` file:
 |---|---|---|
 | `CONFIG_API_ENABLED` | `false` | Set to `true` to enable the Configuration API |
 | `CONFIG_API_TOKEN` | *(required when enabled)* | Bearer token for authenticating API requests |
+| `CONFIG_API_SESSION_COOKIE_SECURE` | `true` | Set to `false` to disable the `Secure` flag on session cookies (for HTTP-only local development) |
 
 ```yaml
 services:

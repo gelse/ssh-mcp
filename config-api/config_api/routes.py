@@ -47,12 +47,15 @@ from lib.constants import (
 
 # Allow env-var override for the cookie ``secure`` flag.
 # When CONFIG_API_SESSION_COOKIE_SECURE env var is unset, fall back to the
-# constant (True).  Any falsy string ("false", "0", "no") disables it.
+# constant (True).  Any falsy token ("false", "0", "no", "off", "disabled",
+# or empty string) disables it.  The value is stripped and lower-cased before
+# comparison so that whitespace-padded or mixed-case inputs work correctly.
 _cookie_secure_env: str | None = os.environ.get(
     "CONFIG_API_SESSION_COOKIE_SECURE",
 )
 COOKIE_SECURE: bool = (
-    _cookie_secure_env.lower() not in ("false", "0", "no")
+    _cookie_secure_env.strip().lower()
+    not in ("false", "0", "no", "off", "disabled", "")
     if _cookie_secure_env is not None
     else CONFIG_API_SESSION_COOKIE_SECURE
 )
