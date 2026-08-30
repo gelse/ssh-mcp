@@ -11,6 +11,7 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import os
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,21 @@ from lib.constants import (
     CONFIG_API_SESSION_COOKIE_SAMESITE,
     CONFIG_API_SESSION_COOKIE_SECURE,
     CONFIG_API_SESSION_MAX_AGE_SECONDS,
+)
+
+# Allow env-var override for the cookie ``secure`` flag.
+# When CONFIG_API_SESSION_COOKIE_SECURE env var is unset, fall back to the
+# constant (True).  Any falsy token ("false", "0", "no", "off", "disabled",
+# or empty string) disables it.  The value is stripped and lower-cased before
+# comparison so that whitespace-padded or mixed-case inputs work correctly.
+_cookie_secure_env: str | None = os.environ.get(
+    "CONFIG_API_SESSION_COOKIE_SECURE",
+)
+COOKIE_SECURE: bool = (
+    _cookie_secure_env.strip().lower()
+    not in ("false", "0", "no", "off", "disabled", "")
+    if _cookie_secure_env is not None
+    else CONFIG_API_SESSION_COOKIE_SECURE
 )
 from lib.crypto import hash_api_key
 from lib.exceptions import ConfigValidationError
@@ -1033,7 +1049,7 @@ async def login(request: Request) -> JSONResponse:
         key=CONFIG_API_SESSION_COOKIE_NAME,
         value=session_id,
         httponly=True,
-        secure=CONFIG_API_SESSION_COOKIE_SECURE,
+        secure=COOKIE_SECURE,
         samesite=CONFIG_API_SESSION_COOKIE_SAMESITE,  # type: ignore[arg-type]
         max_age=CONFIG_API_SESSION_MAX_AGE_SECONDS,
         path="/api",
