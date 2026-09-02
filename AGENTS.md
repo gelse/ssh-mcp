@@ -187,6 +187,7 @@ Consult [`docs/SECURITY.md`](docs/SECURITY.md) before modifying these modules: [
 
 Follow the [File-Touch Checklist](#file-touch-checklist) for any new tool. Key handler patterns (see [`ssh_execute_command`](server.py:861) for reference):
 
+- Follow the `ssh_<verb>_<noun>` naming convention — see [Tool Naming Convention](README.md#tool-naming-convention)
 - `@mcp.tool()` decorator; return type `-> str`
 - Capture dependencies from closure — never use module globals
 - `get_client_ip()` from [`lib/request_context.py`](lib/request_context.py) for source IP
