@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ### Added
 - CIDR host-bits warning in config-api (#30)
+- Document `ssh_<verb>_<noun>` MCP tool naming convention (#46)
 
 ### Fixed
 - Fix `allowed_commands` partial write merging in config API (#38)

@@ -405,6 +405,21 @@ All tool calls are JSON-RPC `tools/call` requests to [`/mcp`](#mcp-client-config
 | `ssh_upload_file` | `server_name` (str), `remote_path` (str), `content` (str), `permissions` (str, default "0644") | Upload a file via SFTP; authorization equivalent to `tee <path>` |
 | `ssh_check_connection` | `server_name` (str), `timeout` (int, default 10) | Check SSH connectivity by running the target's `checkcommand`; returns success flag, output, and exit code |
 
+### Tool Naming Convention
+
+All MCP tools follow the `ssh_<verb>_<noun>` naming pattern:
+
+| Tool | Pattern |
+|---|---|
+| `ssh_list_servers` | `ssh_` + `list` + `servers` |
+| `ssh_list_allowed_commands` | `ssh_` + `list` + `allowed_commands` |
+| `ssh_execute_command` | `ssh_` + `execute` + `command` |
+| `ssh_check_connection` | `ssh_` + `check` + `connection` |
+| `ssh_download_file` | `ssh_` + `download` + `file` |
+| `ssh_upload_file` | `ssh_` + `upload` + `file` |
+
+The `ssh_` prefix is redundant across all tools but is intentionally preserved for **MCP API contract stability** — renaming tools would break existing MCP client integrations that reference tool names by string. New tools added in the future must follow this same convention.
+
 ### Examples
 
 ```python
