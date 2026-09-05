@@ -113,6 +113,15 @@ def create_app(
         ssh_key_path=ssh_key_path,
     )
 
+    # Register body-size limit middleware before routes
+    from config_api.body_size_middleware import BodySizeLimitMiddleware
+    from lib.constants import CONFIG_API_MAX_BODY_SIZE_BYTES
+
+    app.add_middleware(
+        BodySizeLimitMiddleware,
+        max_body_size=CONFIG_API_MAX_BODY_SIZE_BYTES,
+    )
+
     # Mount routes
     app.include_router(auth_router)
     app.include_router(router)

@@ -810,16 +810,6 @@ async def put_config(
     writing.  The config is validated using ConfigManager._validate().
     """
     logger.debug("put_config entry")
-    # Enforce body size limit (1 MB) — check Content-Length first
-    content_length = request.headers.get("content-length")
-    if content_length and int(content_length) > 1_048_576:
-        return JSONResponse(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            content=ErrorResponse(
-                error_type="PayloadTooLarge",
-                message="Request body must not exceed 1 MB",
-            ).model_dump(),
-        )
 
     try:
         body = await request.json()
