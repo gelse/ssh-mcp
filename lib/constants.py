@@ -131,6 +131,15 @@ MAX_REGEX_PATTERN_LENGTH: int = 10_000
 MAX_API_KEY_LENGTH: int = 1024
 """Maximum length (characters) of a raw API key before hashing."""
 
+MIN_API_KEY_CHAR: int = 0x21
+"""Lowest inclusive character (printable non-space ASCII ``!``) accepted
+in a raw API key.  Excludes the space character (``0x20``) so that keys
+remain safe to embed in HTTP headers without ambiguous tokenisation."""
+
+MAX_API_KEY_CHAR: int = 0x7E
+"""Highest inclusive character (printable non-space ASCII ``~``) accepted
+in a raw API key.  Excludes DEL (``0x7F``) and all non-ASCII bytes."""
+
 TARGET_NAME_PATTERN: re.Pattern[str] = re.compile(r"[a-zA-Z0-9._-]+")
 """Regex matching a single valid target-name run (see MAX_TARGET_NAME_LENGTH
 for the upper bound; ``sanitize_target_name`` combines both)."""

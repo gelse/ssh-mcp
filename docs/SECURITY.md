@@ -111,9 +111,12 @@ Before comparison, raw API keys submitted by clients are validated for
 syntactic safety by [`lib/request_context.py`](lib/request_context.py):
 
 - **Non-empty** — empty or missing keys are rejected immediately.
-- **Printable ASCII only** — every byte must be in the `0x20`–`0x7E` range,
-  rejecting control characters (e.g. `\x1f`) and non-ASCII bytes (e.g.
-  `café`).
+- **Printable non-space ASCII only** — every byte must be in the
+  `0x21`–`0x7E` range, rejecting control characters (e.g. `\x1f`),
+  the space character (`0x20`), and non-ASCII bytes (e.g. `café`).
+  This excludes spaces so that keys can be safely embedded in HTTP
+  headers (e.g. `Authorization: Bearer <key>`) without ambiguous
+  tokenisation.
 - **Maximum length** — keys must not exceed `MAX_API_KEY_LENGTH` (default:
   1024 characters).
 
