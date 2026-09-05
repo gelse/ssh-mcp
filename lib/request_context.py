@@ -25,7 +25,13 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from lib.constants import DEFAULT_REQUEST_ID, FALLBACK_CLIENT_IP, MAX_API_KEY_LENGTH
+from lib.constants import (
+    DEFAULT_REQUEST_ID,
+    FALLBACK_CLIENT_IP,
+    MAX_API_KEY_CHAR,
+    MAX_API_KEY_LENGTH,
+    MIN_API_KEY_CHAR,
+)
 
 if TYPE_CHECKING:
     from lib.rate_limiter import RateLimiter
@@ -349,17 +355,21 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
     def _is_valid_api_key(api_key: str) -> bool:
         """Return whether *api_key* is a syntactically valid API key.
 
-        A valid raw key is non-empty, contains only printable ASCII
-        characters (in ``0x20``–``0x7E``), and is no longer than
-        :data:`~lib.constants.MAX_API_KEY_LENGTH` characters.
+        A valid raw key is non-empty, contains only printable non-space
+        ASCII characters (in
+        :data:`~lib.constants.MIN_API_KEY_CHAR`–
+        :data:`~lib.constants.MAX_API_KEY_CHAR`, i.e. ``0x21``–``0x7E``),
+        and is no longer than :data:`~lib.constants.MAX_API_KEY_LENGTH`
+        characters.
 
-        Rejects Unicode characters (e.g. ``café``) and control characters
-        (e.g. ``\x1f``) while still allowing legitimate keys that contain
-        a literal space (``0x20``).
+        Rejects Unicode characters (e.g. ``café``), control characters
+        (e.g. ``\x1f``), and the space character (``0x20``) so that keys
+        remain safe to embed in HTTP headers without ambiguous
+        tokenisation.
         """
         if not api_key or len(api_key) > MAX_API_KEY_LENGTH:
             return False
-        return all(0x20 <= ord(c) <= 0x7E for c in api_key)
+        return all(MIN_API_KEY_CHAR <= ord(c) <= MAX_API_KEY_CHAR for c in api_key)
 
     @staticmethod
     def _extract_request_id(request: Request) -> str | None:
