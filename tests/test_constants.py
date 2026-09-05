@@ -12,6 +12,7 @@ from lib.constants import (
     API_KEY_HASH_PREFIX,
     BYTES_PER_KB,
     BYTES_PER_MB,
+    CONFIG_API_MAX_BODY_SIZE_BYTES,
     CONFIG_BACKUP_SUFFIX,
     DEFAULT_BLOCK_PATTERNS,
     DEFAULT_CIRCUIT_BREAKER_FAILURE_THRESHOLD,
@@ -259,6 +260,11 @@ class TestConstantValues:
         ]
         for v in positives:
             assert v > 0, f"Expected positive, got {v}"
+
+    def test_config_api_max_body_size_bytes_value(self) -> None:
+        """CONFIG_API_MAX_BODY_SIZE_BYTES equals 1 MiB and is an int."""
+        assert CONFIG_API_MAX_BODY_SIZE_BYTES == BYTES_PER_MB
+        assert isinstance(CONFIG_API_MAX_BODY_SIZE_BYTES, int)
 
     @pytest.mark.parametrize(
         "name,pattern,valid,invalid,fullmatch",

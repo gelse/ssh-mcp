@@ -542,3 +542,10 @@ CONFIG_API_SESSION_COOKIE_SAMESITE: str = "strict"
 
 CONFIG_API_SESSION_IDLE_TIMEOUT_SECONDS: int = 1800
 """Client-side idle timeout (seconds) before the session expires."""
+
+CONFIG_API_MAX_BODY_SIZE_BYTES: int = BYTES_PER_MB
+"""Maximum allowed request body size (bytes) for the config-api.
+
+Enforced by the body-size middleware before any route handler runs.
+Equals 1 MiB (BYTES_PER_MB).
+"""
