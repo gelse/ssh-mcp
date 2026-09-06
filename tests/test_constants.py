@@ -78,6 +78,7 @@ from lib.constants import (
     TARGET_NAME_PATTERN,
     SETTING_KEY_TYPES,
     SIZE_UNIT_MULTIPLIERS,
+    SUDO_ALLOWED_WILDCARD,
     SUDO_NO_PASSWORD_FLAG,
     SUDO_PASSWORD_PROMPT_FLAGS,
 )
@@ -402,6 +403,10 @@ class TestConstantValues:
         """SUDO_PASSWORD_PROMPT_FLAGS and SUDO_NO_PASSWORD_FLAG start with 'sudo'."""
         assert SUDO_PASSWORD_PROMPT_FLAGS.startswith("sudo")
         assert SUDO_NO_PASSWORD_FLAG.startswith("sudo")
+
+    def test_sudo_allowed_wildcard(self) -> None:
+        """SUDO_ALLOWED_WILDCARD is the ``*`` marker string."""
+        assert SUDO_ALLOWED_WILDCARD == "*"
 
     def test_http_status_is_503(self) -> None:
         """HTTP_SERVICE_UNAVAILABLE is 503."""
