@@ -326,13 +326,15 @@ def create_app(
     # ConfigManager is created first (before the structured logger) so that
     # its settings can drive LoggingManager.  ConfigManager uses stdlib
     # logging, not the structured file_logger, so this ordering is safe.
-    config_manager = ConfigManager(
-        config_dir, fix_permissions=fix_permissions
-    )
     try:
+        config_manager = ConfigManager(
+            config_dir, fix_permissions=fix_permissions
+        )
         # Start hot-reload watcher (15-second polling)
         config_manager.start_watcher(polling_interval=DEFAULT_WATCHER_INTERVAL_SECONDS)
-    except Exception:
+    except (OSError, json.JSONDecodeError, RuntimeError, MCPSSHError):
+        # Recoverable config errors (missing/unreadable file, invalid JSON,
+        # watcher startup failure) trigger fallback to the bundled default.
         _fallback_log = logging.getLogger(__name__)
         _fallback_log.warning(
             "Cannot initialize ConfigManager from %s — falling back to "
@@ -344,10 +346,17 @@ def create_app(
         # Fallback: load bundled default-config.json via ConfigManager
         # pointed at the project root (which is always readable).
         _fallback_config_dir = str(BASE_DIR)
-        config_manager = ConfigManager(
-            _fallback_config_dir,
-            fix_permissions=fix_permissions,
-        )
+        try:
+            config_manager = ConfigManager(
+                _fallback_config_dir,
+                fix_permissions=fix_permissions,
+            )
+        except (OSError, json.JSONDecodeError, RuntimeError, MCPSSHError):
+            _fallback_log.critical(
+                "Fallback config also failed; cannot start server",
+                exc_info=True,
+            )
+            raise
         _fallback_log.info(
             "Config loaded from fallback path: %s",
             config_manager.config_path,

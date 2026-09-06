@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -877,7 +878,15 @@ class ConfigManager:
         )
 
     def _ensure_default_config(self) -> None:
-        """Copy the bundled default config to ``self._config_path``."""
+        """Atomically copy the bundled default config to ``self._config_path``.
+
+        Writes to a temporary file inside ``self._config_dir`` and renames it
+        into place so the config never exists with permissive permissions.
+
+        Raises:
+            FileNotFoundError: If the bundled default-config.json is missing.
+            OSError: If the atomic copy/permission/replace steps fail.
+        """
         source = Path(__file__).parent.parent / "default-config.json"
         if not source.exists():
             raise FileNotFoundError(
@@ -885,8 +894,20 @@ class ConfigManager:
             )
 
         self._config_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, self._config_path)
-        os.chmod(self._config_path, 0o600)
+        tmp_path: Path | None = None
+        try:
+            fd, tmp_name = tempfile.mkstemp(
+                dir=str(self._config_dir), prefix=".config_", suffix=".tmp"
+            )
+            os.close(fd)
+            tmp_path = Path(tmp_name)
+            shutil.copy2(source, tmp_path)
+            os.chmod(tmp_path, RESTRICTED_FILE_MODE)
+            os.replace(tmp_path, self._config_path)
+            tmp_path = None  # consumed by replace
+        finally:
+            if tmp_path is not None and tmp_path.exists():
+                tmp_path.unlink()
         logger.info("Created default config at %s", self._config_path)
         self._log_config_event(
             "config.default_created",
