@@ -2085,3 +2085,32 @@ class TestUserMessageSanitization:
                 f"str({type(exc).__name__}) must contain "
                 f"{expected_substring!r} for logging, got {str(exc)!r}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Tests: narrowed exception handling in create_app startup
+# ---------------------------------------------------------------------------
+
+
+class TestCreateAppFallbackBehavior:
+    """Tests for narrowed exception handling in create_app startup."""
+
+    def test_create_app_raises_when_fallback_also_fails(self, tmp_path, monkeypatch):
+        """If both primary and fallback ConfigManager fail, server raises."""
+        import server
+        from lib.exceptions import MCPSSHError
+
+        call_count = 0
+
+        def _failing_init(self_cm, config_dir, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            raise OSError("simulated config failure")
+
+        monkeypatch.setattr(server.ConfigManager, "__init__", _failing_init)
+
+        with pytest.raises(OSError, match="simulated config failure"):
+            server.create_app(str(tmp_path))
+
+        # Both primary and fallback were attempted
+        assert call_count == 2

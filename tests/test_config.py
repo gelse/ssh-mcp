@@ -2176,3 +2176,56 @@ class TestSettingsLoggingValidation:
             # Should not raise — extra fields are not validated
             mgr = ConfigManager(td)
             assert mgr.data["settings"]["logging"]["log_targets"][0].get("extra_field") == "allowed"
+
+
+# ---------------------------------------------------------------------------
+# Tests: atomic default-config creation (TOCTOU fix)
+# ---------------------------------------------------------------------------
+
+
+class TestEnsureDefaultConfigAtomicity:
+    """Tests for atomic default-config creation (TOCTOU fix)."""
+
+    def test_replace_failure_cleans_up_tmp(self, tmp_path, monkeypatch):
+        """If os.replace fails, temp file is cleaned up and no config remains."""
+        import lib.config
+
+        def _replace_fail(src, dst):
+            raise OSError("simulated replace failure")
+
+        monkeypatch.setattr(lib.config.os, "replace", _replace_fail)
+
+        with pytest.raises(OSError, match="simulated replace failure"):
+            lib.config.ConfigManager(str(tmp_path))
+
+        # No config file or tmp files should remain
+        assert not (tmp_path / "ssh-mcp-config.json").exists()
+        assert list(tmp_path.glob(".config_*.tmp")) == []
+
+    def test_chmod_failure_cleans_up_tmp(self, tmp_path, monkeypatch):
+        """If os.chmod fails, temp file is cleaned up."""
+        import lib.config
+
+        def _chmod_fail(path, mode, **kwargs):
+            # Accept **kwargs: shutil.copy2's internal copystat() also calls
+            # os.chmod with follow_symlinks; either call site must be fatal.
+            raise PermissionError("simulated chmod failure")
+
+        monkeypatch.setattr(lib.config.os, "chmod", _chmod_fail)
+
+        with pytest.raises(PermissionError, match="simulated chmod failure"):
+            lib.config.ConfigManager(str(tmp_path))
+
+        assert not (tmp_path / "ssh-mcp-config.json").exists()
+        assert list(tmp_path.glob(".config_*.tmp")) == []
+
+    def test_default_config_mode_is_restricted(self, tmp_path):
+        """Created default config has RESTRICTED_FILE_MODE permissions."""
+        import lib.config
+        import stat
+        from lib.constants import RESTRICTED_FILE_MODE
+
+        lib.config.ConfigManager(str(tmp_path))
+        config_file = tmp_path / "ssh-mcp-config.json"
+        assert config_file.exists()
+        assert stat.S_IMODE(config_file.stat().st_mode) == RESTRICTED_FILE_MODE
