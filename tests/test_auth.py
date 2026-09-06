@@ -1041,3 +1041,333 @@ class TestRulesSnapshotRefresh:
 
         assert am.check_command("docker", "knubbel").allowed is True
         assert "docker" in am.list_allowed_commands("knubbel")
+
+
+# ---------------------------------------------------------------------------
+# TestSudoAwareMatching
+# ---------------------------------------------------------------------------
+
+
+class TestSudoAwareMatching:
+    """Sudo-aware rule matching across default, api_key, and network layers.
+
+    ``sudo_allowed`` on a matched rule lists the rule's commands that may run
+    with sudo (or the ``"*"`` wildcard).  A ``sudo=True`` check against a rule
+    that does not permit the base command is denied with ``sudo_denied=True``
+    and a ``" (sudo)"`` ``matched_via`` suffix.
+    """
+
+    def test_auth_result_sudo_fields_default_false(self):
+        """New AuthResult sudo fields default to False (positional-safe)."""
+        result = AuthResult(True, "ok", "default", "knubbel")
+        assert result.sudo_allowed is False
+        assert result.sudo_denied is False
+
+    # -- default layer --
+
+    def test_default_sudo_denied_when_sudo_allowed_absent(self, tmp_path):
+        """A matched rule without sudo_allowed denies sudo=True checks."""
+        cfg = _minimal_auth_config()
+        cfg["allowed_commands"]["default"] = [
+            {"targets": ["*"], "commands": ["systemctl"]}
+        ]
+        am = _make_auth_manager(tmp_path, cfg)
+        result = am.check_command("systemctl status", "knubbel", sudo=True)
+        assert result.allowed is False
+        assert result.sudo_denied is True
+        assert result.sudo_allowed is False
+        assert "sudo not allowed" in result.reason
+        assert result.matched_via == "default (sudo)"
+
+    def test_default_sudo_denied_when_sudo_allowed_empty(self, tmp_path):
+        """An empty sudo_allowed list behaves like an absent one for sudo."""
+        cfg = _minimal_auth_config()
+        cfg["allowed_commands"]["default"] = [
+            {"targets": ["*"], "commands": ["systemctl"], "sudo_allowed": []}
+        ]
+        am = _make_auth_manager(tmp_path, cfg)
+        result = am.check_command("systemctl status", "knubbel", sudo=True)
+        assert result.allowed is False
+        assert result.sudo_denied is True
+        assert "sudo not allowed" in result.reason
+        assert result.matched_via.endswith(" (sudo)")
+
+    def test_default_sudo_allowed_for_listed_command(self, tmp_path):
+        """A listed sudo_allowed command runs with sudo; no " (sudo)" suffix."""
+        cfg = _minimal_auth_config()
+        cfg["allowed_commands"]["default"] = [
+            {
+                "targets": ["*"],
+                "commands": ["systemctl"],
+                "sudo_allowed": ["systemctl"],
+            }
+        ]
+        am = _make_auth_manager(tmp_path, cfg)
+        result = am.check_command("systemctl status", "knubbel", sudo=True)
+        assert result.allowed is True
+        assert result.sudo_allowed is True
+        assert result.sudo_denied is False
+        assert result.matched_via == "default"
+        assert not result.matched_via.endswith(" (sudo)")
+
+    def test_default_sudo_denied_for_unlisted_command(self, tmp_path):
+        """sudo_allowed: ["systemctl"] does not permit docker under sudo."""
+        cfg = _minimal_auth_config()
+        cfg["allowed_commands"]["default"] = [
+            {
+                "targets": ["*"],
+                "commands": ["systemctl", "docker"],
+                "sudo_allowed": ["systemctl"],
+            }
+        ]
+        am = _make_auth_manager(tmp_path, cfg)
+        result = am.check_command("docker ps", "knubbel", sudo=True)
+        assert result.allowed is False
+        assert result.sudo_denied is True
+        assert "docker" in result.reason
+        assert result.matched_via == "default (sudo)"
+
+    def test_default_sudo_allowed_wildcard(self, tmp_path):
+        """sudo_allowed: ["*"] permits every command of the rule under sudo."""
+        cfg = _minimal_auth_config()
+        cfg["allowed_commands"]["default"] = [
+            {
+                "targets": ["*"],
+                "commands": ["systemctl", "docker"],
+                "sudo_allowed": ["*"],
+            }
+        ]
+        am = _make_auth_manager(tmp_path, cfg)
+        for cmd in ("systemctl status", "docker ps"):
+            result = am.check_command(cmd, "knubbel", sudo=True)
+            assert result.allowed is True
+            assert result.sudo_allowed is True
+            assert result.sudo_denied is False
+            assert result.matched_via == "default"
+
+    def test_non_sudo_ignores_sudo_allowed(self, tmp_path):
+        """sudo=False checks succeed regardless of sudo_allowed contents."""
+        cfg = _minimal_auth_config()
+        cfg["allowed_commands"]["default"] = [
+            {
+                "targets": ["*"],
+                "commands": ["systemctl", "docker"],
+                "sudo_allowed": ["systemctl"],
+            }
+        ]
+        am = _make_auth_manager(tmp_path, cfg)
+        result = am.check_command("systemctl status", "knubbel", sudo=False)
+        assert result.allowed is True
+        assert result.sudo_allowed is False
+        assert result.sudo_denied is False
+        assert result.matched_via == "default"
+        # Even a command not listed in sudo_allowed runs without sudo.
+        result = am.check_command("docker ps", "knubbel", sudo=False)
+        assert result.allowed is True
+        assert result.sudo_denied is False
+        assert result.matched_via == "default"
+
+    # -- api_key layer --
+
+    def test_api_key_sudo_allowed(self, tmp_path):
+        """API-key layer permits sudo for listed sudo_allowed commands."""
+        cfg = _minimal_auth_config()
+        cfg["allowed_commands"]["default"] = [
+            {"targets": ["*"], "commands": ["hostname"]}
+        ]
+        cfg["allowed_commands"]["api_keys"][0]["rules"] = [
+            {
+                "targets": ["knubbel"],
+                "commands": ["systemctl"],
+                "sudo_allowed": ["systemctl"],
+            }
+        ]
+        am = _make_auth_manager(tmp_path, cfg)
+        result = am.check_command(
+            "systemctl status", "knubbel", api_key="test", sudo=True
+        )
+        assert result.allowed is True
+        assert result.sudo_allowed is True
+        assert result.sudo_denied is False
+        assert result.matched_via == "api_key:monitoring-service"
+        assert not result.matched_via.endswith(" (sudo)")
+        assert result.api_key_name == "monitoring-service"
+
+    def test_api_key_sudo_denied(self, tmp_path):
+        """API-key layer denies sudo with a " (sudo)" matched_via suffix."""
+        cfg = _minimal_auth_config()
+        cfg["allowed_commands"]["default"] = [
+            {"targets": ["*"], "commands": ["hostname"]}
+        ]
+        cfg["allowed_commands"]["api_keys"][0]["rules"] = [
+            {"targets": ["knubbel"], "commands": ["systemctl"]}
+        ]
+        am = _make_auth_manager(tmp_path, cfg)
+        result = am.check_command(
+            "systemctl status", "knubbel", api_key="test", sudo=True
+        )
+        assert result.allowed is False
+        assert result.sudo_denied is True
+        assert "sudo not allowed" in result.reason
+        assert result.matched_via == "api_key:monitoring-service (sudo)"
+        assert result.matched_via.endswith(" (sudo)")
+        assert result.api_key_name == "monitoring-service"
+
+    # -- network layer --
+
+    def test_network_sudo_allowed(self, tmp_path):
+        """Network layer permits sudo for listed sudo_allowed commands."""
+        cfg = _minimal_auth_config()
+        cfg["allowed_commands"]["default"] = [
+            {"targets": ["*"], "commands": ["hostname"]}
+        ]
+        cfg["allowed_commands"]["networks"][0]["rules"] = [
+            {
+                "targets": ["knubbel"],
+                "commands": ["systemctl"],
+                "sudo_allowed": ["systemctl"],
+            }
+        ]
+        am = _make_auth_manager(tmp_path, cfg)
+        result = am.check_command(
+            "systemctl status", "knubbel", source_ip="10.42.43.100", sudo=True
+        )
+        assert result.allowed is True
+        assert result.sudo_allowed is True
+        assert result.sudo_denied is False
+        assert result.matched_via == "network:homelab-internal (10.42.43.0/24)"
+        assert not result.matched_via.endswith(" (sudo)")
+
+    def test_network_sudo_denied(self, tmp_path):
+        """Network layer denies sudo with a " (sudo)" matched_via suffix."""
+        cfg = _minimal_auth_config()
+        cfg["allowed_commands"]["default"] = [
+            {"targets": ["*"], "commands": ["hostname"]}
+        ]
+        cfg["allowed_commands"]["networks"][0]["rules"] = [
+            {"targets": ["knubbel"], "commands": ["systemctl"]}
+        ]
+        am = _make_auth_manager(tmp_path, cfg)
+        result = am.check_command(
+            "systemctl status", "knubbel", source_ip="10.42.43.100", sudo=True
+        )
+        assert result.allowed is False
+        assert result.sudo_denied is True
+        assert "sudo not allowed" in result.reason
+        assert result.matched_via == "network:homelab-internal (10.42.43.0/24) (sudo)"
+        assert result.matched_via.endswith(" (sudo)")
+
+    # -- list_allowed_commands stays sudo-agnostic --
+
+    def test_list_allowed_commands_ignores_sudo_allowed(self, tmp_path):
+        """list_allowed_commands output is unchanged by sudo_allowed rules."""
+        cfg = _minimal_auth_config()
+        cfg["allowed_commands"]["default"] = [
+            {
+                "targets": ["*"],
+                "commands": ["systemctl", "docker"],
+                "sudo_allowed": ["systemctl"],
+            }
+        ]
+        cfg["allowed_commands"]["api_keys"][0]["rules"] = [
+            {
+                "targets": ["knubbel"],
+                "commands": ["journalctl"],
+                "sudo_allowed": ["*"],
+            }
+        ]
+        am = _make_auth_manager(tmp_path, cfg)
+        # Default layer only (no API key, no source IP).
+        assert am.list_allowed_commands("knubbel") == ["docker", "systemctl"]
+        # With API key: plain command names, no sudo metadata.
+        result = am.list_allowed_commands("knubbel", api_key="test")
+        assert result == ["docker", "journalctl", "systemctl"]
+        # A wildcard sudo_allowed must not leak "*" into the listing.
+        assert "*" not in result
+
+    # -- chained commands --
+
+    def test_chained_commands_sudo_checked_per_segment(self, tmp_path):
+        """Each chain segment is sudo-checked independently."""
+        cfg = _minimal_auth_config()
+        cfg["allowed_commands"]["default"] = [
+            {
+                "targets": ["*"],
+                "commands": ["systemctl", "hostname"],
+                "sudo_allowed": ["systemctl"],
+            }
+        ]
+        am = _make_auth_manager(tmp_path, cfg)
+        result = am.check_command(
+            "systemctl status && hostname", "knubbel", sudo=True
+        )
+        # The 'hostname' segment fails the sudo check and fails the command.
+        assert result.allowed is False
+        assert result.sudo_denied is True
+        assert "hostname" in result.reason
+        assert result.matched_via == "default (sudo)"
+
+    def test_chained_commands_all_sudo_permitted(self, tmp_path):
+        """A chain whose segments are all sudo-permitted succeeds."""
+        cfg = _minimal_auth_config()
+        cfg["allowed_commands"]["default"] = [
+            {
+                "targets": ["*"],
+                "commands": ["systemctl", "hostname"],
+                "sudo_allowed": ["*"],
+            }
+        ]
+        am = _make_auth_manager(tmp_path, cfg)
+        result = am.check_command(
+            "systemctl status && hostname", "knubbel", sudo=True
+        )
+        assert result.allowed is True
+        assert result.sudo_allowed is True
+        assert result.sudo_denied is False
+        assert result.matched_via == "default"
+
+    # -- _is_command_allowed_by_rules return contract --
+
+    def test_is_command_allowed_by_rules_returns_sudo_set(self, tmp_path):
+        """Matched rules yield the resolved sudo set; no match yields None."""
+        cfg = _minimal_auth_config()
+        cfg["allowed_commands"]["default"] = [
+            {
+                "targets": ["*"],
+                "commands": ["systemctl", "docker"],
+                "sudo_allowed": ["systemctl"],
+            },
+            {"targets": ["knubbel"], "commands": ["uptime"]},
+        ]
+        am = _make_auth_manager(tmp_path, cfg)
+        rules = list(am._rules.default_rules)
+        # Match with listed sudo command: the rule's literal sudo set.
+        assert am._is_command_allowed_by_rules(
+            "systemctl status", rules, "knubbel"
+        ) == frozenset({"systemctl"})
+        # Match with sudo-unlisted command: still the rule's set, not None.
+        assert am._is_command_allowed_by_rules(
+            "docker ps", rules, "knubbel"
+        ) == frozenset({"systemctl"})
+        # Match without sudo_allowed: empty frozenset, distinct from None.
+        assert am._is_command_allowed_by_rules(
+            "uptime", rules, "knubbel"
+        ) == frozenset()
+        assert am._is_command_allowed_by_rules("uptime", rules, "knubbel") is not None
+        # No matching rule: None.
+        assert am._is_command_allowed_by_rules("hostname", rules, "knubbel") is None
+
+    def test_is_command_allowed_by_rules_wildcard_sudo_set(self, tmp_path):
+        """A wildcard sudo_allowed list resolves to frozenset({"*"})."""
+        cfg = _minimal_auth_config()
+        cfg["allowed_commands"]["default"] = [
+            {
+                "targets": ["*"],
+                "commands": ["systemctl"],
+                "sudo_allowed": ["*"],
+            }
+        ]
+        am = _make_auth_manager(tmp_path, cfg)
+        assert am._is_command_allowed_by_rules(
+            "systemctl status", list(am._rules.default_rules), "knubbel"
+        ) == frozenset({"*"})
