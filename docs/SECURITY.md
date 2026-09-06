@@ -272,6 +272,36 @@ Even when the tool supports `sudo=True`, the block-pattern layer runs first
 and will deny any command containing `sudo` — regardless of whether it was
 injected by the wrapper or present in the original command.
 
+### Per-Rule Sudo Authorization
+
+Beyond the target-wide `commands` allow-list, each rule may carry an
+optional `sudo_allowed` list that controls which of the rule's commands may
+be executed with `sudo=True`:
+
+- **Semantics** — `sudo_allowed` is a list of command names, each of which
+  must also appear in the same rule's `commands` list.  When a call sets
+  `sudo=True`, the matched rule's `sudo_allowed` list must contain the
+  command's base name for the command to be permitted.
+- **Wildcard** — the special entry `"*"` (see
+  [`SUDO_ALLOWED_WILDCARD`](../lib/constants.py)) permits every command in
+  the rule to run with sudo.
+- **Secure by default** — when `sudo_allowed` is absent or empty, **all**
+  sudo attempts are denied.  Only non-sudo execution is affected by the
+  `commands` list alone.
+- **Enforcement point** — the check runs inside the authorization chain
+  (see [`lib/auth.py`](../lib/auth.py)) **before** the command is wrapped
+  with sudo flags, so a denied sudo request never reaches the remote shell.
+  Denied sudo attempts are reported as
+  `sudo not allowed for '<command>' by this rule` with a `" (sudo)"` suffix
+  on `matched_via`.
+- **Subset validation** — config validation ([`lib/config.py`](../lib/config.py))
+  rejects any `sudo_allowed` entry that is neither `"*"` nor a member of
+  the rule's `commands` list, preventing dead or mistyped entries.
+- **Backward compatibility** — existing configurations without
+  `sudo_allowed` continue to work unchanged for non-sudo calls; their sudo
+  attempts are denied, matching the previous behaviour where no rule-level
+  sudo control existed.
+
 ---
 
 ## Input Sanitization

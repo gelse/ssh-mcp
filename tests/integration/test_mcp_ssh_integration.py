@@ -779,7 +779,9 @@ def _make_valid_config(servers: dict) -> dict:
         "ssh_targets": servers,
         "block_patterns": ["\\bsudo\\b"],
         "allowed_commands": {
-            "default": [{"targets": ["*"], "commands": ["*"]}],
+            "default": [
+                {"targets": ["*"], "commands": ["*"], "sudo_allowed": ["*"]}
+            ],
             "api_keys": [],
             "networks": [],
         },
@@ -1132,6 +1134,74 @@ def test_sudo_validation_rejects_explicit_sudo(mcp_url: str):
     content = result.get("content", [])
     text = "".join(item.get("text", "") for item in content)
     assert "not authorized" in text.lower()
+
+
+def test_sudo_denied_when_sudo_allowed_absent(mcp_url: str, switch_config):
+    """sudo=True is denied when the matched rule has no sudo_allowed list."""
+    config = _make_valid_config(TEST_SSH_SERVERS)
+    config["allowed_commands"]["default"] = [
+        {"targets": ["*"], "commands": ["whoami", "hostname"]}
+    ]
+    switch_config(config, {"whoami", "hostname"})
+
+    # sudo=False on the same command proves the rule itself matched.
+    result = _call_tool(
+        mcp_url,
+        "ssh_execute_command",
+        {
+            "server_name": "testbox",
+            "command": "whoami",
+            "sudo": False,
+            "timeout": 10,
+        },
+    )
+    assert "error" not in result.lower()
+
+    # sudo=True is denied because the rule lacks sudo_allowed.
+    result = _call_tool(
+        mcp_url,
+        "ssh_execute_command",
+        {
+            "server_name": "testbox",
+            "command": "whoami",
+            "sudo": True,
+            "timeout": 10,
+        },
+    )
+    assert "not authorized" in result.lower()
+
+
+def test_sudo_allowed_with_explicit_list(mcp_url: str, switch_config):
+    """sudo=True succeeds when the command is in the rule's sudo_allowed."""
+    config = _make_valid_config(TEST_SSH_SERVERS)
+    config["allowed_commands"]["default"] = [
+        {
+            "targets": ["*"],
+            "commands": ["whoami", "hostname"],
+            "sudo_allowed": ["whoami"],
+        }
+    ]
+    switch_config(config, {"whoami", "hostname"})
+
+    result = _mcp_request(
+        mcp_url,
+        "tools/call",
+        {
+            "name": "ssh_execute_command",
+            "arguments": {
+                "server_name": "testbox",
+                "command": "whoami",
+                "sudo": True,
+                "timeout": 10,
+            },
+        },
+    )
+    if "result" in result:
+        result = result["result"]
+    content = result.get("content", [])
+    text = "".join(item.get("text", "") for item in content)
+    # Passwordless sudo should return 'root'
+    assert "root" in text
 
 
 class TestFileTransfer:

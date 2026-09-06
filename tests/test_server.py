@@ -1226,6 +1226,175 @@ class TestSudoAuthorization:
 
 
 # ---------------------------------------------------------------------------
+# Per-rule sudo authorization tests (GitHub issue #42, tasks 5)
+# ---------------------------------------------------------------------------
+
+
+def _make_key_target_config(tmp_path: Path, rules: list[dict]) -> dict:
+    """Build a config whose target authenticates via a key file.
+
+    Writes a fake private key into *tmp_path* so ``_build_auth_target``
+    resolves key auth and returns ``password=None`` — the passwordless
+    sudo path (``sudo -n``) is then exercised end-to-end.
+    """
+    key_file = tmp_path / "id_test_key"
+    key_file.write_text("FAKE KEY MATERIAL")
+    return {
+        "version": 1,
+        "ssh_targets": {
+            "testserver": {
+                "host": "10.0.0.1",
+                "username": "testuser",
+                "port": 22,
+                "private_key": str(key_file),
+            },
+        },
+        "block_patterns": [r"\brm\s+-rf\b", r"\bshutdown\b"],
+        "allowed_commands": {
+            "default": rules,
+            "api_keys": [],
+            "networks": [],
+        },
+        "settings": {
+            "max_output_length": 50000,
+            "command_timeout_max": 120,
+        },
+    }
+
+
+class TestSudoAllowedPerRule:
+    """sudo=True requires the command to be in the rule's sudo_allowed."""
+
+    def test_sudo_allowed_for_listed_command(self, tmp_path, monkeypatch):
+        """sudo=True on a sudo_allowed-listed command wraps and executes."""
+        config = _make_key_target_config(
+            tmp_path,
+            [{
+                "targets": ["*"],
+                "commands": ["systemctl"],
+                "sudo_allowed": ["systemctl"],
+            }],
+        )
+        ssh_cm, client = _make_mock_ssh_client_manager()
+        fn, _file_logger, _stdlib_logger, _auth_spy, _sudo_spy = _wire_tool(
+            tmp_path, config, monkeypatch, "ssh_execute_command",
+            ssh_client_manager=ssh_cm,
+        )
+
+        result = fn(
+            server_name="testserver",
+            command="systemctl status",
+            sudo=True,
+        )
+
+        assert "fake output" in result
+        client.exec_command.assert_called_once()
+        actual_command = client.exec_command.call_args[0][0]
+        assert actual_command == f"{SUDO_NO_PASSWORD_FLAG} systemctl status"
+
+    def test_sudo_denied_for_non_listed_command(self, tmp_path, monkeypatch):
+        """sudo=True on a command not in sudo_allowed returns a JSON error."""
+        config = _make_key_target_config(
+            tmp_path,
+            [{
+                "targets": ["*"],
+                "commands": ["systemctl", "docker"],
+                "sudo_allowed": ["systemctl"],
+            }],
+        )
+        ssh_cm, client = _make_mock_ssh_client_manager()
+        fn, file_logger, _stdlib_logger, _auth_spy, _sudo_spy = _wire_tool(
+            tmp_path, config, monkeypatch, "ssh_execute_command",
+            ssh_client_manager=ssh_cm,
+        )
+
+        result = fn(
+            server_name="testserver",
+            command="docker ps",
+            sudo=True,
+        )
+
+        payload = json.loads(result)
+        assert payload["error"] is True
+        # The user-facing message stays generic (no reason leakage); the
+        # sudo-specific reason is recorded in the auth.deny log entry.
+        assert payload["message"] == "Command not authorized"
+        deny_entries = [
+            call.args[0]
+            for call in file_logger.log.call_args_list
+            if call.args and call.args[0].get("event") == "auth.deny"
+        ]
+        assert any(
+            "sudo not allowed" in entry.get("message", "")
+            for entry in deny_entries
+        )
+        # The command must never reach the SSH layer.
+        client.exec_command.assert_not_called()
+
+    def test_sudo_denied_when_no_sudo_allowed(self, tmp_path, monkeypatch):
+        """sudo=True with a rule lacking sudo_allowed denies all sudo."""
+        config = _make_key_target_config(
+            tmp_path,
+            [{"targets": ["*"], "commands": ["systemctl"]}],
+        )
+        ssh_cm, client = _make_mock_ssh_client_manager()
+        fn, file_logger, _stdlib_logger, _auth_spy, _sudo_spy = _wire_tool(
+            tmp_path, config, monkeypatch, "ssh_execute_command",
+            ssh_client_manager=ssh_cm,
+        )
+
+        result = fn(
+            server_name="testserver",
+            command="systemctl status",
+            sudo=True,
+        )
+
+        payload = json.loads(result)
+        assert payload["error"] is True
+        assert payload["message"] == "Command not authorized"
+        deny_entries = [
+            call.args[0]
+            for call in file_logger.log.call_args_list
+            if call.args and call.args[0].get("event") == "auth.deny"
+        ]
+        assert any(
+            "sudo not allowed" in entry.get("message", "")
+            for entry in deny_entries
+        )
+        client.exec_command.assert_not_called()
+
+    def test_non_sudo_call_unaffected_by_sudo_allowed(
+        self, tmp_path, monkeypatch
+    ):
+        """sudo=False executes regardless of the rule's sudo_allowed."""
+        config = _make_key_target_config(
+            tmp_path,
+            [{
+                "targets": ["*"],
+                "commands": ["systemctl", "docker"],
+                "sudo_allowed": ["systemctl"],
+            }],
+        )
+        ssh_cm, client = _make_mock_ssh_client_manager()
+        fn, _file_logger, _stdlib_logger, _auth_spy, _sudo_spy = _wire_tool(
+            tmp_path, config, monkeypatch, "ssh_execute_command",
+            ssh_client_manager=ssh_cm,
+        )
+
+        result = fn(
+            server_name="testserver",
+            command="docker ps",
+            sudo=False,
+        )
+
+        assert "fake output" in result
+        client.exec_command.assert_called_once()
+        actual_command = client.exec_command.call_args[0][0]
+        # Unwrapped — no sudo prefix for sudo=False calls.
+        assert actual_command == "docker ps"
+
+
+# ---------------------------------------------------------------------------
 # Module-level tests
 # ---------------------------------------------------------------------------
 
