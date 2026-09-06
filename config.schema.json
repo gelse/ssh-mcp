@@ -140,6 +140,14 @@
           "items": {
             "type": "string"
           }
+        },
+        "sudo_allowed": {
+          "description": "Commands from this rule's 'commands' list permitted to run with sudo. '*' permits every command in the rule.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
         }
       }
     },

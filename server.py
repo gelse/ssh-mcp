@@ -765,6 +765,7 @@ def _register_tools(
             target=target_name,
             source_ip=source_ip,
             api_key=api_key,
+            sudo=sudo,
         )
         log_command = sanitize_log_string(command)
         log_target_name = sanitize_log_string(target_name)
@@ -1064,7 +1065,10 @@ def _register_tools(
         (if the target has a password) or ``sudo -n`` (for passwordless
         sudo).  The authorization check runs against the **unwrapped**
         command, not sudo.  Raw ``'sudo'`` in the command string is always
-        blocked by block_patterns.
+        blocked by block_patterns.  Additionally, with sudo=True the
+        matched rule's ``sudo_allowed`` list must contain the command (or
+        the ``"*"`` wildcard) for the command to be permitted; rules
+        without ``sudo_allowed`` deny all sudo attempts.
 
         Args:
             server_name: The identifier of the SSH server (as configured)
@@ -1072,7 +1076,8 @@ def _register_tools(
             timeout: Command timeout in seconds (1-300)
             sudo: If True, execute the command with sudo on the remote
                   host.  Requires the SSH target to have a password
-                  configured or NOPASSWD sudoers entry.
+                  configured or NOPASSWD sudoers entry, and the command to
+                  be listed in the matched rule's ``sudo_allowed``.
 
         Returns:
             Command output (stdout + stderr combined) or auth denial

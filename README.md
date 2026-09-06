@@ -190,6 +190,8 @@ Commands are evaluated through an **ordered, layered chain**. If any layer denie
 | 8. `networks` rules | Per-CIDR allow/deny rules |
 | 9. Deny | Implicit fallback |
 
+When a call sets `sudo=True`, the matched rule additionally decides sudo separately: the command's base name must appear in the rule's `sudo_allowed` list (or `"*"`), otherwise the command is denied before it is wrapped with sudo. Rules without `sudo_allowed` deny all sudo attempts. See [Per-Rule Sudo Authorization](docs/SECURITY.md#per-rule-sudo-authorization).
+
 ### Authentication
 
 API keys are sent via `X-API-Key` or `Authorization: Bearer` headers. Keys are hashed with PBKDF2-HMAC-SHA256 (100,000 iterations, random 16-byte salt) and verified with constant-time comparison. Raw keys are never stored.
@@ -547,19 +549,23 @@ Three sub-objects control which commands each client may run:
 - **`api_keys`** — per-key rules, matched by `key_hash`
 - **`networks`** — per-CIDR rules, matched by client source IP
 
-Each rule has a `targets` list (server ids or `"*"` for all) and a `commands` list (base command names or `"*"` for any command).
+Each rule has a `targets` list (server ids or `"*"` for all) and a `commands` list (base command names or `"*"` for any command). An optional `sudo_allowed` list names the commands from `commands` that may also be run with `sudo=True` (`"*"` permits all of them; absent/empty denies all sudo).
 
 ```jsonc
 "allowed_commands": {
   "default": [
-    { "targets": ["*"], "commands": ["hostname", "uptime", "free", "df", "ps"] }
+    {
+      "targets": ["*"],
+      "commands": ["hostname", "uptime", "free", "df", "ps"],
+      "sudo_allowed": ["df"]
+    }
   ],
   "api_keys": [
     {
       "name": "ci-bot",
       "key_hash": "pbkdf2:sha256:100000$<salt>$<hash>",
       "rules": [
-        { "targets": ["web-server"], "commands": ["systemctl", "journalctl"] }
+        { "targets": ["web-server"], "commands": ["systemctl", "journalctl"], "sudo_allowed": ["systemctl"] }
       ]
     }
   ],
@@ -568,7 +574,7 @@ Each rule has a `targets` list (server ids or `"*"` for all) and a `commands` li
       "name": "home-lan",
       "range": "192.168.1.0/24",
       "rules": [
-        { "targets": ["*"], "commands": ["*"] }
+        { "targets": ["*"], "commands": ["*"], "sudo_allowed": ["*"] }
       ]
     }
   ]

@@ -26,6 +26,7 @@ from lib.config_migration import (
 )
 from lib.constants import (
     DEFAULT_BLOCK_PATTERNS,
+    SUDO_ALLOWED_WILDCARD,
     DEFAULT_CIRCUIT_BREAKER_FAILURE_THRESHOLD,
     DEFAULT_CIRCUIT_BREAKER_TIMEOUT_SECONDS,
     DEFAULT_COMMAND_TIMEOUT_SECONDS,
@@ -1648,6 +1649,12 @@ class ConfigManager:
         Each rule must have a non-empty ``targets`` list and a non-empty
         ``commands`` list.  Non-wildcard targets must exist in
         *ssh_target_ids*.
+
+        An optional ``sudo_allowed`` list may name commands from the rule's
+        ``commands`` list that are permitted to run with ``sudo``, or the
+        :data:`~lib.constants.SUDO_ALLOWED_WILDCARD` marker (``"*"``) to
+        permit every command in the rule.  When absent, the rebuilt rule
+        carries an empty ``sudo_allowed`` list.
         """
         rules = []
         for idx, rule in enumerate(rules_raw):
@@ -1687,5 +1694,30 @@ class ConfigManager:
                         field=f"{field_prefix}[{idx}].commands",
                     )
 
-            rules.append({"targets": list(targets), "commands": list(commands)})
+            sudo_allowed = rule.get("sudo_allowed", [])
+            if not isinstance(sudo_allowed, list):
+                raise ConfigValidationError(
+                    "rules entry 'sudo_allowed' must be a list",
+                    field=f"{field_prefix}[{idx}].sudo_allowed",
+                )
+            for entry in sudo_allowed:
+                if not isinstance(entry, str):
+                    raise ConfigValidationError(
+                        "rules entry 'sudo_allowed' entries must be strings",
+                        field=f"{field_prefix}[{idx}].sudo_allowed",
+                    )
+                if entry != SUDO_ALLOWED_WILDCARD and entry not in commands:
+                    raise ConfigValidationError(
+                        "rules entry 'sudo_allowed' references a command "
+                        "not present in the rule's 'commands' list",
+                        field=f"{field_prefix}[{idx}].sudo_allowed",
+                    )
+
+            rules.append(
+                {
+                    "targets": list(targets),
+                    "commands": list(commands),
+                    "sudo_allowed": list(sudo_allowed),
+                }
+            )
         return rules

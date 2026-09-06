@@ -445,6 +445,13 @@ SUDO_PASSWORD_PROMPT_FLAGS: str = "sudo -S -p ''"
 SUDO_NO_PASSWORD_FLAG: str = "sudo -n"
 """``sudo`` invocation that refuses to run if a password is required."""
 
+SUDO_ALLOWED_WILDCARD: str = "*"
+"""Wildcard marker for ``sudo_allowed`` lists.
+
+When ``"*"`` appears in a rule's ``sudo_allowed``, every command in that
+rule's ``commands`` list is permitted to run with ``sudo``.
+"""
+
 
 # =============================================================================
 # Rate-Limiting Defaults

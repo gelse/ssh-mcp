@@ -17,7 +17,7 @@ import logging
 import re
 from dataclasses import dataclass
 
-from lib.constants import PROTECTED_REDIRECT_TARGET_RE
+from lib.constants import PROTECTED_REDIRECT_TARGET_RE, SUDO_ALLOWED_WILDCARD
 from lib.crypto import hash_api_key, verify_api_key
 from lib.redos_protection import compile_safe_pattern, safe_regex_search
 
@@ -39,10 +39,15 @@ class AuthResult:
     allowed: bool
     reason: str  # human-readable, e.g. "allowed by default"
     # "default" | "api_key:<name>" | "network:<name> (<range>)" |
-    # "blocked:<pattern>" | "denied"
+    # "blocked:<pattern>" | "denied" | "<layer> (sudo)"
     matched_via: str
     target_name: str  # SSH target identifier this check was for
     api_key_name: str | None = None  # Matched API key name, or None
+    # True when a sudo=True check was permitted by the matched rule.
+    sudo_allowed: bool = False
+    # True when sudo was requested but the matched rule does not list the
+    # base command in sudo_allowed (matched_via gains a " (sudo)" suffix).
+    sudo_denied: bool = False
 
 
 @dataclass(frozen=True)
@@ -207,6 +212,7 @@ class AuthorizationManager:
         target: str,
         source_ip: str | None = None,
         api_key: str | None = None,
+        sudo: bool = False,
     ) -> AuthResult:
         """Evaluate *command* through the full authorization chain.
 
@@ -217,9 +223,17 @@ class AuthorizationManager:
                        "no source IP available".
             api_key: Raw API key from the ``Authorization`` header.
                      ``None`` means "no API key provided".
+            sudo: When ``True``, the command runs under ``sudo``: the first
+                  matching rule's ``sudo_allowed`` list must contain the base
+                  command (or the ``"*"`` wildcard) for the command to be
+                  permitted.  Chained segments inherit this flag.
 
         Returns:
             :class:`AuthResult` with ``allowed``, ``reason``, and ``matched_via``.
+            When *sudo* is ``True`` and the matched rule does not permit the
+            command under sudo, ``sudo_denied`` is set and ``matched_via``
+            carries a ``" (sudo)"`` suffix; when sudo is permitted,
+            ``sudo_allowed`` is set and no suffix is added.
         """
         # 1. Validate target exists
         if target not in self._config_manager.data.get("ssh_targets", {}):
@@ -246,7 +260,9 @@ class AuthorizationManager:
         if len(segments) > 1:
             logger.debug("Command contains %d segments — validating each", len(segments))
             for seg in segments:
-                segment_result = self.check_command(seg, target, source_ip, api_key)
+                segment_result = self.check_command(
+                    seg, target, source_ip, api_key, sudo=sudo
+                )
                 if not segment_result.allowed:
                     logger.debug(
                         "Segment '%s' denied: %s — failing whole command",
@@ -257,17 +273,67 @@ class AuthorizationManager:
             logger.debug("All %d segments passed — continuing with original command", len(segments))
 
         # 4. Check DEFAULT rules
+        base_cmd = _extract_base_command(command)
         default_rules = self._rules.default_rules
         logger.debug("Checking default rules for target '%s'", target)
-        if self._is_command_allowed_by_rules(command, default_rules, target):
-            logger.info("Command '%s' allowed by default for target '%s'", command, target)
-            return AuthResult(True, "allowed by default", "default", target, None)
+        if (
+            sudo_match := self._is_command_allowed_by_rules(
+                command, default_rules, target
+            )
+        ) is not None:
+            if (
+                sudo
+                and base_cmd not in sudo_match
+                and SUDO_ALLOWED_WILDCARD not in sudo_match
+            ):
+                logger.info(
+                    "Command '%s' denied sudo by default for target '%s'",
+                    command,
+                    target,
+                )
+                return AuthResult(
+                    False,
+                    f"sudo not allowed for '{base_cmd}' by this rule",
+                    "default (sudo)",
+                    target,
+                    None,
+                    sudo_denied=True,
+                )
+            logger.info(
+                "Command '%s' allowed by default for target '%s'", command, target
+            )
+            return AuthResult(
+                True, "allowed by default", "default", target, None, sudo_allowed=sudo
+            )
 
         # 5. Check API key
         api_entry = self._match_api_key(api_key)
         if api_entry is not None:
             logger.debug("API key matched: %s", api_entry["name"])
-            if self._is_command_allowed_by_rules(command, api_entry["rules"], target):
+            if (
+                sudo_match := self._is_command_allowed_by_rules(
+                    command, api_entry["rules"], target
+                )
+            ) is not None:
+                if (
+                    sudo
+                    and base_cmd not in sudo_match
+                    and SUDO_ALLOWED_WILDCARD not in sudo_match
+                ):
+                    logger.info(
+                        "Command '%s' denied sudo by API key '%s' for target '%s'",
+                        command,
+                        api_entry["name"],
+                        target,
+                    )
+                    return AuthResult(
+                        False,
+                        f"sudo not allowed for '{base_cmd}' by this rule",
+                        f"api_key:{api_entry['name']} (sudo)",
+                        target,
+                        api_entry["name"],
+                        sudo_denied=True,
+                    )
                 logger.info(
                     "Command '%s' allowed by API key '%s' for target '%s'",
                     command,
@@ -280,13 +346,37 @@ class AuthorizationManager:
                     f"api_key:{api_entry['name']}",
                     target,
                     api_entry["name"],
+                    sudo_allowed=sudo,
                 )
 
         # 6. Check network
         net_entry = self._match_network(source_ip)
         if net_entry is not None:
             logger.debug("Network matched: %s (%s)", net_entry["name"], net_entry["range"])
-            if self._is_command_allowed_by_rules(command, net_entry["rules"], target):
+            if (
+                sudo_match := self._is_command_allowed_by_rules(
+                    command, net_entry["rules"], target
+                )
+            ) is not None:
+                if (
+                    sudo
+                    and base_cmd not in sudo_match
+                    and SUDO_ALLOWED_WILDCARD not in sudo_match
+                ):
+                    logger.info(
+                        "Command '%s' denied sudo by network '%s' for target '%s'",
+                        command,
+                        net_entry["name"],
+                        target,
+                    )
+                    return AuthResult(
+                        False,
+                        f"sudo not allowed for '{base_cmd}' by this rule",
+                        f"network:{net_entry['name']} ({net_entry['range']}) (sudo)",
+                        target,
+                        None,
+                        sudo_denied=True,
+                    )
                 logger.info(
                     "Command '%s' allowed by network '%s' (%s) for target '%s'",
                     command,
@@ -300,6 +390,7 @@ class AuthorizationManager:
                     f"network:{net_entry['name']} ({net_entry['range']})",
                     target,
                     None,
+                    sudo_allowed=sudo,
                 )
 
         # 7. Deny
@@ -505,14 +596,23 @@ class AuthorizationManager:
 
     def _is_command_allowed_by_rules(
         self, command: str, rules: list[dict], target: str
-    ) -> bool:
+    ) -> frozenset[str] | None:
         """Check if any *rule* matching *target* allows *command*.
 
         Handles base-command extraction and the ``"*"`` wildcard.
+
+        Returns:
+            The matched rule's resolved ``sudo_allowed`` set, or ``None`` when
+            no rule matched.  Resolution: if
+            :data:`~lib.constants.SUDO_ALLOWED_WILDCARD` is present in the
+            rule's raw ``sudo_allowed`` list, the set is ``{"*"}``; otherwise
+            it is the literal list (possibly empty).  Callers must treat
+            ``None`` as "no match — fall through to the next layer" and any
+            frozenset, including an empty one, as "rule matched".
         """
         base_cmd = _extract_base_command(command)
         if not base_cmd:
-            return False
+            return None
 
         for rule in rules:
             targets = rule.get("targets", [])
@@ -524,9 +624,12 @@ class AuthorizationManager:
 
             # Wildcard command or exact base-command match
             if "*" in commands or base_cmd in commands:
-                return True
+                sudo_allowed = rule.get("sudo_allowed", [])
+                if SUDO_ALLOWED_WILDCARD in sudo_allowed:
+                    return frozenset({SUDO_ALLOWED_WILDCARD})
+                return frozenset(sudo_allowed)
 
-        return False
+        return None
 
     def _collect_commands_for_target(
         self, rules: list[dict], target: str

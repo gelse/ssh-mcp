@@ -2179,6 +2179,177 @@ class TestSettingsLoggingValidation:
 
 
 # ---------------------------------------------------------------------------
+# Tests: sudo_allowed rule validation
+# ---------------------------------------------------------------------------
+
+
+class TestSudoAllowedRuleValidation:
+    """Validation of the optional ``sudo_allowed`` key on command rules."""
+
+    @staticmethod
+    def _config_with_default_rule(rule: dict) -> dict:
+        """Return a minimal valid config whose default rule is *rule*."""
+        cfg = _minimal_valid_config()
+        cfg["allowed_commands"]["default"] = [rule]
+        return cfg
+
+    def test_absent_sudo_allowed_defaults_to_empty_list(self) -> None:
+        """Rule without sudo_allowed gains an empty sudo_allowed list."""
+        cfg = self._config_with_default_rule(
+            {"targets": ["*"], "commands": ["hostname"]}
+        )
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            mgr = ConfigManager(td)
+            rule = mgr.data["allowed_commands"]["default"][0]
+            assert rule["sudo_allowed"] == []
+
+    def test_empty_sudo_allowed_passes(self) -> None:
+        """An explicitly empty sudo_allowed list is accepted."""
+        cfg = self._config_with_default_rule(
+            {
+                "targets": ["*"],
+                "commands": ["hostname"],
+                "sudo_allowed": [],
+            }
+        )
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            mgr = ConfigManager(td)
+            rule = mgr.data["allowed_commands"]["default"][0]
+            assert rule["sudo_allowed"] == []
+
+    def test_sudo_allowed_subset_of_commands_passes(self) -> None:
+        """sudo_allowed entries naming commands from the rule are accepted."""
+        cfg = self._config_with_default_rule(
+            {
+                "targets": ["*"],
+                "commands": ["hostname", "systemctl"],
+                "sudo_allowed": ["systemctl"],
+            }
+        )
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            mgr = ConfigManager(td)
+            rule = mgr.data["allowed_commands"]["default"][0]
+            assert rule["sudo_allowed"] == ["systemctl"]
+
+    def test_sudo_allowed_wildcard_passes(self) -> None:
+        """The '*' sudo_allowed marker is accepted for concrete commands."""
+        cfg = self._config_with_default_rule(
+            {
+                "targets": ["*"],
+                "commands": ["hostname", "systemctl"],
+                "sudo_allowed": ["*"],
+            }
+        )
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            mgr = ConfigManager(td)
+            rule = mgr.data["allowed_commands"]["default"][0]
+            assert rule["sudo_allowed"] == ["*"]
+
+    def test_sudo_allowed_unknown_command_raises_error(self) -> None:
+        """sudo_allowed naming a command outside 'commands' raises error."""
+        cfg = self._config_with_default_rule(
+            {
+                "targets": ["*"],
+                "commands": ["hostname"],
+                "sudo_allowed": ["nonexistent"],
+            }
+        )
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(ConfigValidationError) as exc:
+                ConfigManager(td)
+            assert "sudo_allowed" in str(exc.value.field)
+
+    def test_sudo_allowed_non_string_entry_raises_error(self) -> None:
+        """sudo_allowed with a non-string entry raises error."""
+        cfg = self._config_with_default_rule(
+            {
+                "targets": ["*"],
+                "commands": ["hostname"],
+                "sudo_allowed": ["hostname", 42],
+            }
+        )
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(ConfigValidationError) as exc:
+                ConfigManager(td)
+            assert "sudo_allowed" in str(exc.value.field)
+
+    def test_sudo_allowed_non_list_raises_error(self) -> None:
+        """sudo_allowed as a non-list value raises error."""
+        cfg = self._config_with_default_rule(
+            {
+                "targets": ["*"],
+                "commands": ["hostname"],
+                "sudo_allowed": "hostname",
+            }
+        )
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(ConfigValidationError) as exc:
+                ConfigManager(td)
+            assert "sudo_allowed" in str(exc.value.field)
+
+    def test_sudo_allowed_wildcard_with_wildcard_commands_rejects_concrete(
+        self,
+    ) -> None:
+        """Non-'*' sudo_allowed entries are rejected for commands == ['*']."""
+        cfg = self._config_with_default_rule(
+            {
+                "targets": ["*"],
+                "commands": ["*"],
+                "sudo_allowed": ["systemctl"],
+            }
+        )
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(ConfigValidationError) as exc:
+                ConfigManager(td)
+            assert "sudo_allowed" in str(exc.value.field)
+
+    def test_sudo_allowed_wildcard_with_wildcard_commands_passes(self) -> None:
+        """'*' sudo_allowed is accepted when commands == ['*']."""
+        cfg = self._config_with_default_rule(
+            {
+                "targets": ["*"],
+                "commands": ["*"],
+                "sudo_allowed": ["*"],
+            }
+        )
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            mgr = ConfigManager(td)
+            rule = mgr.data["allowed_commands"]["default"][0]
+            assert rule["sudo_allowed"] == ["*"]
+
+    def test_sudo_allowed_validated_on_api_key_rules(self) -> None:
+        """sudo_allowed subset semantics also apply to api_keys rules."""
+        cfg = _minimal_valid_config()
+        cfg["allowed_commands"]["api_keys"] = [
+            {
+                "name": "svc",
+                "key_hash": "sha256:" + "a" * 64,
+                "rules": [
+                    {
+                        "targets": ["*"],
+                        "commands": ["hostname"],
+                        "sudo_allowed": ["reboot"],
+                    }
+                ],
+            }
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(ConfigValidationError) as exc:
+                ConfigManager(td)
+            assert "api_keys[0].rules[0].sudo_allowed" in str(exc.value.field)
+
+
+# ---------------------------------------------------------------------------
 # Tests: atomic default-config creation (TOCTOU fix)
 # ---------------------------------------------------------------------------
 
