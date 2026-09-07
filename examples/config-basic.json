@@ -1,0 +1,87 @@
+{
+  "$schema": "../config.schema.json",
+  "version": 1,
+  "ssh_targets": {
+    "web-server": {
+      "host": "192.0.2.10",
+      "port": 22,
+      "username": "deploy",
+      "private_key": "/app/ssh_key",
+      "checkcommand": "echo ping"
+    }
+  },
+  "block_patterns": [
+    "\\bsudo\\b",
+    "\\brm\\s+-rf\\b",
+    "\\bdd\\s+if=",
+    "\\b>:.*/(dev|proc|sys)/",
+    "\\bmkfs\\.",
+    "\\bwipefs\\b",
+    "\\bshutdown\\b",
+    "\\breboot\\b",
+    "\\bpoweroff\\b",
+    "\\binit\\s+[06]",
+    "\\bhalt\\b"
+  ],
+  "allowed_commands": {
+    "default": [
+      {
+        "targets": [
+          "*"
+        ],
+        "commands": [
+          "hostname",
+          "uptime",
+          "free",
+          "df",
+          "du",
+          "docker",
+          "systemctl",
+          "journalctl",
+          "ps",
+          "top",
+          "htop",
+          "ls",
+          "cat",
+          "head",
+          "tail",
+          "grep",
+          "find",
+          "wc",
+          "ss",
+          "netstat",
+          "ip",
+          "ping",
+          "echo",
+          "date",
+          "who",
+          "id",
+          "tee"
+        ]
+      }
+    ],
+    "api_keys": [],
+    "networks": []
+  },
+  "settings": {
+    "max_output_length": 50000,
+    "command_timeout_max": 120,
+    "retry_max_attempts": 3,
+    "retry_backoff_base_seconds": 1.0,
+    "circuit_breaker_failure_threshold": 5,
+    "circuit_breaker_timeout_seconds": 60.0,
+    "log_level": "INFO",
+    "logging": {
+      "log_targets": [
+        {
+          "target": "stdout"
+        }
+      ]
+    },
+    "rate_limit": {
+      "enabled": true,
+      "max_requests_per_minute": 60,
+      "window_seconds": 60.0
+    }
+  }
+}

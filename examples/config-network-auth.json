@@ -1,0 +1,70 @@
+{
+  "$schema": "../config.schema.json",
+  "version": 1,
+  "ssh_targets": {
+    "web-server": {
+      "host": "192.0.2.10",
+      "port": 22,
+      "username": "deploy",
+      "private_key": "/app/ssh_key",
+      "checkcommand": "echo ping"
+    }
+  },
+  "block_patterns": [
+    "\\bsudo\\b",
+    "\\brm\\s+-rf\\b",
+    "\\bdd\\s+if=",
+    "\\bmkfs\\.",
+    "\\bwipefs\\b",
+    "\\bshutdown\\b",
+    "\\breboot\\b",
+    "\\bpoweroff\\b"
+  ],
+  "allowed_commands": {
+    "default": [
+      {
+        "targets": ["*"],
+        "commands": ["hostname", "uptime", "free", "df"]
+      }
+    ],
+    "api_keys": [],
+    "networks": [
+      {
+        "name": "home-lan",
+        "range": "192.168.1.0/24",
+        "rules": [
+          {
+            "targets": ["*"],
+            "commands": [
+              "hostname", "uptime", "free", "df", "du",
+              "docker", "systemctl", "journalctl",
+              "ls", "cat", "head", "tail", "grep", "find", "ping", "ip"
+            ]
+          }
+        ]
+      },
+      {
+        "name": "office-net",
+        "range": "10.20.0.0/16",
+        "rules": [
+          {
+            "targets": ["web-server"],
+            "commands": ["hostname", "uptime", "docker", "systemctl", "journalctl"],
+            "sudo_allowed": ["systemctl"]
+          }
+        ]
+      }
+    ]
+  },
+  "settings": {
+    "max_output_length": 50000,
+    "command_timeout_max": 120,
+    "log_level": "INFO",
+    "logging": {
+      "log_targets": [
+        { "target": "stdout" }
+      ]
+    },
+    "trusted_proxies": ["172.18.0.1"]
+  }
+}
