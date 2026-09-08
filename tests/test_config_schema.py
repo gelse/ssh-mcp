@@ -73,6 +73,12 @@ class TestSchemaStructure:
         assert targets["type"] == "object"
         assert targets["minProperties"] == 1
 
+    def test_schema_property_declared(self) -> None:
+        """The root properties include ``$schema`` as a string type."""
+        schema = _load_schema()
+        assert "$schema" in schema["properties"]
+        assert schema["properties"]["$schema"]["type"] == "string"
+
 
 class TestSettingsSchema:
     """The settings section mirrors the 13 validated keys."""
@@ -183,3 +189,12 @@ class TestReferencesDefaultConfig:
         with DEFAULT_CONFIG_PATH.open(encoding="utf-8") as fh:
             default_config = json.load(fh)
         assert default_config.get("$schema") == "./config.schema.json"
+
+    def test_default_config_passes_draft_2020_12(self) -> None:
+        """default-config.json validates against the schema."""
+        jsonschema = pytest.importorskip("jsonschema")
+        schema = _load_schema()
+        with DEFAULT_CONFIG_PATH.open(encoding="utf-8") as fh:
+            default_config = json.load(fh)
+        validator = jsonschema.Draft202012Validator(schema)
+        validator.validate(default_config)
