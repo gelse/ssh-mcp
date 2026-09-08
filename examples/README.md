@@ -16,6 +16,9 @@ all-zero API-key hashes) — copy a file, replace the placeholders, and deploy.
 | [`curl-examples.sh`](curl-examples.sh) | Direct JSON-RPC calls for all 6 tools (includes the session handshake) |
 | [`mcp-client-example.py`](mcp-client-example.py) | Programmatic client usage with the `fastmcp` library |
 
+`curl-examples.sh` also includes an **authorization-deny demo** that sends a
+blocked command (`rm -rf`) to show what a deny error response looks like.
+
 ## Quick test
 
 With the server running (Docker: `docker compose up`, exposed on host port

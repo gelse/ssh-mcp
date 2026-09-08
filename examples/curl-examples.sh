@@ -165,6 +165,17 @@ main() {
     echo "--- 6. ssh_upload_file ($SERVER:/tmp/hello-mcp-ssh.txt) ---"
     _call_tool "$sid" "ssh_upload_file" "{\"server_name\": \"$SERVER\", \"remote_path\": \"/tmp/hello-mcp-ssh.txt\", \"content\": \"Hello from mcp-ssh!\", \"permissions\": \"0644\"}" | _pretty
     echo
+
+    # ------------------------------------------------------------------
+    # Authorization-deny demo
+    # ------------------------------------------------------------------
+    # The following command is intentionally blocked by the default
+    # block_patterns and/or deny rules.  A successful deny produces a
+    # JSON-RPC error response — proving the authorization chain works.
+    echo "--- Authorization-deny demo (rm -rf is blocked by default) ---"
+    echo "The next call should return an authorization-deny error."
+    _call_tool "$sid" "ssh_execute_command" "{\"server_name\": \"$SERVER\", \"command\": \"rm -rf /tmp/mcp-ssh-deny-demo\"}" | _pretty
+    echo
 }
 
 main
