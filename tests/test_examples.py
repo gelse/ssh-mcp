@@ -64,7 +64,7 @@ class TestExampleConfigs:
         with config_path.open(encoding="utf-8") as fh:
             return json.load(fh)
 
-    def test_has_schema_key(self, config_dict: dict) -> None:
+    def test_has_schema_key(self, config_path: Path, config_dict: dict) -> None:
         """Each example config must carry a ``$schema`` key."""
         assert "$schema" in config_dict, (
             f"{config_path.name} is missing the $schema key"
