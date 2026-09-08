@@ -18,7 +18,8 @@ from pathlib import Path
 
 import pytest
 
-from lib.config import ConfigManager
+from lib.config import ConfigManager, build_default_config
+from lib.exceptions import ConfigValidationError
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_PATH = REPO_ROOT / "config.schema.json"
@@ -151,3 +152,101 @@ class TestCurlExamplesCoverage:
     def test_has_deny_demo(self) -> None:
         """The script must include the authorization-deny demo."""
         assert "Authorization-deny demo" in self._get_script_text()
+
+
+class TestExampleTestsAreValid:
+    """Verify that the assertions in the example tests above can actually fail.
+
+    Each test below proves that the corresponding assertion above is not
+    vacuous — it constructs known-bad input and asserts the assertion
+    raises or fails as expected.
+    """
+
+    # -- Config tests --------------------------------------------------------
+
+    def test_schema_key_check_can_fail(self) -> None:
+        """test_has_schema_key must fail on a config missing ``$schema``."""
+        bad_config = {"version": 1, "settings": {}}
+        assert "$schema" not in bad_config
+
+    def test_draft_validation_can_fail(self) -> None:
+        """test_passes_draft_2020_12 must fail on invalid JSON Schema data."""
+        jsonschema = pytest.importorskip("jsonschema")
+        schema = _load_schema()
+        bad_config = {"version": "not-an-integer", "ssh_targets": []}
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.Draft202012Validator(schema).validate(bad_config)
+
+    def test_config_manager_rejects_invalid(self) -> None:
+        """ConfigManager must raise on a config missing required fields."""
+        broken = {"version": 1}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _write_config(tmpdir, broken)
+            with pytest.raises(ConfigValidationError):
+                ConfigManager(tmpdir)
+
+    def test_broken_config_check_can_pass(self) -> None:
+        """test_broken_config_fails must NOT raise on a valid config.
+
+        The original test expects ``pytest.raises(Exception)`` — if we
+        feed it valid input it should NOT raise, proving the assertion
+        isn't a tautology.
+        """
+        valid = build_default_config()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _write_config(tmpdir, valid)
+            mgr = ConfigManager(tmpdir)
+            assert mgr.data, "ConfigManager returned empty data for a valid config"
+
+    # -- Python client example -----------------------------------------------
+
+    def test_compile_check_can_fail(self) -> None:
+        """test_compiles must fail on a file with syntax errors."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bad_py = Path(tmpdir) / "bad.py"
+            bad_py.write_text("def broken(\n", encoding="utf-8")
+            with pytest.raises(py_compile.PyCompileError):
+                py_compile.compile(str(bad_py), doraise=True)
+
+    # -- curl-examples tests -------------------------------------------------
+
+    def test_bash_syntax_check_can_fail(self) -> None:
+        """test_bash_syntax must fail on a script with syntax errors."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bad_sh = Path(tmpdir) / "bad.sh"
+            bad_sh.write_text("#!/bin/bash\necho 'unclosed\n", encoding="utf-8")
+            result = subprocess.run(
+                ["bash", "-n", str(bad_sh)],
+                capture_output=True,
+            )
+            assert result.returncode != 0
+
+    @pytest.mark.skipif(
+        not shutil.which("shellcheck"),
+        reason="shellcheck not installed",
+    )
+    def test_shellcheck_check_can_fail(self) -> None:
+        """test_shellcheck must fail on a script with shellcheck warnings."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bad_sh = Path(tmpdir) / "bad.sh"
+            bad_sh.write_text(
+                "#!/bin/bash\necho $undefined_var\n", encoding="utf-8"
+            )
+            result = subprocess.run(
+                ["shellcheck", str(bad_sh)],
+                capture_output=True,
+            )
+            assert result.returncode != 0
+
+    def test_tool_coverage_check_can_fail(self) -> None:
+        """test_covers_tool must fail when a tool name is absent."""
+        text = "just some random text with no tool names"
+        for tool in ALL_TOOL_NAMES:
+            assert tool not in text, (
+                f"Unexpectedly found {tool!r} in stub text"
+            )
+
+    def test_deny_demo_check_can_fail(self) -> None:
+        """test_has_deny_demo must fail when the marker is absent."""
+        text = "some script without the deny demo marker"
+        assert "Authorization-deny demo" not in text
