@@ -316,7 +316,7 @@ curl -X POST http://localhost:9080/mcp \
 
 ## MCP Client Configuration
 
-Any MCP client supporting Streamable HTTP transport can connect. The configuration format varies by client — use the URL and headers below.
+Any MCP client supporting Streamable HTTP transport can connect. The configuration format varies by client — use the URL and headers below. Ready-to-use samples live in [`examples/`](examples/README.md) (Claude Desktop config, example server configs, curl script, Python client).
 
 | Setting | Value |
 |---|---|

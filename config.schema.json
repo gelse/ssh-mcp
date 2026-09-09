@@ -12,6 +12,10 @@
     "settings"
   ],
   "properties": {
+    "$schema": {
+      "description": "JSON Schema dialect URI — used by editors and CI tooling for autocomplete and validation; ignored by the runtime.",
+      "type": "string"
+    },
     "version": {
       "description": "Config schema version. Only version 1 is currently supported.",
       "const": 1

@@ -1,0 +1,65 @@
+{
+  "$schema": "../config.schema.json",
+  "version": 1,
+  "ssh_targets": {
+    "web-server": {
+      "host": "192.0.2.10",
+      "port": 22,
+      "username": "deploy",
+      "private_key": "/app/ssh_key",
+      "checkcommand": "echo ping"
+    },
+    "db-server": {
+      "host": "192.0.2.20",
+      "port": 22,
+      "username": "admin",
+      "password": "REPLACE_ME_OR_USE_SECRETS_JSON",
+      "checkcommand": "echo ping"
+    }
+  },
+  "block_patterns": [
+    "\\bsudo\\b",
+    "\\brm\\s+-rf\\b",
+    "\\bdd\\s+if=",
+    "\\bmkfs\\.",
+    "\\bwipefs\\b",
+    "\\bshutdown\\b",
+    "\\breboot\\b",
+    "\\bpoweroff\\b"
+  ],
+  "allowed_commands": {
+    "default": [
+      {
+        "targets": ["*"],
+        "commands": ["hostname", "uptime", "free", "df", "ls", "cat", "grep", "ping"]
+      }
+    ],
+    "api_keys": [
+      {
+        "name": "ci-bot",
+        "key_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "rules": [
+          {
+            "targets": ["web-server"],
+            "commands": ["hostname", "uptime", "docker", "systemctl", "journalctl"]
+          },
+          {
+            "targets": ["db-server"],
+            "commands": ["hostname", "uptime", "pg_isready", "psql"]
+          }
+        ]
+      }
+    ],
+    "networks": []
+  },
+  "settings": {
+    "max_output_length": 50000,
+    "command_timeout_max": 120,
+    "log_level": "INFO",
+    "logging": {
+      "log_targets": [
+        { "target": "stdout" }
+      ]
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "ssh": {
+      "type": "http",
+      "url": "http://localhost:9080/mcp",
+      "headers": {
+        "X-API-Key": "REPLACE_WITH_YOUR_API_KEY"
+      }
+    }
+  }
+}

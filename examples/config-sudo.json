@@ -1,0 +1,50 @@
+{
+  "$schema": "../config.schema.json",
+  "version": 1,
+  "ssh_targets": {
+    "ops-server": {
+      "host": "192.0.2.30",
+      "port": 22,
+      "username": "operator",
+      "private_key": "/app/ssh_key",
+      "checkcommand": "echo ping"
+    }
+  },
+  "block_patterns": [
+    "\\bsudo\\b",
+    "\\brm\\s+-rf\\b",
+    "\\bdd\\s+if=",
+    "\\b>:.*/(dev|proc|sys)/",
+    "\\bmkfs\\.",
+    "\\bwipefs\\b",
+    "\\bshutdown\\b",
+    "\\breboot\\b",
+    "\\bpoweroff\\b",
+    "\\binit\\s+[06]",
+    "\\bhalt\\b"
+  ],
+  "allowed_commands": {
+    "default": [
+      {
+        "targets": ["*"],
+        "commands": [
+          "hostname", "uptime", "free", "df",
+          "docker", "systemctl", "journalctl", "smartctl"
+        ],
+        "sudo_allowed": ["docker", "systemctl", "journalctl", "smartctl"]
+      }
+    ],
+    "api_keys": [],
+    "networks": []
+  },
+  "settings": {
+    "max_output_length": 50000,
+    "command_timeout_max": 120,
+    "log_level": "INFO",
+    "logging": {
+      "log_targets": [
+        { "target": "stdout" }
+      ]
+    }
+  }
+}
