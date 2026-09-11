@@ -982,11 +982,11 @@ make integrationtest
 
 ### Adding a New Tool
 
-The [worked example in AGENTS.md](AGENTS.md#worked-example--adding-a-read-only-tool) walks through adding a new `@mcp.tool()` handler end-to-end: constants, types, re-exports, handler, tests, commit.
+[`AGENTS.md#adding-a-tool`](AGENTS.md#adding-a-tool) covers handler patterns and conventions; [`AGENTS.md#file-touch-checklist`](AGENTS.md#file-touch-checklist) lists every file to create or modify for a new tool.
 
 ### No Lint/Type-Check Tooling
 
-The project has no `ruff`, `mypy`, `pyright`, or `flake8` configuration. Formatting follows `.editorconfig` defaults (4 spaces for Python, 88-char lines).
+The project has no `ruff`, `mypy`, `pyright`, or `flake8` configuration; formatting follows `.editorconfig` defaults (4 spaces and 88-char lines for Python; 2 spaces and 120-char lines for Markdown).
 
 ---
 
