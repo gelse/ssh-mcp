@@ -65,7 +65,11 @@ mcp-ssh/
 ## Plans & CI
 
 - **Plans:** No `plans/` directory — implemented work lives in code. Keep future design docs as lightweight `.md` at repo root.
-- **CI:** Unit tests on every push ([`.github/workflows/test.yml`](.github/workflows/test.yml)), integration tests on `release*` tags ([`.github/workflows/integration.yml`](.github/workflows/integration.yml)), Docker build+push to GHCR on `main`, `testing`, `v*` tags ([`.github/workflows/docker.yaml`](.github/workflows/docker.yaml)). No lint, no type-check — run `make test` and `make integrationtest` locally before opening a PR.
+- **CI:** Unit tests on every push
+  ([`.github/workflows/test.yml`](.github/workflows/test.yml)); integration tests on `release*` tags
+  ([`.github/workflows/integration.yml`](.github/workflows/integration.yml)); Docker build+push to GHCR on
+  `main`, `testing`, `v*` tags ([`.github/workflows/docker.yaml`](.github/workflows/docker.yaml)).
+  No lint, no type-check — run `make test` and `make integrationtest` locally before opening a PR.
 - **Renovate:** [`renovate.json`](renovate.json) extends `config:recommended` with dependency dashboard, Docker digest pinning.
 
 ## Testing
@@ -122,7 +126,7 @@ No lint or type-check tooling exists. `.editorconfig` provides formatting defaul
 | **Config access** | Always `config_manager.data.get("settings", {})` with fallback |
 | **Logging** | `file_logger.log(dict)` — include `request_id`, `event`, `log_level`, `log_format_version` |
 | **Metrics** | Increment `REQUESTS_TOTAL` per tool call; observe `COMMAND_DURATION_SECONDS` for SSH |
-| **Line length** | Python: 88 chars (followed in practice); Markdown: 120 chars (`max_line_length` in [`.editorconfig`](.editorconfig)) |
+| **Line length** | Python: 88; Markdown: 120 (`max_line_length` in [`.editorconfig`](.editorconfig)) |
 | **Imports** | `from __future__ import annotations` in all files; stdlib → third-party → local |
 
 ## Authorization Model
