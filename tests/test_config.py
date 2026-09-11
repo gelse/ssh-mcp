@@ -115,7 +115,7 @@ class TestLoadValidConfig:
             data = mgr.data
             assert data["version"] == 1
             # At least one target from the real default-config.json
-            assert len(data["ssh_targets"]) >= 1
+            assert data["ssh_targets"]
             assert os.path.exists(mgr.config_path)
 
     def test_get_ssh_target_returns_correct_dict(self):
@@ -182,8 +182,8 @@ class TestBuildDefaultConfig:
     def test_emits_single_placeholder_target_and_rule(self) -> None:
         """Ships one placeholder target and one default rule (non-empty)."""
         cfg = build_default_config()
-        assert len(cfg["ssh_targets"]) >= 1
-        assert len(cfg["allowed_commands"]["default"]) >= 1
+        assert cfg["ssh_targets"]
+        assert cfg["allowed_commands"]["default"]
 
     def test_emitted_config_passes_validation(self) -> None:
         """A config produced by build_default_config() loads successfully."""
@@ -330,6 +330,82 @@ class TestValidationFailures:
         with tempfile.TemporaryDirectory() as td:
             _write_config(td, cfg)
             with pytest.raises(ConfigValidationError, match="Unknown key"):
+                ConfigManager(td)
+
+    def test_validation_fails_empty_default_rules(self) -> None:
+        """Empty allowed_commands.default list raises ConfigValidationError."""
+        cfg = _minimal_valid_config()
+        cfg["allowed_commands"]["default"] = []
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(
+                ConfigValidationError,
+                match="allowed_commands.default.*must be a non-empty list",
+            ):
+                ConfigManager(td)
+
+    def test_validation_fails_empty_api_keys_rules(self) -> None:
+        """Empty api_keys rules list raises ConfigValidationError."""
+        cfg = _minimal_valid_config()
+        cfg["allowed_commands"]["api_keys"] = [
+            {
+                "name": "testkey",
+                "key_hash": "sha256:" + "a" * 64,
+                "rules": [],
+            }
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(
+                ConfigValidationError,
+                match="api_keys.*rules.*must be a non-empty list",
+            ):
+                ConfigManager(td)
+
+    def test_validation_fails_empty_networks_rules(self) -> None:
+        """Empty networks rules list raises ConfigValidationError."""
+        cfg = _minimal_valid_config()
+        cfg["allowed_commands"]["networks"] = [
+            {
+                "name": "office",
+                "range": "10.0.0.0/8",
+                "rules": [],
+            }
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(
+                ConfigValidationError,
+                match="networks.*rules.*must be a non-empty list",
+            ):
+                ConfigManager(td)
+
+    def test_validation_fails_empty_rule_targets(self) -> None:
+        """Rule with empty targets list raises ConfigValidationError."""
+        cfg = _minimal_valid_config()
+        cfg["allowed_commands"]["default"] = [
+            {"targets": [], "commands": ["hostname"]}
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(
+                ConfigValidationError,
+                match="targets.*must be a non-empty list",
+            ):
+                ConfigManager(td)
+
+    def test_validation_fails_empty_rule_commands(self) -> None:
+        """Rule with empty commands list raises ConfigValidationError."""
+        cfg = _minimal_valid_config()
+        cfg["allowed_commands"]["default"] = [
+            {"targets": ["*"], "commands": []}
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(
+                ConfigValidationError,
+                match="commands.*must be a non-empty list",
+            ):
                 ConfigManager(td)
 
 
