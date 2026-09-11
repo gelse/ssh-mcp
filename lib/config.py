@@ -1009,7 +1009,7 @@ class ConfigManager:
 
         # -- ssh_targets --
         ssh_targets_raw = config.get("ssh_targets")
-        if not isinstance(ssh_targets_raw, dict) or len(ssh_targets_raw) == 0:
+        if not isinstance(ssh_targets_raw, dict) or not ssh_targets_raw:
             raise ConfigValidationError(
                 "'ssh_targets' must be a non-empty object",
                 field="ssh_targets",
@@ -1170,7 +1170,7 @@ class ConfigManager:
 
         # --- default rules ---
         default_rules_raw = allowed_raw.get("default")
-        if not isinstance(default_rules_raw, list) or len(default_rules_raw) == 0:
+        if not isinstance(default_rules_raw, list) or not default_rules_raw:
             raise ConfigValidationError(
                 "'allowed_commands.default' must be a non-empty list of rules",
                 field="allowed_commands.default",
@@ -1219,7 +1219,7 @@ class ConfigManager:
                     field=f"api_keys[{idx}].key_hash",
                 )
             rules_raw = entry.get("rules")
-            if not isinstance(rules_raw, list) or len(rules_raw) == 0:
+            if not isinstance(rules_raw, list) or not rules_raw:
                 raise ConfigValidationError(
                     "api_keys entry 'rules' must be a non-empty list of rules",
                     field=f"api_keys[{idx}].rules",
@@ -1276,7 +1276,7 @@ class ConfigManager:
                     )
             parsed_networks.append((name, parsed))
             rules_raw = entry.get("rules")
-            if not isinstance(rules_raw, list) or len(rules_raw) == 0:
+            if not isinstance(rules_raw, list) or not rules_raw:
                 raise ConfigValidationError(
                     "networks entry 'rules' must be a non-empty list of rules",
                     field=f"networks[{idx}].rules",
@@ -1411,7 +1411,7 @@ class ConfigManager:
                 )
             log_targets_raw = logging_raw.get("log_targets")
             if log_targets_raw is not None:
-                if not isinstance(log_targets_raw, list) or len(log_targets_raw) == 0:
+                if not isinstance(log_targets_raw, list) or not log_targets_raw:
                     raise ConfigValidationError(
                         "'settings.logging.log_targets' must be a non-empty list",
                         field="settings.logging.log_targets",
@@ -1664,7 +1664,7 @@ class ConfigManager:
                     field=f"{field_prefix}[{idx}]",
                 )
             targets = rule.get("targets")
-            if not isinstance(targets, list) or len(targets) == 0:
+            if not isinstance(targets, list) or not targets:
                 raise ConfigValidationError(
                     "rules entry 'targets' must be a non-empty list",
                     field=f"{field_prefix}[{idx}].targets",
@@ -1682,7 +1682,7 @@ class ConfigManager:
                     )
 
             commands = rule.get("commands")
-            if not isinstance(commands, list) or len(commands) == 0:
+            if not isinstance(commands, list) or not commands:
                 raise ConfigValidationError(
                     "rules entry 'commands' must be a non-empty list",
                     field=f"{field_prefix}[{idx}].commands",
