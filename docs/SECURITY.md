@@ -27,8 +27,8 @@ threats it mitigates, and how to configure and operate it securely.
 
 **The SSH MCP server is designed to run behind a TLS-terminating reverse proxy
 (e.g. nginx, Caddy, Traefik).** The built-in HTTP server listens on
-`0.0.0.0:8080` in plain HTTP. Exposing it directly to untrusted networks
-without TLS will leak API keys in transit.
+`[::]:8080` (dual-stack, both IPv4 and IPv6) in plain HTTP. Exposing it
+directly to untrusted networks without TLS will leak API keys in transit.
 
 Recommended deployment pattern:
 

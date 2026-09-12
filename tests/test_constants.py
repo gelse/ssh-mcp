@@ -75,6 +75,8 @@ from lib.constants import (
     REDIRECT_FILE_OP_RE,
     RESTRICTED_FILE_MODE,
     SECRETS_FILE_MODE,
+    SERVER_BIND_HOST,
+    SERVER_BIND_PORT,
     TARGET_NAME_PATTERN,
     SETTING_KEY_TYPES,
     SIZE_UNIT_MULTIPLIERS,
@@ -97,6 +99,7 @@ class TestConstantTypes:
         [
             ("APP_NAME", APP_NAME),
             ("APP_VERSION", APP_VERSION),
+            ("SERVER_BIND_HOST", SERVER_BIND_HOST),
             ("DEFAULT_CONFIG_DIR", DEFAULT_CONFIG_DIR),
             ("DEFAULT_CONFIG_FILENAME", DEFAULT_CONFIG_FILENAME),
             ("DEFAULT_SECRETS_FILENAME", DEFAULT_SECRETS_FILENAME),
@@ -117,7 +120,7 @@ class TestConstantTypes:
             ("DEFAULT_REQUEST_ID", "unknown"),
         ],
         ids=[
-            "APP_NAME", "APP_VERSION", "DEFAULT_CONFIG_DIR",
+            "APP_NAME", "APP_VERSION", "SERVER_BIND_HOST", "DEFAULT_CONFIG_DIR",
             "DEFAULT_CONFIG_FILENAME", "DEFAULT_SECRETS_FILENAME",
             "DEFAULT_LOG_DIR", "DEFAULT_SSH_KEY_FILENAME",
             "DEFAULT_LOG_LEVEL", "DEFAULT_SFTP_SANDBOX_ROOT",
@@ -137,6 +140,7 @@ class TestConstantTypes:
             ("PBKDF2_SALT_BYTES", PBKDF2_SALT_BYTES),
             ("MAX_TARGET_NAME_LENGTH", MAX_TARGET_NAME_LENGTH),
             ("MAX_API_KEY_LENGTH", MAX_API_KEY_LENGTH),
+            ("SERVER_BIND_PORT", SERVER_BIND_PORT),
             ("DEFAULT_SSH_PORT", DEFAULT_SSH_PORT),
             ("DEFAULT_SSH_TIMEOUT_SECONDS", DEFAULT_SSH_TIMEOUT_SECONDS),
             ("DEFAULT_COMMAND_TIMEOUT_SECONDS", DEFAULT_COMMAND_TIMEOUT_SECONDS),
@@ -168,7 +172,8 @@ class TestConstantTypes:
             ("MAX_REGEX_PATTERN_LENGTH", MAX_REGEX_PATTERN_LENGTH),
         ],
         ids=[
-            "PBKDF2_ITERATIONS", "PBKDF2_SALT_BYTES", "MAX_TARGET_NAME_LENGTH",
+            "PBKDF2_ITERATIONS", "PBKDF2_SALT_BYTES", "SERVER_BIND_PORT",
+            "MAX_TARGET_NAME_LENGTH",
             "MAX_API_KEY_LENGTH", "DEFAULT_SSH_PORT", "DEFAULT_SSH_TIMEOUT_SECONDS",
             "DEFAULT_COMMAND_TIMEOUT_SECONDS", "DEFAULT_MAX_OUTPUT_LENGTH",
             "DEFAULT_RETRY_MAX_ATTEMPTS", "DEFAULT_CIRCUIT_BREAKER_FAILURE_THRESHOLD",
@@ -418,3 +423,11 @@ class TestConstantValues:
         parts = APP_VERSION.split(".")
         assert len(parts) == 3
         assert all(p.isdigit() for p in parts)
+
+    def test_server_bind_host_is_dual_stack(self) -> None:
+        """SERVER_BIND_HOST is ``::`` for dual-stack IPv4+IPv6 binding."""
+        assert SERVER_BIND_HOST == "::"
+
+    def test_server_bind_port_is_8080(self) -> None:
+        """SERVER_BIND_PORT matches the default Uvicorn port."""
+        assert SERVER_BIND_PORT == 8080
