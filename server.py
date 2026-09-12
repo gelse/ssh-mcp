@@ -33,6 +33,8 @@ from lib.config import build_default_config, ConfigManager
 from lib.connection_pool import SSHConnectionPool
 from lib.constants import (
     APP_NAME,
+    SERVER_BIND_HOST,
+    SERVER_BIND_PORT,
     DEFAULT_CHECK_COMMAND,
     DEFAULT_CIRCUIT_BREAKER_FAILURE_THRESHOLD,
     DEFAULT_CIRCUIT_BREAKER_TIMEOUT_SECONDS,
@@ -250,29 +252,33 @@ def _run_server(
         # --- Start uvicorn inside the FastMCP lifespan context --------
         config = uvicorn.Config(
             starlette_app,
-            host="0.0.0.0",
-            port=8080,
+            host=SERVER_BIND_HOST,
+            port=SERVER_BIND_PORT,
             timeout_graceful_shutdown=2,
             lifespan="on",
             ws="websockets-sansio",
         )
-        server = uvicorn.Server(config)
 
-        async with app._lifespan_manager():  # type: ignore[attr-defined]
-            serve_task = asyncio.create_task(server.serve())
-            await shutdown_event.wait()
-            serve_task.cancel()
-            try:
-                await serve_task
-            except asyncio.CancelledError:
-                pass
-            finally:
-                timeout = getattr(
-                    app.state,  # type: ignore[attr-defined]
-                    "shutdown_timeout",
-                    DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
+        # Pre-bind the socket so asyncio leaves IPV6_V6ONLY unset,
+        # enabling dual-stack IPv4+IPv6 on the same port.
+        sock = config.bind_socket()
+
+        server = uvicorn.Server(config)
+        try:
+            async with app._lifespan_manager():  # type: ignore[attr-defined]
+                serve_task = asyncio.create_task(
+                    server.serve(sockets=[sock])
                 )
-                app.shutdown()  # type: ignore[attr-defined]   # bounded + resource release
+                await shutdown_event.wait()
+                serve_task.cancel()
+                try:
+                    await serve_task
+                except asyncio.CancelledError:
+                    pass
+                finally:
+                    app.shutdown()  # type: ignore[attr-defined]
+        finally:
+            sock.close()
 
     asyncio.run(_serve())
 

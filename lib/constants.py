@@ -158,6 +158,22 @@ PEM_HEADER_PKCS8: str = "BEGIN PRIVATE KEY"
 """PEM header that identifies a PKCS#8 generic private key."""
 
 # =============================================================================
+# Server Bind Defaults
+# =============================================================================
+
+SERVER_BIND_HOST: str = "::"
+"""Bind address for the Uvicorn HTTP server.
+
+``"::"`` combined with a pre-bound socket (``config.bind_socket()``)
+produces a dual-stack listener accepting both IPv4 and IPv6
+connections.  Without pre-binding, asyncio would set
+``IPV6_V6ONLY=1``, making the socket IPv6-only.
+"""
+
+SERVER_BIND_PORT: int = 8080
+"""TCP port for the Uvicorn HTTP server."""
+
+# =============================================================================
 # Default Runtime Settings
 # =============================================================================
 
