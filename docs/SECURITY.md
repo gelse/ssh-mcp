@@ -46,7 +46,7 @@ The reverse proxy should:
 ### Client IP Extraction
 
 The effective client IP used for rate limiting and network authorization is
-resolved by [`lib/request_context.py`](lib/request_context.py) from two
+resolved by [`lib/request_context.py`](../lib/request_context.py) from two
 sources, in order:
 
 1. **`X-Forwarded-For` header** — but **only** when the direct connection peer
@@ -108,7 +108,7 @@ response time.
 ### Format Validation
 
 Before comparison, raw API keys submitted by clients are validated for
-syntactic safety by [`lib/request_context.py`](lib/request_context.py):
+syntactic safety by [`lib/request_context.py`](../lib/request_context.py):
 
 - **Non-empty** — empty or missing keys are rejected immediately.
 - **Printable non-space ASCII only** — every byte must be in the
@@ -236,7 +236,7 @@ is validated against a character whitelist (`[a-zA-Z0-9][a-zA-Z0-9_-]*`).
 ## Sudo Command Handling
 
 When a tool call sets `sudo=True`, the server conditionally wraps the command
-with the appropriate sudo flags via [`lib/sudo.py`](lib/sudo.py). This
+with the appropriate sudo flags via [`lib/sudo.py`](../lib/sudo.py). This
 centralises all sudo-related logic and prevents misuse.
 
 ### Password vs Passwordless
@@ -441,7 +441,7 @@ approved network range.
 
 ### Request context fallbacks
 
-The request-context accessors in [`lib/request_context.py`](lib/request_context.py)
+The request-context accessors in [`lib/request_context.py`](../lib/request_context.py)
 return safe fallback values when called outside an active request context
 (e.g. during startup, shutdown, or background tool execution):
 
@@ -486,7 +486,7 @@ The server ships with conservative defaults designed for production safety:
 #### Log Path Validation
 
 Log file and directory paths are validated by `validate_log_path()` in
-[`lib/sanitize.py`](lib/sanitize.py) before any file is opened:
+[`lib/sanitize.py`](../lib/sanitize.py) before any file is opened:
 
 1. **Empty-string rejection** — blank or whitespace-only paths are rejected.
 2. **Null-byte rejection** — paths containing `\x00` are rejected, preventing
@@ -507,9 +507,9 @@ to overwrite sensitive files.
 
 ### Circuit Breaker
 
-The SSH client uses a per-target circuit breaker ([`lib/circuit_breaker.py`](lib/circuit_breaker.py))
+The SSH client uses a per-target circuit breaker ([`lib/circuit_breaker.py`](../lib/circuit_breaker.py))
 to prevent cascading failures and resource exhaustion against unhealthy SSH
-targets. It is consulted by [`lib/ssh_client.py`](lib/ssh_client.py) before
+targets. It is consulted by [`lib/ssh_client.py`](../lib/ssh_client.py) before
 every SSH connection attempt.
 
 #### State Machine
@@ -553,7 +553,7 @@ higher timeout gives recovering targets more time.
 
 ### Connection Pool Security
 
-The SSH connection pool ([`lib/connection_pool.py`](lib/connection_pool.py))
+The SSH connection pool ([`lib/connection_pool.py`](../lib/connection_pool.py))
 reuses established paramiko connections across requests and enforces several
 security-relevant limits:
 
@@ -584,7 +584,7 @@ a time.
   separate `secrets.json` file or `MCP_SSH_SECRET_*` environment variables
   rather than inline in `ssh-mcp-config.json`. Precedence is **env vars >
   `secrets.json` > main config**. See [`lib/secrets.py`](../lib/secrets.py)
-  and README §2.8.
+  and docs/CONFIGURATION.md § Secrets.
 - `secrets.json` uses a parallel structure keyed by identifier:
 
 ```jsonc
@@ -650,7 +650,7 @@ logged. See [`lib/constants.py`](../lib/constants.py) for the accepted keys.
 
 ### Config Validation Depth
 
-At load time, [`lib/config.py`](lib/config.py) performs several
+At load time, [`lib/config.py`](../lib/config.py) performs several
 security-relevant validation checks beyond basic schema conformance:
 
 - **ReDoS screening** — block patterns are scanned for known
@@ -681,7 +681,7 @@ is bounded.
 
 ## Config API Session Management
 
-The config-api SPA ([`config-api/config_api/ui/index.html`](config-api/config_api/ui/index.html))
+The config-api SPA ([`config-api/config_api/ui/index.html`](../config-api/config_api/ui/index.html))
 uses a **cookie-based session system** for browser authentication instead of
 storing raw tokens in `sessionStorage`. This section documents the threat model,
 session architecture, and operational constraints.
@@ -725,7 +725,7 @@ other sessions or the underlying token.
 | `Max-Age`    | `3600` (1 hour)                          | Hard server-side expiry via cookie lifetime         |
 
 The `Secure` flag defaults to `true` (set in
-[`lib/constants.py`](lib/constants.py)). At runtime the
+[`lib/constants.py`](../lib/constants.py)). At runtime the
 `CONFIG_API_SESSION_COOKIE_SECURE` environment variable overrides this
 default — any falsy token (`false`, `0`, `no`, `off`, `disabled`, or an
 empty string) disables the flag. When the environment variable is not set,
@@ -756,7 +756,7 @@ termination even if the client-side logic is bypassed.
 ### Server-Side Revocation
 
 Sessions can be revoked at any time by deleting the session ID from the
-in-memory store ([`config-api/config_api/auth.py`](config-api/config_api/auth.py:129)):
+in-memory store ([`config-api/config_api/auth.py`](../config-api/config_api/auth.py:129)):
 
 ```python
 revoke_session(session_id)  # removes from _sessions dict
@@ -774,7 +774,7 @@ Expired sessions are also cleaned up eagerly during validation
 
 API clients (curl, scripts, CI pipelines) that cannot use cookies can
 authenticate via the standard `Authorization: Bearer <token>` header. The
-[`verify_token()`](config-api/config_api/auth.py:170) dependency checks
+[`verify_token()`](../config-api/config_api/auth.py:170) dependency checks
 authentication in this order:
 
 1. **Session cookie** — if a valid, non-expired session cookie is present, the
@@ -796,7 +796,7 @@ endpoints without conflict.
 ### Related Constants
 
 All session-related magic values are centralized in
-[`lib/constants.py`](lib/constants.py):
+[`lib/constants.py`](../lib/constants.py):
 
 | Constant | Default | Description |
 |----------|---------|-------------|
