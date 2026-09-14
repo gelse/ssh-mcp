@@ -2,7 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
+The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
+[Semantic Versioning](https://semver.org/).
+
+## [0.3.0] - 2026-09-14
+
+### Added
+
+- Fine-grained `sudo_allowed` control per authorization rule (#65)
+- Examples directory with validated configs and client examples (#69)
+- CONTRIBUTING guide (#73)
+- ARCHITECTURE.md with diagrams and design rationale (#71)
+- Document `ssh_<verb>_<noun>` MCP tool naming convention (#60)
+
+### Fixed
+
+- Bind dual-stack socket to fix IPv6 healthcheck failure (#77)
+- Fix Docker healthcheck: probe 127.0.0.1 instead of localhost (#72)
+- Narrow startup exception handling and make default-config creation atomic (#64)
+
+### Security
+
+- Enforce body size limits via ASGI middleware (#62)
+- Restrict API key charset to non-space printable ASCII `0x21-0x7E` (#61)
+
+### Changed
+
+- Rewrite README as human-facing front page, split reference docs (#78)
+- Replace explicit boolean checks with idiomatic truthiness (#74)
+- Refactor test_server.py to remove duplicated test logic (#63)
+- Add testing branch support to Docker workflow (#66)
 
 ## [0.2.2] - 2026-08-30
 
@@ -34,6 +63,7 @@ Initial tagged release.
 
 Initial public release.
 
+[0.3.0]: https://github.com/gelse/ssh-mcp/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/gelse/ssh-mcp/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/gelse/ssh-mcp/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/gelse/ssh-mcp/releases/tag/v0.2.0
