@@ -100,7 +100,7 @@ Alternatively, keep the hash out of the main config entirely via
 `secrets.json` or the `MCP_SSH_SECRET_API_KEY_<KEY_NAME>` environment
 variable (name upper-cased, `-` → `_`; e.g. key `ci-bot` →
 `MCP_SSH_SECRET_API_KEY_CI_BOT`). See the
-[Secrets section](../README.md#secrets) in the main README.
+[Secrets section](../docs/CONFIGURATION.md#secrets).
 
 ### Notes on specific configs
 
