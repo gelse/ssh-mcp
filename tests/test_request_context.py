@@ -400,11 +400,11 @@ class TestExtractApiKey:
         result = RequestContextMiddleware._extract_api_key(req)
         assert result == "abc123"
 
-    def test_authorization_bearer_with_spaces_in_key(self):
-        """Bearer key can contain internal spaces."""
+    def test_authorization_bearer_with_spaces_in_key_rejected(self):
+        """Bearer key containing internal spaces is rejected."""
         req = _make_mock_request(authorization="Bearer my key with spaces")
         result = RequestContextMiddleware._extract_api_key(req)
-        assert result == "my key with spaces"
+        assert result is None
 
     def test_authorization_bearer_empty_key_returns_none(self):
         """Authorization: Bearer  (with no key) returns None."""
@@ -494,12 +494,36 @@ class TestExtractApiKey:
         result = RequestContextMiddleware._extract_api_key(req)
         assert result is None
 
-    def test_key_with_space_accepted(self):
-        """A key containing a literal space (\\x20) is accepted."""
+    def test_key_with_space_rejected(self):
+        """A key containing a literal space (\\x20) is rejected."""
         key = "my key with spaces"
         req = _make_mock_request(x_api_key=key)
         result = RequestContextMiddleware._extract_api_key(req)
-        assert result == key
+        assert result is None
+
+    def test_key_space_only_rejected(self):
+        """A key consisting of only spaces is rejected."""
+        req = _make_mock_request(x_api_key="   ")
+        result = RequestContextMiddleware._extract_api_key(req)
+        assert result is None
+
+    def test_key_with_space_in_middle_rejected(self):
+        """A key with a single space between other chars is rejected."""
+        req = _make_mock_request(x_api_key="abc def")
+        result = RequestContextMiddleware._extract_api_key(req)
+        assert result is None
+
+    def test_key_with_leading_space_rejected(self):
+        """A key that starts with a space is rejected."""
+        req = _make_mock_request(x_api_key=" abcdef")
+        result = RequestContextMiddleware._extract_api_key(req)
+        assert result is None
+
+    def test_key_with_trailing_space_rejected(self):
+        """A key that ends with a space is rejected."""
+        req = _make_mock_request(x_api_key="abcdef ")
+        result = RequestContextMiddleware._extract_api_key(req)
+        assert result is None
 
 
 class TestGetApiKeyDefault:

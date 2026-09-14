@@ -27,8 +27,8 @@ threats it mitigates, and how to configure and operate it securely.
 
 **The SSH MCP server is designed to run behind a TLS-terminating reverse proxy
 (e.g. nginx, Caddy, Traefik).** The built-in HTTP server listens on
-`0.0.0.0:8080` in plain HTTP. Exposing it directly to untrusted networks
-without TLS will leak API keys in transit.
+`[::]:8080` (dual-stack, both IPv4 and IPv6) in plain HTTP. Exposing it
+directly to untrusted networks without TLS will leak API keys in transit.
 
 Recommended deployment pattern:
 
@@ -46,7 +46,7 @@ The reverse proxy should:
 ### Client IP Extraction
 
 The effective client IP used for rate limiting and network authorization is
-resolved by [`lib/request_context.py`](lib/request_context.py) from two
+resolved by [`lib/request_context.py`](../lib/request_context.py) from two
 sources, in order:
 
 1. **`X-Forwarded-For` header** — but **only** when the direct connection peer
@@ -108,12 +108,15 @@ response time.
 ### Format Validation
 
 Before comparison, raw API keys submitted by clients are validated for
-syntactic safety by [`lib/request_context.py`](lib/request_context.py):
+syntactic safety by [`lib/request_context.py`](../lib/request_context.py):
 
 - **Non-empty** — empty or missing keys are rejected immediately.
-- **Printable ASCII only** — every byte must be in the `0x20`–`0x7E` range,
-  rejecting control characters (e.g. `\x1f`) and non-ASCII bytes (e.g.
-  `café`).
+- **Printable non-space ASCII only** — every byte must be in the
+  `0x21`–`0x7E` range, rejecting control characters (e.g. `\x1f`),
+  the space character (`0x20`), and non-ASCII bytes (e.g. `café`).
+  This excludes spaces so that keys can be safely embedded in HTTP
+  headers (e.g. `Authorization: Bearer <key>`) without ambiguous
+  tokenisation.
 - **Maximum length** — keys must not exceed `MAX_API_KEY_LENGTH` (default:
   1024 characters).
 
@@ -233,7 +236,7 @@ is validated against a character whitelist (`[a-zA-Z0-9][a-zA-Z0-9_-]*`).
 ## Sudo Command Handling
 
 When a tool call sets `sudo=True`, the server conditionally wraps the command
-with the appropriate sudo flags via [`lib/sudo.py`](lib/sudo.py). This
+with the appropriate sudo flags via [`lib/sudo.py`](../lib/sudo.py). This
 centralises all sudo-related logic and prevents misuse.
 
 ### Password vs Passwordless
@@ -268,6 +271,36 @@ Operators can completely prohibit sudo by adding `\bsudo\b` to
 Even when the tool supports `sudo=True`, the block-pattern layer runs first
 and will deny any command containing `sudo` — regardless of whether it was
 injected by the wrapper or present in the original command.
+
+### Per-Rule Sudo Authorization
+
+Beyond the target-wide `commands` allow-list, each rule may carry an
+optional `sudo_allowed` list that controls which of the rule's commands may
+be executed with `sudo=True`:
+
+- **Semantics** — `sudo_allowed` is a list of command names, each of which
+  must also appear in the same rule's `commands` list.  When a call sets
+  `sudo=True`, the matched rule's `sudo_allowed` list must contain the
+  command's base name for the command to be permitted.
+- **Wildcard** — the special entry `"*"` (see
+  [`SUDO_ALLOWED_WILDCARD`](../lib/constants.py)) permits every command in
+  the rule to run with sudo.
+- **Secure by default** — when `sudo_allowed` is absent or empty, **all**
+  sudo attempts are denied.  Only non-sudo execution is affected by the
+  `commands` list alone.
+- **Enforcement point** — the check runs inside the authorization chain
+  (see [`lib/auth.py`](../lib/auth.py)) **before** the command is wrapped
+  with sudo flags, so a denied sudo request never reaches the remote shell.
+  Denied sudo attempts are reported as
+  `sudo not allowed for '<command>' by this rule` with a `" (sudo)"` suffix
+  on `matched_via`.
+- **Subset validation** — config validation ([`lib/config.py`](../lib/config.py))
+  rejects any `sudo_allowed` entry that is neither `"*"` nor a member of
+  the rule's `commands` list, preventing dead or mistyped entries.
+- **Backward compatibility** — existing configurations without
+  `sudo_allowed` continue to work unchanged for non-sudo calls; their sudo
+  attempts are denied, matching the previous behaviour where no rule-level
+  sudo control existed.
 
 ---
 
@@ -408,7 +441,7 @@ approved network range.
 
 ### Request context fallbacks
 
-The request-context accessors in [`lib/request_context.py`](lib/request_context.py)
+The request-context accessors in [`lib/request_context.py`](../lib/request_context.py)
 return safe fallback values when called outside an active request context
 (e.g. during startup, shutdown, or background tool execution):
 
@@ -453,7 +486,7 @@ The server ships with conservative defaults designed for production safety:
 #### Log Path Validation
 
 Log file and directory paths are validated by `validate_log_path()` in
-[`lib/sanitize.py`](lib/sanitize.py) before any file is opened:
+[`lib/sanitize.py`](../lib/sanitize.py) before any file is opened:
 
 1. **Empty-string rejection** — blank or whitespace-only paths are rejected.
 2. **Null-byte rejection** — paths containing `\x00` are rejected, preventing
@@ -474,9 +507,9 @@ to overwrite sensitive files.
 
 ### Circuit Breaker
 
-The SSH client uses a per-target circuit breaker ([`lib/circuit_breaker.py`](lib/circuit_breaker.py))
+The SSH client uses a per-target circuit breaker ([`lib/circuit_breaker.py`](../lib/circuit_breaker.py))
 to prevent cascading failures and resource exhaustion against unhealthy SSH
-targets. It is consulted by [`lib/ssh_client.py`](lib/ssh_client.py) before
+targets. It is consulted by [`lib/ssh_client.py`](../lib/ssh_client.py) before
 every SSH connection attempt.
 
 #### State Machine
@@ -520,7 +553,7 @@ higher timeout gives recovering targets more time.
 
 ### Connection Pool Security
 
-The SSH connection pool ([`lib/connection_pool.py`](lib/connection_pool.py))
+The SSH connection pool ([`lib/connection_pool.py`](../lib/connection_pool.py))
 reuses established paramiko connections across requests and enforces several
 security-relevant limits:
 
@@ -551,7 +584,7 @@ a time.
   separate `secrets.json` file or `MCP_SSH_SECRET_*` environment variables
   rather than inline in `ssh-mcp-config.json`. Precedence is **env vars >
   `secrets.json` > main config**. See [`lib/secrets.py`](../lib/secrets.py)
-  and README §2.8.
+  and docs/CONFIGURATION.md § Secrets.
 - `secrets.json` uses a parallel structure keyed by identifier:
 
 ```jsonc
@@ -617,7 +650,7 @@ logged. See [`lib/constants.py`](../lib/constants.py) for the accepted keys.
 
 ### Config Validation Depth
 
-At load time, [`lib/config.py`](lib/config.py) performs several
+At load time, [`lib/config.py`](../lib/config.py) performs several
 security-relevant validation checks beyond basic schema conformance:
 
 - **ReDoS screening** — block patterns are scanned for known
@@ -648,7 +681,7 @@ is bounded.
 
 ## Config API Session Management
 
-The config-api SPA ([`config-api/config_api/ui/index.html`](config-api/config_api/ui/index.html))
+The config-api SPA ([`config-api/config_api/ui/index.html`](../config-api/config_api/ui/index.html))
 uses a **cookie-based session system** for browser authentication instead of
 storing raw tokens in `sessionStorage`. This section documents the threat model,
 session architecture, and operational constraints.
@@ -692,7 +725,7 @@ other sessions or the underlying token.
 | `Max-Age`    | `3600` (1 hour)                          | Hard server-side expiry via cookie lifetime         |
 
 The `Secure` flag defaults to `true` (set in
-[`lib/constants.py`](lib/constants.py)). At runtime the
+[`lib/constants.py`](../lib/constants.py)). At runtime the
 `CONFIG_API_SESSION_COOKIE_SECURE` environment variable overrides this
 default — any falsy token (`false`, `0`, `no`, `off`, `disabled`, or an
 empty string) disables the flag. When the environment variable is not set,
@@ -723,7 +756,7 @@ termination even if the client-side logic is bypassed.
 ### Server-Side Revocation
 
 Sessions can be revoked at any time by deleting the session ID from the
-in-memory store ([`config-api/config_api/auth.py`](config-api/config_api/auth.py:129)):
+in-memory store ([`config-api/config_api/auth.py`](../config-api/config_api/auth.py:129)):
 
 ```python
 revoke_session(session_id)  # removes from _sessions dict
@@ -741,7 +774,7 @@ Expired sessions are also cleaned up eagerly during validation
 
 API clients (curl, scripts, CI pipelines) that cannot use cookies can
 authenticate via the standard `Authorization: Bearer <token>` header. The
-[`verify_token()`](config-api/config_api/auth.py:170) dependency checks
+[`verify_token()`](../config-api/config_api/auth.py:170) dependency checks
 authentication in this order:
 
 1. **Session cookie** — if a valid, non-expired session cookie is present, the
@@ -763,7 +796,7 @@ endpoints without conflict.
 ### Related Constants
 
 All session-related magic values are centralized in
-[`lib/constants.py`](lib/constants.py):
+[`lib/constants.py`](../lib/constants.py):
 
 | Constant | Default | Description |
 |----------|---------|-------------|

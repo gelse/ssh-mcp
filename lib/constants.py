@@ -131,6 +131,15 @@ MAX_REGEX_PATTERN_LENGTH: int = 10_000
 MAX_API_KEY_LENGTH: int = 1024
 """Maximum length (characters) of a raw API key before hashing."""
 
+MIN_API_KEY_CHAR: int = 0x21
+"""Lowest inclusive character (printable non-space ASCII ``!``) accepted
+in a raw API key.  Excludes the space character (``0x20``) so that keys
+remain safe to embed in HTTP headers without ambiguous tokenisation."""
+
+MAX_API_KEY_CHAR: int = 0x7E
+"""Highest inclusive character (printable non-space ASCII ``~``) accepted
+in a raw API key.  Excludes DEL (``0x7F``) and all non-ASCII bytes."""
+
 TARGET_NAME_PATTERN: re.Pattern[str] = re.compile(r"[a-zA-Z0-9._-]+")
 """Regex matching a single valid target-name run (see MAX_TARGET_NAME_LENGTH
 for the upper bound; ``sanitize_target_name`` combines both)."""
@@ -147,6 +156,22 @@ PEM_HEADER_RSA: str = "BEGIN RSA PRIVATE KEY"
 
 PEM_HEADER_PKCS8: str = "BEGIN PRIVATE KEY"
 """PEM header that identifies a PKCS#8 generic private key."""
+
+# =============================================================================
+# Server Bind Defaults
+# =============================================================================
+
+SERVER_BIND_HOST: str = "::"
+"""Bind address for the Uvicorn HTTP server.
+
+``"::"`` combined with a pre-bound socket (``config.bind_socket()``)
+produces a dual-stack listener accepting both IPv4 and IPv6
+connections.  Without pre-binding, asyncio would set
+``IPV6_V6ONLY=1``, making the socket IPv6-only.
+"""
+
+SERVER_BIND_PORT: int = 8080
+"""TCP port for the Uvicorn HTTP server."""
 
 # =============================================================================
 # Default Runtime Settings
@@ -436,6 +461,13 @@ SUDO_PASSWORD_PROMPT_FLAGS: str = "sudo -S -p ''"
 SUDO_NO_PASSWORD_FLAG: str = "sudo -n"
 """``sudo`` invocation that refuses to run if a password is required."""
 
+SUDO_ALLOWED_WILDCARD: str = "*"
+"""Wildcard marker for ``sudo_allowed`` lists.
+
+When ``"*"`` appears in a rule's ``sudo_allowed``, every command in that
+rule's ``commands`` list is permitted to run with ``sudo``.
+"""
+
 
 # =============================================================================
 # Rate-Limiting Defaults
@@ -533,3 +565,10 @@ CONFIG_API_SESSION_COOKIE_SAMESITE: str = "strict"
 
 CONFIG_API_SESSION_IDLE_TIMEOUT_SECONDS: int = 1800
 """Client-side idle timeout (seconds) before the session expires."""
+
+CONFIG_API_MAX_BODY_SIZE_BYTES: int = BYTES_PER_MB
+"""Maximum allowed request body size (bytes) for the config-api.
+
+Enforced by the body-size middleware before any route handler runs.
+Equals 1 MiB (BYTES_PER_MB).
+"""

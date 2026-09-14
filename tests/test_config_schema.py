@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from lib.constants import SETTING_KEY_TYPES
 
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "config.schema.json"
@@ -71,6 +73,12 @@ class TestSchemaStructure:
         assert targets["type"] == "object"
         assert targets["minProperties"] == 1
 
+    def test_schema_property_declared(self) -> None:
+        """The root properties include ``$schema`` as a string type."""
+        schema = _load_schema()
+        assert "$schema" in schema["properties"]
+        assert schema["properties"]["$schema"]["type"] == "string"
+
 
 class TestSettingsSchema:
     """The settings section mirrors the 13 validated keys."""
@@ -82,6 +90,97 @@ class TestSettingsSchema:
         assert set(settings_props.keys()) == EXPECTED_SETTING_KEYS
 
 
+class TestRuleSudoAllowedSchema:
+    """The ``rule`` $defs block declares the ``sudo_allowed`` property."""
+
+    def test_rule_defines_sudo_allowed(self) -> None:
+        """The rule definition contains the sudo_allowed array property."""
+        schema = _load_schema()
+        rule_props = schema["$defs"]["rule"]["properties"]
+        assert "sudo_allowed" in rule_props
+        sudo_allowed = rule_props["sudo_allowed"]
+        assert sudo_allowed["type"] == "array"
+        assert sudo_allowed["items"]["type"] == "string"
+        assert sudo_allowed["items"]["minLength"] == 1
+
+    def test_rule_required_unchanged(self) -> None:
+        """sudo_allowed is optional: required still lists only two keys."""
+        schema = _load_schema()
+        rule = schema["$defs"]["rule"]
+        assert set(rule["required"]) == {"targets", "commands"}
+
+    def test_rule_rejects_unknown_keys(self) -> None:
+        """The rule definition keeps additionalProperties: false."""
+        schema = _load_schema()
+        assert schema["$defs"]["rule"]["additionalProperties"] is False
+
+
+class TestRuleSudoAllowedValidation:
+    """Instance validation of sudo_allowed against the bundled schema."""
+
+    @staticmethod
+    def _minimal_config_dict() -> dict:
+        """Return a minimal config dict valid under the schema."""
+        return {
+            "version": 1,
+            "ssh_targets": {
+                "testbox": {
+                    "host": "10.0.0.1",
+                    "username": "admin",
+                    "password": "secret",
+                }
+            },
+            "allowed_commands": {
+                "default": [
+                    {
+                        "targets": ["*"],
+                        "commands": ["hostname"],
+                        "sudo_allowed": ["hostname"],
+                    }
+                ],
+                "api_keys": [],
+                "networks": [],
+            },
+            "settings": {
+                "max_output_length": 50000,
+                "command_timeout_max": 120,
+            },
+        }
+
+    def _validate(self, config: dict) -> None:
+        """Validate *config* against the bundled schema, skipping cleanly."""
+        jsonschema = pytest.importorskip("jsonschema")
+        schema = _load_schema()
+        validator = jsonschema.Draft202012Validator(schema)
+        validator.validate(config)
+
+    def test_valid_sudo_allowed_passes(self) -> None:
+        """A config with valid sudo_allowed passes schema validation."""
+        self._validate(self._minimal_config_dict())
+
+    def test_absent_sudo_allowed_passes(self) -> None:
+        """A rule without sudo_allowed remains valid (optional key)."""
+        config = self._minimal_config_dict()
+        del config["allowed_commands"]["default"][0]["sudo_allowed"]
+        self._validate(config)
+
+    def test_integer_sudo_allowed_entries_fail(self) -> None:
+        """Integer sudo_allowed entries fail schema validation."""
+        jsonschema = pytest.importorskip("jsonschema")
+        config = self._minimal_config_dict()
+        config["allowed_commands"]["default"][0]["sudo_allowed"] = [42]
+        with pytest.raises(jsonschema.ValidationError):
+            self._validate(config)
+
+    def test_unknown_key_with_sudo_allowed_shape_fails(self) -> None:
+        """An unknown sibling key alongside sudo_allowed is rejected."""
+        jsonschema = pytest.importorskip("jsonschema")
+        config = self._minimal_config_dict()
+        config["allowed_commands"]["default"][0]["sudo_not_allowed"] = ["x"]
+        with pytest.raises(jsonschema.ValidationError):
+            self._validate(config)
+
+
 class TestReferencesDefaultConfig:
     """The bundled default config points at the bundled schema."""
 
@@ -90,3 +189,12 @@ class TestReferencesDefaultConfig:
         with DEFAULT_CONFIG_PATH.open(encoding="utf-8") as fh:
             default_config = json.load(fh)
         assert default_config.get("$schema") == "./config.schema.json"
+
+    def test_default_config_passes_draft_2020_12(self) -> None:
+        """default-config.json validates against the schema."""
+        jsonschema = pytest.importorskip("jsonschema")
+        schema = _load_schema()
+        with DEFAULT_CONFIG_PATH.open(encoding="utf-8") as fh:
+            default_config = json.load(fh)
+        validator = jsonschema.Draft202012Validator(schema)
+        validator.validate(default_config)

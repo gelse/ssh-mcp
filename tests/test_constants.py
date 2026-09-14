@@ -12,6 +12,7 @@ from lib.constants import (
     API_KEY_HASH_PREFIX,
     BYTES_PER_KB,
     BYTES_PER_MB,
+    CONFIG_API_MAX_BODY_SIZE_BYTES,
     CONFIG_BACKUP_SUFFIX,
     DEFAULT_BLOCK_PATTERNS,
     DEFAULT_CIRCUIT_BREAKER_FAILURE_THRESHOLD,
@@ -74,9 +75,12 @@ from lib.constants import (
     REDIRECT_FILE_OP_RE,
     RESTRICTED_FILE_MODE,
     SECRETS_FILE_MODE,
+    SERVER_BIND_HOST,
+    SERVER_BIND_PORT,
     TARGET_NAME_PATTERN,
     SETTING_KEY_TYPES,
     SIZE_UNIT_MULTIPLIERS,
+    SUDO_ALLOWED_WILDCARD,
     SUDO_NO_PASSWORD_FLAG,
     SUDO_PASSWORD_PROMPT_FLAGS,
 )
@@ -95,6 +99,7 @@ class TestConstantTypes:
         [
             ("APP_NAME", APP_NAME),
             ("APP_VERSION", APP_VERSION),
+            ("SERVER_BIND_HOST", SERVER_BIND_HOST),
             ("DEFAULT_CONFIG_DIR", DEFAULT_CONFIG_DIR),
             ("DEFAULT_CONFIG_FILENAME", DEFAULT_CONFIG_FILENAME),
             ("DEFAULT_SECRETS_FILENAME", DEFAULT_SECRETS_FILENAME),
@@ -115,7 +120,7 @@ class TestConstantTypes:
             ("DEFAULT_REQUEST_ID", "unknown"),
         ],
         ids=[
-            "APP_NAME", "APP_VERSION", "DEFAULT_CONFIG_DIR",
+            "APP_NAME", "APP_VERSION", "SERVER_BIND_HOST", "DEFAULT_CONFIG_DIR",
             "DEFAULT_CONFIG_FILENAME", "DEFAULT_SECRETS_FILENAME",
             "DEFAULT_LOG_DIR", "DEFAULT_SSH_KEY_FILENAME",
             "DEFAULT_LOG_LEVEL", "DEFAULT_SFTP_SANDBOX_ROOT",
@@ -135,6 +140,7 @@ class TestConstantTypes:
             ("PBKDF2_SALT_BYTES", PBKDF2_SALT_BYTES),
             ("MAX_TARGET_NAME_LENGTH", MAX_TARGET_NAME_LENGTH),
             ("MAX_API_KEY_LENGTH", MAX_API_KEY_LENGTH),
+            ("SERVER_BIND_PORT", SERVER_BIND_PORT),
             ("DEFAULT_SSH_PORT", DEFAULT_SSH_PORT),
             ("DEFAULT_SSH_TIMEOUT_SECONDS", DEFAULT_SSH_TIMEOUT_SECONDS),
             ("DEFAULT_COMMAND_TIMEOUT_SECONDS", DEFAULT_COMMAND_TIMEOUT_SECONDS),
@@ -166,7 +172,8 @@ class TestConstantTypes:
             ("MAX_REGEX_PATTERN_LENGTH", MAX_REGEX_PATTERN_LENGTH),
         ],
         ids=[
-            "PBKDF2_ITERATIONS", "PBKDF2_SALT_BYTES", "MAX_TARGET_NAME_LENGTH",
+            "PBKDF2_ITERATIONS", "PBKDF2_SALT_BYTES", "SERVER_BIND_PORT",
+            "MAX_TARGET_NAME_LENGTH",
             "MAX_API_KEY_LENGTH", "DEFAULT_SSH_PORT", "DEFAULT_SSH_TIMEOUT_SECONDS",
             "DEFAULT_COMMAND_TIMEOUT_SECONDS", "DEFAULT_MAX_OUTPUT_LENGTH",
             "DEFAULT_RETRY_MAX_ATTEMPTS", "DEFAULT_CIRCUIT_BREAKER_FAILURE_THRESHOLD",
@@ -259,6 +266,11 @@ class TestConstantValues:
         ]
         for v in positives:
             assert v > 0, f"Expected positive, got {v}"
+
+    def test_config_api_max_body_size_bytes_value(self) -> None:
+        """CONFIG_API_MAX_BODY_SIZE_BYTES equals 1 MiB and is an int."""
+        assert CONFIG_API_MAX_BODY_SIZE_BYTES == BYTES_PER_MB
+        assert isinstance(CONFIG_API_MAX_BODY_SIZE_BYTES, int)
 
     @pytest.mark.parametrize(
         "name,pattern,valid,invalid,fullmatch",
@@ -397,6 +409,10 @@ class TestConstantValues:
         assert SUDO_PASSWORD_PROMPT_FLAGS.startswith("sudo")
         assert SUDO_NO_PASSWORD_FLAG.startswith("sudo")
 
+    def test_sudo_allowed_wildcard(self) -> None:
+        """SUDO_ALLOWED_WILDCARD is the ``*`` marker string."""
+        assert SUDO_ALLOWED_WILDCARD == "*"
+
     def test_http_status_is_503(self) -> None:
         """HTTP_SERVICE_UNAVAILABLE is 503."""
         assert HTTP_SERVICE_UNAVAILABLE == 503
@@ -407,3 +423,11 @@ class TestConstantValues:
         parts = APP_VERSION.split(".")
         assert len(parts) == 3
         assert all(p.isdigit() for p in parts)
+
+    def test_server_bind_host_is_dual_stack(self) -> None:
+        """SERVER_BIND_HOST is ``::`` for dual-stack IPv4+IPv6 binding."""
+        assert SERVER_BIND_HOST == "::"
+
+    def test_server_bind_port_is_8080(self) -> None:
+        """SERVER_BIND_PORT matches the default Uvicorn port."""
+        assert SERVER_BIND_PORT == 8080

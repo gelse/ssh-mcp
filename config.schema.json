@@ -12,6 +12,10 @@
     "settings"
   ],
   "properties": {
+    "$schema": {
+      "description": "JSON Schema dialect URI — used by editors and CI tooling for autocomplete and validation; ignored by the runtime.",
+      "type": "string"
+    },
     "version": {
       "description": "Config schema version. Only version 1 is currently supported.",
       "const": 1
@@ -139,6 +143,14 @@
           "minItems": 1,
           "items": {
             "type": "string"
+          }
+        },
+        "sudo_allowed": {
+          "description": "Commands from this rule's 'commands' list permitted to run with sudo. '*' permits every command in the rule.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
           }
         }
       }

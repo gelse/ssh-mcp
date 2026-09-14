@@ -43,7 +43,8 @@
           "curl", "wget",
           "echo", "date", "who", "id",
           "lsof", "mount", "smartctl", "lsblk"
-        ]
+        ],
+        "sudo_allowed": ["docker", "systemctl", "journalctl", "smartctl"]
       }
     ],
     "api_keys": [],

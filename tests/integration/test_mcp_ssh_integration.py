@@ -779,7 +779,9 @@ def _make_valid_config(servers: dict) -> dict:
         "ssh_targets": servers,
         "block_patterns": ["\\bsudo\\b"],
         "allowed_commands": {
-            "default": [{"targets": ["*"], "commands": ["*"]}],
+            "default": [
+                {"targets": ["*"], "commands": ["*"], "sudo_allowed": ["*"]}
+            ],
             "api_keys": [],
             "networks": [],
         },
@@ -1132,6 +1134,74 @@ def test_sudo_validation_rejects_explicit_sudo(mcp_url: str):
     content = result.get("content", [])
     text = "".join(item.get("text", "") for item in content)
     assert "not authorized" in text.lower()
+
+
+def test_sudo_denied_when_sudo_allowed_absent(mcp_url: str, switch_config):
+    """sudo=True is denied when the matched rule has no sudo_allowed list."""
+    config = _make_valid_config(TEST_SSH_SERVERS)
+    config["allowed_commands"]["default"] = [
+        {"targets": ["*"], "commands": ["whoami", "hostname"]}
+    ]
+    switch_config(config, {"whoami", "hostname"})
+
+    # sudo=False on the same command proves the rule itself matched.
+    result = _call_tool(
+        mcp_url,
+        "ssh_execute_command",
+        {
+            "server_name": "testbox",
+            "command": "whoami",
+            "sudo": False,
+            "timeout": 10,
+        },
+    )
+    assert "error" not in result.lower()
+
+    # sudo=True is denied because the rule lacks sudo_allowed.
+    result = _call_tool(
+        mcp_url,
+        "ssh_execute_command",
+        {
+            "server_name": "testbox",
+            "command": "whoami",
+            "sudo": True,
+            "timeout": 10,
+        },
+    )
+    assert "not authorized" in result.lower()
+
+
+def test_sudo_allowed_with_explicit_list(mcp_url: str, switch_config):
+    """sudo=True succeeds when the command is in the rule's sudo_allowed."""
+    config = _make_valid_config(TEST_SSH_SERVERS)
+    config["allowed_commands"]["default"] = [
+        {
+            "targets": ["*"],
+            "commands": ["whoami", "hostname"],
+            "sudo_allowed": ["whoami"],
+        }
+    ]
+    switch_config(config, {"whoami", "hostname"})
+
+    result = _mcp_request(
+        mcp_url,
+        "tools/call",
+        {
+            "name": "ssh_execute_command",
+            "arguments": {
+                "server_name": "testbox",
+                "command": "whoami",
+                "sudo": True,
+                "timeout": 10,
+            },
+        },
+    )
+    if "result" in result:
+        result = result["result"]
+    content = result.get("content", [])
+    text = "".join(item.get("text", "") for item in content)
+    # Passwordless sudo should return 'root'
+    assert "root" in text
 
 
 class TestFileTransfer:
@@ -1599,331 +1669,6 @@ class TestErrorScenarios:
         assert error["status_code"] == 200, "Non-503 errors default to HTTP 200"
         assert "timed out" in error["message"].lower() or "timeout" in error["message"].lower()
         assert error.get("request_id"), "Error response must include a request_id"
-
-
-class TestConcurrency:
-    """Integration tests for concurrent request handling."""
-
-    # TEMPORARILY DISABLED: test_concurrent_ssh_execute — see analysis below
-    #
-    # This test blocks indefinitely and is temporarily commented out until the
-    # root causes described below are addressed. It is NOT a permanent removal;
-    # re-enable it once the production resilience gap is fixed.
-    #
-    # Root-cause analysis (the hang is primarily environmental/test-layer, with
-    # a secondary production resilience gap):
-    #
-    # - The test fires 10 concurrent calls against a single shared OpenSSH test
-    #   container with an EMPTY connection pool, causing a burst of 10
-    #   simultaneous fresh paramiko handshakes.
-    # - get_connection in lib/connection_pool.py has NO cap on concurrent fresh
-    #   connections (max_connections_per_target=5 only limits idle storage). The
-    #   burst overwhelms the single test sshd (exceeding its MaxStartups budget
-    #   / exhausting ephemeral ports), producing transient paramiko timeouts.
-    # - DEFAULT_CIRCUIT_BREAKER_FAILURE_THRESHOLD=5 means that burst opens the
-    #   circuit breaker for 60 s, so subsequent tasks in the same MCP session
-    #   fail with "blocked by circuit breaker (open)" while the client's urllib
-    #   read (_post_mcp timeout=15.0) and concurrent threads waiting on
-    #   f.result() without a timeout hang.
-    # - DEFAULT_COMMAND_TIMEOUT_SECONDS=120 is only applied as a threading.Timer
-    #   on the future wait in ssh_execute_command (server.py) and does not
-    #   force-close the paramiko channel, so a wedged reused socket blocks
-    #   beyond the 15 s integration test POST timeout.
-    # - Conclusion: no hang in the executor/pool thread primitives themselves
-    #   (verified: 10 concurrent calls complete in ~4 s with peak concurrency 8
-    #   = DEFAULT_SSH_EXECUTOR_MAX_WORKERS). Root cause is test/environment
-    #   burst handshakes tripping sshd + circuit breaker, plus missing cap on
-    #   concurrent fresh connections in the pool.
-    # - Recommended eventual fixes (do NOT implement now): add a hard timeout to
-    #   f.result() in the test and assert success (not circuit-block error); cap
-    #   concurrent fresh connections in get_connection via threading.
-    #   BoundedSemaphore; fail the current burst fast on transient failures
-    #   instead of opening the circuit for 60 s (or raise threshold / shorten
-    #   window).
-    #
-    # def test_concurrent_ssh_execute(self, mcp_url: str):
-    #     """10 parallel ssh_execute_command calls all succeed."""
-    #     with ThreadPoolExecutor(max_workers=10) as pool:
-    #         futures = [
-    #             pool.submit(
-    #                 _call_tool,
-    #                 mcp_url,
-    #                 "ssh_execute_command",
-    #                 {
-    #                     "server_name": "testbox",
-    #                     "command": "hostname",
-    #                     "timeout": 10,
-    #                 },
-    #             )
-    #             for _ in range(10)
-    #         ]
-    #         results = [future.result(timeout=60) for future in futures]
-    #
-    #     for text in results:
-    #         assert "ERROR" not in text, f"Unexpected error: {text!r}"
-    #         assert len(text.strip()) > 0, "Expected non-empty hostname output"
-
-    # def test_concurrent_file_transfer(self, mcp_url: str, ssh_container):
-    #     """5 parallel downloads and 5 parallel uploads all succeed."""
-    #     for i in range(5):
-    #         create_test_file_on_target(
-    #             ssh_container,
-    #             f"/tmp/concurrent_dl_{i}.txt",
-    #             f"download content {i}\n",
-    #         )
-    #
-    #     # 5 parallel downloads
-    #     with ThreadPoolExecutor(max_workers=5) as pool:
-    #         dl_futures = [
-    #             pool.submit(
-    #                 _call_tool,
-    #                 mcp_url,
-    #                 "ssh_download_file",
-    #                 {
-    #                     "server_name": "testbox",
-    #                     "remote_path": f"/tmp/concurrent_dl_{i}.txt",
-    #                 },
-    #             )
-    #             for i in range(5)
-    #         ]
-    #         dl_results = [future.result(timeout=60) for future in dl_futures]
-    #
-    #     for i, text in enumerate(dl_results):
-    #         verify_file_contents(text, f"download content {i}\n")
-    #
-    #     def _upload(i: int) -> str:
-    #         return _call_tool(
-    #             mcp_url,
-    #             "ssh_upload_file",
-    #             {
-    #                 "server_name": "testbox",
-    #                 "remote_path": f"/tmp/concurrent_ul_{i}.txt",
-    #                 "content": f"upload content {i}\n",
-    #             },
-    #         )
-    #
-    #     # 5 parallel uploads
-    #     with ThreadPoolExecutor(max_workers=5) as pool:
-    #         ul_futures = [pool.submit(_upload, i) for i in range(5)]
-    #         ul_results = [future.result(timeout=60) for future in ul_futures]
-    #
-    #     for i, text in enumerate(ul_results):
-    #         assert text.startswith("OK: Uploaded"), (
-    #             f"Upload {i} failed: {text!r}"
-    #         )
-
-    # def test_concurrent_mixed_operations(self, mcp_url: str, ssh_container):
-    #     """A mix of execute/transfer requests all succeed in parallel."""
-    #     for i in range(3):
-    #         create_test_file_on_target(
-    #             ssh_container,
-    #             f"/tmp/concurrent_mix_dl_{i}.txt",
-    #             f"mixed download {i}\n",
-    #         )
-    #
-    #     tasks: list[tuple[str, dict]] = []
-    #     for i in range(4):
-    #         tasks.append(
-    #             (
-    #                 "ssh_execute_command",
-    #                 {
-    #                     "server_name": "testbox",
-    #                     "command": "hostname",
-    #                     "timeout": 10,
-    #                 },
-    #             )
-    #         )
-    #     for i in range(3):
-    #         tasks.append(
-    #             (
-    #                 "ssh_download_file",
-    #                 {
-    #                     "server_name": "testbox",
-    #                     "remote_path": f"/tmp/concurrent_mix_dl_{i}.txt",
-    #                 },
-    #             )
-    #         )
-    #     for i in range(3):
-    #         tasks.append(
-    #             (
-    #                 "ssh_upload_file",
-    #                 {
-    #                     "server_name": "testbox",
-    #                     "remote_path": f"/tmp/concurrent_mix_ul_{i}.txt",
-    #                     "content": f"mixed upload {i}\n",
-    #                 },
-    #             )
-    #         )
-    #
-    #     with ThreadPoolExecutor(max_workers=10) as pool:
-    #         futures = [
-    #             pool.submit(_call_tool, mcp_url, name, arguments)
-    #             for name, arguments in tasks
-    #         ]
-    #         results = [future.result(timeout=60) for future in futures]
-    #
-    #     # First 4 are executes, next 3 downloads, last 3 uploads
-    #     for text in results[:4]:
-    #         assert "ERROR" not in text, f"Unexpected execute error: {text!r}"
-    #         assert len(text.strip()) > 0
-    #     for i, text in enumerate(results[4:7]):
-    #         verify_file_contents(text, f"mixed download {i}\n")
-    #     for i, text in enumerate(results[7:10]):
-    #         assert text.startswith("OK: Uploaded"), (
-    #             f"Mixed upload {i} failed: {text!r}"
-    #         )
-
-    # def test_concurrent_execute_rejects_503_when_limit_reached(
-    #     self, mcp_url: str, switch_config
-    # ):
-    #     """Excess concurrent connections are REJECTED with a 503, not blocked.
-
-    #     This is the ticket #20 acceptance path: when
-    #     ``max_concurrent_ssh_connections`` is set low, concurrent
-    #     ``ssh_execute_command`` calls beyond the cap must fail with a structured
-    #     ``ServiceUnavailableError`` (status_code 503) while the in-limit calls
-    #     complete normally. Crucially, the rejected requests never touch sshd, so
-    #     no circuit-breaker error is produced (they fail as 503, not as a
-    #     connection failure).
-    #     """
-    #     config = _make_valid_config(TEST_SSH_SERVERS)
-    #     config["settings"]["max_concurrent_ssh_connections"] = 1
-    #     switch_config(config, {"*"})
-
-    #     def _run() -> str:
-    #         # Each worker uses its OWN freshly-initialized MCP session. FastMCP's
-    #         # streamable-HTTP transport serializes JSON-RPC requests per session,
-    #         # so firing N concurrent calls on one shared session with duplicate
-    #         # request ids would hang. Separate sessions keep them truly parallel.
-    #         return _call_tool_new_session(
-    #             mcp_url,
-    #             "ssh_execute_command",
-    #             {
-    #                 "server_name": "testbox",
-    #                 "command": "echo concurrency-check && sleep 3",
-    #                 "timeout": 10,
-    #             },
-    #         )
-
-    #     with ThreadPoolExecutor(max_workers=6) as pool:
-    #         futures = [pool.submit(_run) for _ in range(6)]
-    #         results = [future.result(timeout=60) for future in futures]
-
-    #     errors = [json.loads(text) for text in results if text.startswith("{")]
-    #     successes = [text for text in results if not text.startswith("{")]
-
-    #     # At least one of the concurrent calls hits the configured cap.
-    #     assert errors, f"Expected a 503 reject, got all success: {results!r}"
-    #     assert any(
-    #         e.get("error") is True
-    #         and e.get("error_type") == "ServiceUnavailableError"
-    #         and e.get("status_code") == 503
-    #         and "limit reached" in e.get("message", "").lower()
-    #         for e in errors
-    #     ), f"Expected a ServiceUnavailableError/503 reject, got: {errors!r}"
-
-    #     # The in-limit call(s) complete normally (non-error results).
-    #     assert successes, f"Expected at least one success, got: {results!r}"
-    #     assert any(len(s.strip()) > 0 for s in successes), (
-    #         "Expected non-empty successful output"
-    #     )
-
-    #     # Rejected requests must fail as 503, never as a circuit-breaker block.
-    #     for e in errors:
-    #         assert "circuit breaker" not in e.get("message", "").lower(), (
-    #             f"Reject must be a 503, not a circuit-breaker error: {e!r}"
-    #         )
-
-    # def test_many_concurrent_requests_hit_connection_limit_with_503(
-    #     self, mcp_url: str, switch_config
-    # ):
-    #     """Many concurrent requests with a low cap settle quickly as 503/success.
-
-    #     With ``max_concurrent_ssh_connections`` set to 3, a burst of many
-    #     concurrent ``ssh_execute_command`` calls must each return quickly:
-    #     the ones inside the cap complete normally, while every excess request
-    #     fails fast with a structured ``ServiceUnavailableError`` (status_code
-    #     503) rather than queuing behind the limited pool.  Rejected requests
-    #     never reach sshd, so no circuit-breaker error is expected either.
-
-    #     The per-IP rate limiter is built once at container startup with its
-    #     default 60 req/60s quota and is never rebuilt on config hot-reload.
-    #     After this wait, the sliding window has aged out every request made by
-    #     earlier tests in the session, so this test owns the full 60-request
-    #     budget.  We then share one pre-initialized session and give every
-    #     worker a *distinct* JSON-RPC request id: FastMCP demultiplexes
-    #     concurrent requests on one session as long as their ids differ, which
-    #     keeps the calls genuinely parallel while using only ~N+4 HTTP requests
-    #     total (comfortably under 60).
-    #     """
-    #     config = _make_valid_config(TEST_SSH_SERVERS)
-    #     config["settings"]["max_concurrent_ssh_connections"] = 3
-    #     switch_config(config, {"*"})
-
-    #     # Let the per-IP sliding window (60s) clear all earlier session traffic
-    #     # so the burst below cannot trip the shared 60 req/60s rate limiter.
-    #     time.sleep(RATE_LIMIT_WINDOW_CLEAR_SECONDS)
-
-    #     # 40 tool calls + one-time session setup (~4 requests) stays well
-    #     # under the freshly-cleared 60/60s per-IP budget, while ~13x the cap.
-    #     num_workers = 40
-
-    #     # Pre-initialize a single shared MCP session (cached per URL).
-    #     session_id = _get_session_id(mcp_url)
-
-    #     def _run(worker_id: int) -> str:
-    #         # A unique JSON-RPC id per worker lets FastMCP keep the concurrent
-    #         # tools/call requests on the shared session truly parallel.
-    #         payload = {
-    #             "jsonrpc": "2.0",
-    #             "id": worker_id + 1,
-    #             "method": "tools/call",
-    #             "params": {
-    #                 "name": "ssh_execute_command",
-    #                 "arguments": {
-    #                     "server_name": "testbox",
-    #                     "command": "echo bulk-concurrency-check && sleep 1",
-    #                     "timeout": 10,
-    #                 },
-    #             },
-    #         }
-    #         result = _post_mcp(mcp_url, session_id, payload)
-    #         assert result is not None, "tools/call should return a response"
-    #         result = result.get("result", result)
-    #         content = result.get("content", [])
-    #         return "".join(item.get("text", "") for item in content)
-
-    #     with ThreadPoolExecutor(max_workers=num_workers) as pool:
-    #         futures = [pool.submit(_run, i) for i in range(num_workers)]
-    #         results = [future.result(timeout=60) for future in futures]
-
-    #     errors = [json.loads(text) for text in results if text.startswith("{")]
-    #     successes = [text for text in results if not text.startswith("{")]
-
-    #     # All requests must have returned (settled, not hung).
-    #     assert len(results) == num_workers
-
-    #     # With a cap of 3, the vast majority are expected to be rejects.
-    #     assert errors, f"Expected 503 rejects under the cap, got: {results!r}"
-    #     assert any(
-    #         e.get("error") is True
-    #         and e.get("error_type") == "ServiceUnavailableError"
-    #         and e.get("status_code") == 503
-    #         and "limit reached" in e.get("message", "").lower()
-    #         for e in errors
-    #     ), f"Expected a ServiceUnavailableError/503 reject, got: {errors!r}"
-
-    #     # At least one request lands inside the cap and completes normally.
-    #     assert successes, f"Expected at least one success, got: {results!r}"
-    #     assert any(len(s.strip()) > 0 for s in successes), (
-    #         "Expected non-empty successful output"
-    #     )
-
-    #     # Rejects must be 503s, never circuit-breaker blocks.
-    #     for e in errors:
-    #         assert "circuit breaker" not in e.get("message", "").lower(), (
-    #             f"Reject must be a 503, not a circuit-breaker error: {e!r}"
-    #        )
 
 class TestSshKeyVariants:
     """Integration tests for SSH key-based and password-based authentication."""

@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -25,6 +26,7 @@ from lib.config_migration import (
 )
 from lib.constants import (
     DEFAULT_BLOCK_PATTERNS,
+    SUDO_ALLOWED_WILDCARD,
     DEFAULT_CIRCUIT_BREAKER_FAILURE_THRESHOLD,
     DEFAULT_CIRCUIT_BREAKER_TIMEOUT_SECONDS,
     DEFAULT_COMMAND_TIMEOUT_SECONDS,
@@ -877,7 +879,15 @@ class ConfigManager:
         )
 
     def _ensure_default_config(self) -> None:
-        """Copy the bundled default config to ``self._config_path``."""
+        """Atomically copy the bundled default config to ``self._config_path``.
+
+        Writes to a temporary file inside ``self._config_dir`` and renames it
+        into place so the config never exists with permissive permissions.
+
+        Raises:
+            FileNotFoundError: If the bundled default-config.json is missing.
+            OSError: If the atomic copy/permission/replace steps fail.
+        """
         source = Path(__file__).parent.parent / "default-config.json"
         if not source.exists():
             raise FileNotFoundError(
@@ -885,8 +895,20 @@ class ConfigManager:
             )
 
         self._config_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, self._config_path)
-        os.chmod(self._config_path, 0o600)
+        tmp_path: Path | None = None
+        try:
+            fd, tmp_name = tempfile.mkstemp(
+                dir=str(self._config_dir), prefix=".config_", suffix=".tmp"
+            )
+            os.close(fd)
+            tmp_path = Path(tmp_name)
+            shutil.copy2(source, tmp_path)
+            os.chmod(tmp_path, RESTRICTED_FILE_MODE)
+            os.replace(tmp_path, self._config_path)
+            tmp_path = None  # consumed by replace
+        finally:
+            if tmp_path is not None and tmp_path.exists():
+                tmp_path.unlink()
         logger.info("Created default config at %s", self._config_path)
         self._log_config_event(
             "config.default_created",
@@ -987,7 +1009,7 @@ class ConfigManager:
 
         # -- ssh_targets --
         ssh_targets_raw = config.get("ssh_targets")
-        if not isinstance(ssh_targets_raw, dict) or len(ssh_targets_raw) == 0:
+        if not isinstance(ssh_targets_raw, dict) or not ssh_targets_raw:
             raise ConfigValidationError(
                 "'ssh_targets' must be a non-empty object",
                 field="ssh_targets",
@@ -1148,7 +1170,7 @@ class ConfigManager:
 
         # --- default rules ---
         default_rules_raw = allowed_raw.get("default")
-        if not isinstance(default_rules_raw, list) or len(default_rules_raw) == 0:
+        if not isinstance(default_rules_raw, list) or not default_rules_raw:
             raise ConfigValidationError(
                 "'allowed_commands.default' must be a non-empty list of rules",
                 field="allowed_commands.default",
@@ -1197,7 +1219,7 @@ class ConfigManager:
                     field=f"api_keys[{idx}].key_hash",
                 )
             rules_raw = entry.get("rules")
-            if not isinstance(rules_raw, list) or len(rules_raw) == 0:
+            if not isinstance(rules_raw, list) or not rules_raw:
                 raise ConfigValidationError(
                     "api_keys entry 'rules' must be a non-empty list of rules",
                     field=f"api_keys[{idx}].rules",
@@ -1254,7 +1276,7 @@ class ConfigManager:
                     )
             parsed_networks.append((name, parsed))
             rules_raw = entry.get("rules")
-            if not isinstance(rules_raw, list) or len(rules_raw) == 0:
+            if not isinstance(rules_raw, list) or not rules_raw:
                 raise ConfigValidationError(
                     "networks entry 'rules' must be a non-empty list of rules",
                     field=f"networks[{idx}].rules",
@@ -1389,7 +1411,7 @@ class ConfigManager:
                 )
             log_targets_raw = logging_raw.get("log_targets")
             if log_targets_raw is not None:
-                if not isinstance(log_targets_raw, list) or len(log_targets_raw) == 0:
+                if not isinstance(log_targets_raw, list) or not log_targets_raw:
                     raise ConfigValidationError(
                         "'settings.logging.log_targets' must be a non-empty list",
                         field="settings.logging.log_targets",
@@ -1627,6 +1649,12 @@ class ConfigManager:
         Each rule must have a non-empty ``targets`` list and a non-empty
         ``commands`` list.  Non-wildcard targets must exist in
         *ssh_target_ids*.
+
+        An optional ``sudo_allowed`` list may name commands from the rule's
+        ``commands`` list that are permitted to run with ``sudo``, or the
+        :data:`~lib.constants.SUDO_ALLOWED_WILDCARD` marker (``"*"``) to
+        permit every command in the rule.  When absent, the rebuilt rule
+        carries an empty ``sudo_allowed`` list.
         """
         rules = []
         for idx, rule in enumerate(rules_raw):
@@ -1636,7 +1664,7 @@ class ConfigManager:
                     field=f"{field_prefix}[{idx}]",
                 )
             targets = rule.get("targets")
-            if not isinstance(targets, list) or len(targets) == 0:
+            if not isinstance(targets, list) or not targets:
                 raise ConfigValidationError(
                     "rules entry 'targets' must be a non-empty list",
                     field=f"{field_prefix}[{idx}].targets",
@@ -1654,7 +1682,7 @@ class ConfigManager:
                     )
 
             commands = rule.get("commands")
-            if not isinstance(commands, list) or len(commands) == 0:
+            if not isinstance(commands, list) or not commands:
                 raise ConfigValidationError(
                     "rules entry 'commands' must be a non-empty list",
                     field=f"{field_prefix}[{idx}].commands",
@@ -1666,5 +1694,30 @@ class ConfigManager:
                         field=f"{field_prefix}[{idx}].commands",
                     )
 
-            rules.append({"targets": list(targets), "commands": list(commands)})
+            sudo_allowed = rule.get("sudo_allowed", [])
+            if not isinstance(sudo_allowed, list):
+                raise ConfigValidationError(
+                    "rules entry 'sudo_allowed' must be a list",
+                    field=f"{field_prefix}[{idx}].sudo_allowed",
+                )
+            for entry in sudo_allowed:
+                if not isinstance(entry, str):
+                    raise ConfigValidationError(
+                        "rules entry 'sudo_allowed' entries must be strings",
+                        field=f"{field_prefix}[{idx}].sudo_allowed",
+                    )
+                if entry != SUDO_ALLOWED_WILDCARD and entry not in commands:
+                    raise ConfigValidationError(
+                        "rules entry 'sudo_allowed' references a command "
+                        "not present in the rule's 'commands' list",
+                        field=f"{field_prefix}[{idx}].sudo_allowed",
+                    )
+
+            rules.append(
+                {
+                    "targets": list(targets),
+                    "commands": list(commands),
+                    "sudo_allowed": list(sudo_allowed),
+                }
+            )
         return rules

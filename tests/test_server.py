@@ -26,6 +26,8 @@ from lib.constants import (
     DEFAULT_CHECK_COMMAND,
     DEFAULT_CONFIG_DIR,
     DEFAULT_LOG_DIR,
+    DEFAULT_MAX_SFTP_PATH_LENGTH,
+    DEFAULT_SFTP_SANDBOX_ROOT,
     DEFAULT_SSH_KEY_FILENAME,
     DEFAULT_SSH_PORT,
     DEFAULT_SSH_TIMEOUT_SECONDS,
@@ -126,6 +128,168 @@ def _key_target(**overrides) -> dict:
     return target
 
 
+def _make_mock_ssh_client_manager(output: bytes = b"fake output"):
+    """Return an (ssh_client_manager, client) pair with a canned exec_command."""
+    stdout = MagicMock()
+    stdout.read.return_value = output
+    stdout.channel = MagicMock()
+    stdout.channel.recv_exit_status.return_value = 0
+    stderr = MagicMock()
+    stderr.read.return_value = b""
+    client = MagicMock()
+    client.exec_command.return_value = (MagicMock(), stdout, stderr)
+    cm = MagicMock()
+    cm.__enter__.return_value = client
+    manager = MagicMock()
+    manager.connect.return_value = cm
+    return manager, client
+
+
+class _SyncExecutor:
+    """A minimal executor that runs submitted callables inline.
+
+    Avoids real thread-pool lifecycle (spawning/GC/shutdown) in tests that
+    only need ``executor.submit(fn).result()`` to execute synchronously.
+    """
+
+    def submit(self, fn, /, *args, **kwargs):
+        fut = MagicMock()
+        fut.result.return_value = fn(*args, **kwargs)
+        return fut
+
+    def shutdown(self, *args, **kwargs):
+        """No-op; nothing to shut down."""
+        return None
+
+
+def _run_main(monkeypatch, argv, env=None):
+    """Run the real server.main() with create_app/asyncio mocked.
+
+    Returns the kwargs server.main() passes to create_app().
+    """
+    captured = {}
+
+    def fake_create_app(**kwargs):
+        captured.update(kwargs)
+        return MagicMock()
+
+    monkeypatch.setattr(server, "create_app", fake_create_app)
+    monkeypatch.setattr(server, "asyncio", MagicMock())
+    monkeypatch.setattr(server, "_run_server", lambda *a, **k: None)
+    monkeypatch.setattr(sys, "argv", argv)
+    for key, value in (env or {}).items():
+        monkeypatch.setenv(key, value)
+    server.main()
+    return captured
+
+
+def _make_check_config(**target_overrides) -> dict:
+    """Create a config dict with a target that has a checkcommand."""
+    return _make_minimal_config(
+        **{
+            "ssh_targets": {
+                "testbox": {
+                    "host": "192.168.1.100",
+                    "port": 22,
+                    "username": "testuser",
+                    "password": "testpass",
+                    "checkcommand": "echo ping",
+                    **target_overrides,
+                }
+            },
+        }
+    )
+
+
+def _make_file_transfer_from_config(mgr) -> FileTransferService:
+    """Build a FileTransferService from mgr's settings.sftp section.
+
+    Mirrors the construction in server.create_app().
+    """
+    sftp_settings = mgr.data.get("settings", {}).get("sftp", {})
+    return FileTransferService(
+        sandbox_root=sftp_settings.get("sandbox_root", DEFAULT_SFTP_SANDBOX_ROOT),
+        max_path_length=sftp_settings.get(
+            "max_path_length", DEFAULT_MAX_SFTP_PATH_LENGTH
+        ),
+    )
+
+
+def _wire_tool(
+    tmp_path: Path,
+    config: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    tool_name: str,
+    ssh_client_manager=None,
+    wire_spies: bool = False,
+    file_transfer=None,
+) -> tuple:
+    """Register the real *tool_name* handler via server._register_tools().
+
+    Wires a ConfigManager over *config*, a real AuthorizationManager, mock
+    loggers and a synchronous executor — the same dependency set production
+    create_app() uses, with only true I/O boundaries mocked.
+
+    Args:
+        tmp_path: Directory the test config is written to.
+        config: Config dict to load.
+        monkeypatch: pytest monkeypatch fixture (needed for *wire_spies*).
+        tool_name: Registered tool to fetch (e.g. ``ssh_execute_command``).
+        ssh_client_manager: SSH client manager dependency; a ``MagicMock``
+            when omitted.
+        wire_spies: When True, wrap ``AuthorizationManager.check_command``
+            and ``SudoHandler.validate_sudo`` in ``MagicMock`` spies.
+        file_transfer: FileTransferService dependency; a ``MagicMock``
+            when omitted.
+
+    Returns:
+        Tuple ``(fn, file_logger, stdlib_logger, auth_spy, sudo_spy)``;
+        both spies are ``None`` unless *wire_spies* is True.
+    """
+    mgr = _make_config_manager(tmp_path, config)
+    auth_mgr = AuthorizationManager(mgr)
+
+    auth_spy = None
+    sudo_spy = None
+    if wire_spies:
+        auth_spy = MagicMock(wraps=auth_mgr.check_command)
+        auth_mgr.check_command = auth_spy
+        sudo_spy = MagicMock(wraps=SudoHandler.validate_sudo)
+        monkeypatch.setattr(SudoHandler, "validate_sudo", sudo_spy)
+
+    mcp = FastMCP("test")
+    file_logger = MagicMock()
+    stdlib_logger = MagicMock()
+    file_transfer = file_transfer if file_transfer is not None else MagicMock()
+    executor = _SyncExecutor()
+    ssh_cm = ssh_client_manager if ssh_client_manager is not None else MagicMock()
+
+    server._register_tools(
+        mcp,
+        mgr,
+        auth_mgr,
+        file_logger,
+        stdlib_logger,
+        ssh_cm,
+        file_transfer,
+        "",  # ssh_key_path
+        50000,  # max_command_output
+        executor,
+    )
+    tool = asyncio.run(mcp.get_tool(tool_name))
+    return tool.fn, file_logger, stdlib_logger, auth_spy, sudo_spy
+
+
+def _wire_and_call(
+    tmp_path, monkeypatch, config, ssh_cm, tool_name, **tool_kwargs
+) -> dict:
+    """Wire *tool_name* via _wire_tool(), call it, and return parsed JSON."""
+    fn, *_ = _wire_tool(
+        tmp_path, config, monkeypatch, tool_name, ssh_client_manager=ssh_cm
+    )
+    return json.loads(fn(**tool_kwargs))
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -151,36 +315,15 @@ def auth_manager(config_manager):
 class TestResolveConfigDir:
     """Tests that server.main() resolves --config / CONFIG_DIR correctly."""
 
-    @staticmethod
-    def _run_main(monkeypatch, argv, env=None):
-        """Run the real server.main() with create_app/asyncio mocked.
-
-        Returns the kwargs server.main() passes to create_app().
-        """
-        captured = {}
-
-        def fake_create_app(**kwargs):
-            captured.update(kwargs)
-            return MagicMock()
-
-        monkeypatch.setattr(server, "create_app", fake_create_app)
-        monkeypatch.setattr(server, "asyncio", MagicMock())
-        monkeypatch.setattr(server, "_run_server", lambda *a, **k: None)
-        monkeypatch.setattr(sys, "argv", argv)
-        for key, value in (env or {}).items():
-            monkeypatch.setenv(key, value)
-        server.main()
-        return captured
-
     def test_default(self, monkeypatch):
         """Uses DEFAULT_CONFIG_DIR when no env var or CLI arg is given."""
         monkeypatch.delenv("CONFIG_DIR", raising=False)
-        captured = self._run_main(monkeypatch, ["server.py"])
+        captured = _run_main(monkeypatch, ["server.py"])
         assert captured["config_dir"] == DEFAULT_CONFIG_DIR
 
     def test_env_var(self, monkeypatch):
         """Respects the CONFIG_DIR env var as the default."""
-        captured = self._run_main(
+        captured = _run_main(
             monkeypatch, ["server.py"], env={"CONFIG_DIR": "/custom/config/path"}
         )
         assert captured["config_dir"] == "/custom/config/path"
@@ -188,14 +331,14 @@ class TestResolveConfigDir:
     def test_cli_arg(self, monkeypatch):
         """Respects the --config CLI arg."""
         monkeypatch.delenv("CONFIG_DIR", raising=False)
-        captured = self._run_main(
+        captured = _run_main(
             monkeypatch, ["server.py", "--config", "/cli/config/path"]
         )
         assert captured["config_dir"] == "/cli/config/path"
 
     def test_cli_arg_overrides_env(self, monkeypatch):
         """The --config CLI arg takes precedence over CONFIG_DIR."""
-        captured = self._run_main(
+        captured = _run_main(
             monkeypatch,
             ["server.py", "--config", "/cli/path"],
             env={"CONFIG_DIR": "/env/path"},
@@ -204,7 +347,7 @@ class TestResolveConfigDir:
 
     def test_new_env_var_overrides_legacy(self, monkeypatch):
         """MCP_SSH_CONFIG_PATH takes precedence over CONFIG_DIR."""
-        captured = self._run_main(
+        captured = _run_main(
             monkeypatch,
             ["server.py"],
             env={"CONFIG_DIR": "/legacy/path", MCP_SSH_CONFIG_PATH: "/new/path"},
@@ -215,67 +358,31 @@ class TestResolveConfigDir:
 class TestFixPermissionsFlag:
     """Tests that server.main() plumbs the --fix-permissions flag to create_app()."""
 
-    @staticmethod
-    def _run_main(monkeypatch, argv, env=None):
-        """Run the real server.main() and return the create_app() kwargs."""
-        captured = {}
-
-        def fake_create_app(**kwargs):
-            captured.update(kwargs)
-            return MagicMock()
-
-        monkeypatch.setattr(server, "create_app", fake_create_app)
-        monkeypatch.setattr(server, "asyncio", MagicMock())
-        monkeypatch.setattr(server, "_run_server", lambda *a, **k: None)
-        monkeypatch.setattr(sys, "argv", argv)
-        for key, value in (env or {}).items():
-            monkeypatch.setenv(key, value)
-        server.main()
-        return captured
-
     def test_flag_present_sets_true(self, monkeypatch):
         """Passing --fix-permissions propagates fix_permissions=True."""
         monkeypatch.delenv("CONFIG_DIR", raising=False)
-        captured = self._run_main(monkeypatch, ["server.py", "--fix-permissions"])
+        captured = _run_main(monkeypatch, ["server.py", "--fix-permissions"])
         assert captured["fix_permissions"] is True
 
     def test_flag_absent_defaults_false(self, monkeypatch):
         """Omitting --fix-permissions leaves fix_permissions=False."""
         monkeypatch.delenv("CONFIG_DIR", raising=False)
-        captured = self._run_main(monkeypatch, ["server.py"])
+        captured = _run_main(monkeypatch, ["server.py"])
         assert captured["fix_permissions"] is False
 
 
 class TestResolveLogDir:
     """Tests that server.main() resolves --log-dir / LOG_DIR correctly."""
 
-    @staticmethod
-    def _run_main(monkeypatch, argv, env=None):
-        """Run the real server.main() with create_app/asyncio mocked."""
-        captured = {}
-
-        def fake_create_app(**kwargs):
-            captured.update(kwargs)
-            return MagicMock()
-
-        monkeypatch.setattr(server, "create_app", fake_create_app)
-        monkeypatch.setattr(server, "asyncio", MagicMock())
-        monkeypatch.setattr(server, "_run_server", lambda *a, **k: None)
-        monkeypatch.setattr(sys, "argv", argv)
-        for key, value in (env or {}).items():
-            monkeypatch.setenv(key, value)
-        server.main()
-        return captured
-
     def test_default(self, monkeypatch):
         """Uses DEFAULT_LOG_DIR when no env var or CLI arg is given."""
         monkeypatch.delenv("LOG_DIR", raising=False)
-        captured = self._run_main(monkeypatch, ["server.py"])
+        captured = _run_main(monkeypatch, ["server.py"])
         assert captured["log_dir"] == DEFAULT_LOG_DIR
 
     def test_env_var(self, monkeypatch):
         """Respects the LOG_DIR env var as the default."""
-        captured = self._run_main(
+        captured = _run_main(
             monkeypatch, ["server.py"], env={"LOG_DIR": "/custom/log/path"}
         )
         assert captured["log_dir"] == "/custom/log/path"
@@ -283,14 +390,14 @@ class TestResolveLogDir:
     def test_cli_arg(self, monkeypatch):
         """Respects the --log-dir CLI arg."""
         monkeypatch.delenv("LOG_DIR", raising=False)
-        captured = self._run_main(
+        captured = _run_main(
             monkeypatch, ["server.py", "--log-dir", "/cli/log/path"]
         )
         assert captured["log_dir"] == "/cli/log/path"
 
     def test_cli_arg_overrides_env(self, monkeypatch):
         """The --log-dir CLI arg takes precedence over LOG_DIR."""
-        captured = self._run_main(
+        captured = _run_main(
             monkeypatch,
             ["server.py", "--log-dir", "/cli/path"],
             env={"LOG_DIR": "/env/path"},
@@ -299,7 +406,7 @@ class TestResolveLogDir:
 
     def test_new_env_var_overrides_legacy(self, monkeypatch):
         """MCP_SSH_LOG_DIR takes precedence over LOG_DIR."""
-        captured = self._run_main(
+        captured = _run_main(
             monkeypatch,
             ["server.py"],
             env={"LOG_DIR": "/legacy/path", MCP_SSH_LOG_DIR: "/new/path"},
@@ -332,18 +439,8 @@ class TestPrintDefaultConfig:
 
     def test_without_flag_calls_create_app(self, monkeypatch):
         """Without the flag, main() proceeds to create_app() as normal."""
-        captured = {}
-
-        def fake_create_app(**kwargs):
-            captured.update(kwargs)
-            return MagicMock()
-
-        monkeypatch.setattr(server, "create_app", fake_create_app)
-        monkeypatch.setattr(server, "asyncio", MagicMock())
-        monkeypatch.setattr(server, "_run_server", lambda *a, **k: None)
-        monkeypatch.setattr(sys, "argv", ["server.py"])
         monkeypatch.delenv("CONFIG_DIR", raising=False)
-        server.main()
+        captured = _run_main(monkeypatch, ["server.py"])
 
         assert captured.get("config_dir") is not None
 
@@ -351,48 +448,30 @@ class TestPrintDefaultConfig:
 class TestResolveSshKey:
     """Tests that server.main() resolves --ssh-key / MCP_SSH_SSH_KEY correctly."""
 
-    @staticmethod
-    def _run_main(monkeypatch, argv, env=None):
-        """Run the real server.main() with create_app/asyncio mocked."""
-        captured = {}
-
-        def fake_create_app(**kwargs):
-            captured.update(kwargs)
-            return MagicMock()
-
-        monkeypatch.setattr(server, "create_app", fake_create_app)
-        monkeypatch.setattr(server, "asyncio", MagicMock())
-        monkeypatch.setattr(server, "_run_server", lambda *a, **k: None)
-        monkeypatch.setattr(sys, "argv", argv)
-        for key, value in (env or {}).items():
-            monkeypatch.setenv(key, value)
-        server.main()
-        return captured
-
     def test_default(self, monkeypatch):
         """Uses DEFAULT_SSH_KEY_FILENAME when no env var or CLI arg is given."""
         monkeypatch.delenv(MCP_SSH_SSH_KEY, raising=False)
         monkeypatch.delenv("SSH_KEY_PATH", raising=False)
-        captured = self._run_main(monkeypatch, ["server.py"])
+        captured = _run_main(monkeypatch, ["server.py"])
         assert captured["ssh_key_path"] == DEFAULT_SSH_KEY_FILENAME
 
     def test_new_env_var(self, monkeypatch):
         """Respects the MCP_SSH_SSH_KEY env var as the default."""
-        captured = self._run_main(
+        captured = _run_main(
             monkeypatch, ["server.py"], env={MCP_SSH_SSH_KEY: "/new/key/path"}
         )
         assert captured["ssh_key_path"] == "/new/key/path"
 
     def test_legacy_env_var_fallback(self, monkeypatch):
         """Falls back to the legacy SSH_KEY_PATH env var."""
-        captured = self._run_main(
+        captured = _run_main(
             monkeypatch, ["server.py"], env={"SSH_KEY_PATH": "/legacy/key/path"}
         )
         assert captured["ssh_key_path"] == "/legacy/key/path"
 
     def test_new_env_var_overrides_legacy(self, monkeypatch):
         """MCP_SSH_SSH_KEY takes precedence over SSH_KEY_PATH."""
-        captured = self._run_main(
+        captured = _run_main(
             monkeypatch,
             ["server.py"],
             env={"SSH_KEY_PATH": "/legacy/path", MCP_SSH_SSH_KEY: "/new/path"},
@@ -403,14 +482,14 @@ class TestResolveSshKey:
         """Respects the --ssh-key CLI arg."""
         monkeypatch.delenv(MCP_SSH_SSH_KEY, raising=False)
         monkeypatch.delenv("SSH_KEY_PATH", raising=False)
-        captured = self._run_main(
+        captured = _run_main(
             monkeypatch, ["server.py", "--ssh-key", "/cli/key/path"]
         )
         assert captured["ssh_key_path"] == "/cli/key/path"
 
     def test_cli_arg_overrides_env(self, monkeypatch):
         """The --ssh-key CLI arg takes precedence over MCP_SSH_SSH_KEY."""
-        captured = self._run_main(
+        captured = _run_main(
             monkeypatch,
             ["server.py", "--ssh-key", "/cli/path"],
             env={MCP_SSH_SSH_KEY: "/env/path"},
@@ -727,7 +806,7 @@ class TestGetSshClient:
 class TestSshListServers:
     """Tests for ssh_list_servers data retrieval."""
 
-    def test_returns_targets(self, tmp_path):
+    def test_returns_targets(self, tmp_path, monkeypatch):
         """Returns target IDs and their non-secret details from config."""
         config = _make_minimal_config(
             ssh_targets={
@@ -735,17 +814,12 @@ class TestSshListServers:
                 "db": {"host": "10.0.0.2", "username": "root", "port": 2222, "password": "pw2"},
             },
         )
-        mgr = _make_config_manager(tmp_path, config)
 
-        targets = mgr.list_ssh_targets()
-        result = {}
-        for tid in targets:
-            t = mgr.get_ssh_target(tid)
-            result[tid] = {
-                "host": t["host"],
-                "port": t.get("port", 22),
-                "username": t["username"],
-            }
+        # Exercise the REAL ssh_list_servers tool handler instead of an
+        # inline reimplementation of its dict-building logic.
+        result = _wire_and_call(
+            tmp_path, monkeypatch, config, MagicMock(), "ssh_list_servers"
+        )
 
         assert "web" in result
         assert "db" in result
@@ -756,6 +830,9 @@ class TestSshListServers:
         # Secrets must not be leaked
         assert "password" not in result["web"]
         assert "private_key" not in result["web"]
+        # The response shape is exactly the handler's projection
+        assert set(result["web"].keys()) == {"host", "port", "username"}
+        assert set(result["db"].keys()) == {"host", "port", "username"}
 
     def test_returns_empty_for_no_targets(self, tmp_path):
         """Returns empty dict when config has no ssh_targets."""
@@ -1149,6 +1226,175 @@ class TestSudoAuthorization:
 
 
 # ---------------------------------------------------------------------------
+# Per-rule sudo authorization tests (GitHub issue #42, tasks 5)
+# ---------------------------------------------------------------------------
+
+
+def _make_key_target_config(tmp_path: Path, rules: list[dict]) -> dict:
+    """Build a config whose target authenticates via a key file.
+
+    Writes a fake private key into *tmp_path* so ``_build_auth_target``
+    resolves key auth and returns ``password=None`` — the passwordless
+    sudo path (``sudo -n``) is then exercised end-to-end.
+    """
+    key_file = tmp_path / "id_test_key"
+    key_file.write_text("FAKE KEY MATERIAL")
+    return {
+        "version": 1,
+        "ssh_targets": {
+            "testserver": {
+                "host": "10.0.0.1",
+                "username": "testuser",
+                "port": 22,
+                "private_key": str(key_file),
+            },
+        },
+        "block_patterns": [r"\brm\s+-rf\b", r"\bshutdown\b"],
+        "allowed_commands": {
+            "default": rules,
+            "api_keys": [],
+            "networks": [],
+        },
+        "settings": {
+            "max_output_length": 50000,
+            "command_timeout_max": 120,
+        },
+    }
+
+
+class TestSudoAllowedPerRule:
+    """sudo=True requires the command to be in the rule's sudo_allowed."""
+
+    def test_sudo_allowed_for_listed_command(self, tmp_path, monkeypatch):
+        """sudo=True on a sudo_allowed-listed command wraps and executes."""
+        config = _make_key_target_config(
+            tmp_path,
+            [{
+                "targets": ["*"],
+                "commands": ["systemctl"],
+                "sudo_allowed": ["systemctl"],
+            }],
+        )
+        ssh_cm, client = _make_mock_ssh_client_manager()
+        fn, _file_logger, _stdlib_logger, _auth_spy, _sudo_spy = _wire_tool(
+            tmp_path, config, monkeypatch, "ssh_execute_command",
+            ssh_client_manager=ssh_cm,
+        )
+
+        result = fn(
+            server_name="testserver",
+            command="systemctl status",
+            sudo=True,
+        )
+
+        assert "fake output" in result
+        client.exec_command.assert_called_once()
+        actual_command = client.exec_command.call_args[0][0]
+        assert actual_command == f"{SUDO_NO_PASSWORD_FLAG} systemctl status"
+
+    def test_sudo_denied_for_non_listed_command(self, tmp_path, monkeypatch):
+        """sudo=True on a command not in sudo_allowed returns a JSON error."""
+        config = _make_key_target_config(
+            tmp_path,
+            [{
+                "targets": ["*"],
+                "commands": ["systemctl", "docker"],
+                "sudo_allowed": ["systemctl"],
+            }],
+        )
+        ssh_cm, client = _make_mock_ssh_client_manager()
+        fn, file_logger, _stdlib_logger, _auth_spy, _sudo_spy = _wire_tool(
+            tmp_path, config, monkeypatch, "ssh_execute_command",
+            ssh_client_manager=ssh_cm,
+        )
+
+        result = fn(
+            server_name="testserver",
+            command="docker ps",
+            sudo=True,
+        )
+
+        payload = json.loads(result)
+        assert payload["error"] is True
+        # The user-facing message stays generic (no reason leakage); the
+        # sudo-specific reason is recorded in the auth.deny log entry.
+        assert payload["message"] == "Command not authorized"
+        deny_entries = [
+            call.args[0]
+            for call in file_logger.log.call_args_list
+            if call.args and call.args[0].get("event") == "auth.deny"
+        ]
+        assert any(
+            "sudo not allowed" in entry.get("message", "")
+            for entry in deny_entries
+        )
+        # The command must never reach the SSH layer.
+        client.exec_command.assert_not_called()
+
+    def test_sudo_denied_when_no_sudo_allowed(self, tmp_path, monkeypatch):
+        """sudo=True with a rule lacking sudo_allowed denies all sudo."""
+        config = _make_key_target_config(
+            tmp_path,
+            [{"targets": ["*"], "commands": ["systemctl"]}],
+        )
+        ssh_cm, client = _make_mock_ssh_client_manager()
+        fn, file_logger, _stdlib_logger, _auth_spy, _sudo_spy = _wire_tool(
+            tmp_path, config, monkeypatch, "ssh_execute_command",
+            ssh_client_manager=ssh_cm,
+        )
+
+        result = fn(
+            server_name="testserver",
+            command="systemctl status",
+            sudo=True,
+        )
+
+        payload = json.loads(result)
+        assert payload["error"] is True
+        assert payload["message"] == "Command not authorized"
+        deny_entries = [
+            call.args[0]
+            for call in file_logger.log.call_args_list
+            if call.args and call.args[0].get("event") == "auth.deny"
+        ]
+        assert any(
+            "sudo not allowed" in entry.get("message", "")
+            for entry in deny_entries
+        )
+        client.exec_command.assert_not_called()
+
+    def test_non_sudo_call_unaffected_by_sudo_allowed(
+        self, tmp_path, monkeypatch
+    ):
+        """sudo=False executes regardless of the rule's sudo_allowed."""
+        config = _make_key_target_config(
+            tmp_path,
+            [{
+                "targets": ["*"],
+                "commands": ["systemctl", "docker"],
+                "sudo_allowed": ["systemctl"],
+            }],
+        )
+        ssh_cm, client = _make_mock_ssh_client_manager()
+        fn, _file_logger, _stdlib_logger, _auth_spy, _sudo_spy = _wire_tool(
+            tmp_path, config, monkeypatch, "ssh_execute_command",
+            ssh_client_manager=ssh_cm,
+        )
+
+        result = fn(
+            server_name="testserver",
+            command="docker ps",
+            sudo=False,
+        )
+
+        assert "fake output" in result
+        client.exec_command.assert_called_once()
+        actual_command = client.exec_command.call_args[0][0]
+        # Unwrapped — no sudo prefix for sudo=False calls.
+        assert actual_command == "docker ps"
+
+
+# ---------------------------------------------------------------------------
 # Module-level tests
 # ---------------------------------------------------------------------------
 
@@ -1307,81 +1553,16 @@ class TestGracefulShutdown:
 # ---------------------------------------------------------------------------
 
 
-def _make_mock_ssh_client_manager(output: bytes = b"fake output"):
-    """Return an (ssh_client_manager, client) pair with a canned exec_command."""
-    stdout = MagicMock()
-    stdout.read.return_value = output
-    stdout.channel = MagicMock()
-    stdout.channel.recv_exit_status.return_value = 0
-    stderr = MagicMock()
-    stderr.read.return_value = b""
-    client = MagicMock()
-    client.exec_command.return_value = (MagicMock(), stdout, stderr)
-    cm = MagicMock()
-    cm.__enter__.return_value = client
-    manager = MagicMock()
-    manager.connect.return_value = cm
-    return manager, client
-
-
-class _SyncExecutor:
-    """A minimal executor that runs submitted callables inline.
-
-    Avoids real thread-pool lifecycle (spawning/GC/shutdown) in tests that
-    only need ``executor.submit(fn).result()`` to execute synchronously.
-    """
-
-    def submit(self, fn, /, *args, **kwargs):
-        fut = MagicMock()
-        fut.result.return_value = fn(*args, **kwargs)
-        return fut
-
-    def shutdown(self, *args, **kwargs):
-        """No-op; nothing to shut down."""
-        return None
-
-
 class TestCommandSanitizationInHandler:
     """The handler sanitizes the command before sudo validation and auth."""
-
-    @staticmethod
-    def _wire_tool(tmp_path, config, monkeypatch, ssh_client_manager):
-        """Register the real tool handler and return callables/spies."""
-        mgr = _make_config_manager(tmp_path, config)
-        auth_mgr = AuthorizationManager(mgr)
-        auth_spy = MagicMock(wraps=auth_mgr.check_command)
-        auth_mgr.check_command = auth_spy
-
-        sudo_spy = MagicMock(wraps=SudoHandler.validate_sudo)
-        monkeypatch.setattr(SudoHandler, "validate_sudo", sudo_spy)
-
-        mcp = FastMCP("test")
-        file_logger = MagicMock()
-        stdlib_logger = MagicMock()
-        file_transfer = MagicMock()
-        executor = _SyncExecutor()
-
-        server._register_tools(
-            mcp,
-            mgr,
-            auth_mgr,
-            file_logger,
-            stdlib_logger,
-            ssh_client_manager,
-            file_transfer,
-            "",  # ssh_key_path
-            50000,  # max_command_output
-            executor,
-        )
-        tool = asyncio.run(mcp.get_tool("ssh_execute_command"))
-        return tool.fn, auth_spy, sudo_spy
 
     def test_null_bytes_stripped_before_sudo_and_auth(self, tmp_path, monkeypatch):
         """Null bytes are removed before sudo validation and the auth check."""
         config = _make_minimal_config()
         ssh_cm, _ = _make_mock_ssh_client_manager()
-        fn, auth_spy, sudo_spy = self._wire_tool(
-            tmp_path, config, monkeypatch, ssh_cm
+        fn, _file_logger, _stdlib_logger, auth_spy, sudo_spy = _wire_tool(
+            tmp_path, config, monkeypatch, "ssh_execute_command",
+            ssh_client_manager=ssh_cm, wire_spies=True,
         )
 
         fn(server_name="testserver", command="echo hello\x00world")
@@ -1395,8 +1576,9 @@ class TestCommandSanitizationInHandler:
         """ANSI/ESC control characters are stripped before execution."""
         config = _make_minimal_config()
         ssh_cm, _ = _make_mock_ssh_client_manager()
-        fn, auth_spy, sudo_spy = self._wire_tool(
-            tmp_path, config, monkeypatch, ssh_cm
+        fn, _file_logger, _stdlib_logger, auth_spy, sudo_spy = _wire_tool(
+            tmp_path, config, monkeypatch, "ssh_execute_command",
+            ssh_client_manager=ssh_cm, wire_spies=True,
         )
 
         result = fn(
@@ -1427,8 +1609,9 @@ class TestCommandSanitizationInHandler:
             },
         )
         ssh_cm, _ = _make_mock_ssh_client_manager()
-        fn, auth_spy, sudo_spy = self._wire_tool(
-            tmp_path, config, monkeypatch, ssh_cm
+        fn, _file_logger, _stdlib_logger, auth_spy, sudo_spy = _wire_tool(
+            tmp_path, config, monkeypatch, "ssh_execute_command",
+            ssh_client_manager=ssh_cm, wire_spies=True,
         )
 
         result = fn(server_name="testserver", command="ｌｓ ＼etc")
@@ -1455,8 +1638,9 @@ class TestCommandSanitizationInHandler:
             },
         )
         ssh_cm, _ = _make_mock_ssh_client_manager()
-        fn, auth_spy, sudo_spy = self._wire_tool(
-            tmp_path, config, monkeypatch, ssh_cm
+        fn, _file_logger, _stdlib_logger, auth_spy, sudo_spy = _wire_tool(
+            tmp_path, config, monkeypatch, "ssh_execute_command",
+            ssh_client_manager=ssh_cm, wire_spies=True,
         )
 
         result = fn(server_name="testserver", command="ｓｕｄｏ id", sudo=True)
@@ -1516,12 +1700,7 @@ class TestSftpConfigWiring:
             }
         )
         mgr = _make_config_manager(tmp_path, config)
-        sftp_settings = mgr.data.get("settings", {}).get("sftp", {})
-        from lib.constants import DEFAULT_SFTP_SANDBOX_ROOT, DEFAULT_MAX_SFTP_PATH_LENGTH
-        ft = FileTransferService(
-            sandbox_root=sftp_settings.get("sandbox_root", DEFAULT_SFTP_SANDBOX_ROOT),
-            max_path_length=sftp_settings.get("max_path_length", DEFAULT_MAX_SFTP_PATH_LENGTH),
-        )
+        ft = _make_file_transfer_from_config(mgr)
         assert "/tmp/sftp" in ft._sandbox_root
         assert ft.max_path_length == 1024
 
@@ -1534,38 +1713,16 @@ class TestSftpConfigWiring:
         /opt/file.txt is accepted when the sandbox is '/' (the default).
         """
         config = _make_minimal_config()
-        mgr = _make_config_manager(tmp_path, config)
-        auth_mgr = AuthorizationManager(mgr)
-
-        mcp = FastMCP("test")
-        file_logger = MagicMock()
-        stdlib_logger = MagicMock()
-
         # Use a real FileTransferService so _validate_path runs
-        from lib.constants import DEFAULT_SFTP_SANDBOX_ROOT, DEFAULT_MAX_SFTP_PATH_LENGTH
-        sftp_settings = mgr.data.get("settings", {}).get("sftp", {})
-        ft = FileTransferService(
-            sandbox_root=sftp_settings.get("sandbox_root", DEFAULT_SFTP_SANDBOX_ROOT),
-            max_path_length=sftp_settings.get("max_path_length", DEFAULT_MAX_SFTP_PATH_LENGTH),
-        )
-        executor = _SyncExecutor()
+        mgr = _make_config_manager(tmp_path, config)
+        ft = _make_file_transfer_from_config(mgr)
         ssh_cm = MagicMock()
         ssh_cm.connect.return_value.__enter__ = MagicMock()
         ssh_cm.connect.return_value.__exit__ = MagicMock()
-
-        server._register_tools(
-            mcp,
-            mgr,
-            auth_mgr,
-            file_logger,
-            stdlib_logger,
-            ssh_cm,
-            ft,
-            "",  # ssh_key_path
-            50000,  # max_command_output
-            executor,
+        fn, _file_logger, _stdlib_logger, _auth_spy, _sudo_spy = _wire_tool(
+            tmp_path, config, monkeypatch, "ssh_upload_file",
+            ssh_client_manager=ssh_cm, file_transfer=ft,
         )
-        tool = asyncio.run(mcp.get_tool("ssh_upload_file"))
 
         # Mock the SFTP open/put call to succeed
         mock_sftp = MagicMock()
@@ -1575,7 +1732,7 @@ class TestSftpConfigWiring:
 
         # The old code would reject /opt/file.txt before even reaching SFTP.
         # Now it should pass path validation and reach the SFTP write.
-        result = tool.fn(
+        result = fn(
             server_name="testserver",
             remote_path="/opt/file.txt",
             content="aGVsbG8=",
@@ -1593,57 +1750,14 @@ class TestSftpConfigWiring:
 class TestSshCheckConnection:
     """Tests for the ssh_check_connection MCP tool."""
 
-    @staticmethod
-    def _make_check_config(**target_overrides):
-        """Create a config dict with a target that has a checkcommand."""
-        return _make_minimal_config(
-            **{
-                "ssh_targets": {
-                    "testbox": {
-                        "host": "192.168.1.100",
-                        "port": 22,
-                        "username": "testuser",
-                        "password": "testpass",
-                        "checkcommand": "echo ping",
-                        **target_overrides,
-                    }
-                },
-            }
-        )
-
-    @staticmethod
-    def _wire_tool(tmp_path, config, monkeypatch, ssh_client_manager=None):
-        """Wire up the ssh_check_connection tool for testing."""
-        mgr = _make_config_manager(tmp_path, config)
-        auth_mgr = AuthorizationManager(mgr)
-
-        mcp = FastMCP("test")
-        file_logger = MagicMock()
-        stdlib_logger = MagicMock()
-        file_transfer = MagicMock()
-        executor = _SyncExecutor()
-        ssh_cm = ssh_client_manager or MagicMock()
-
-        server._register_tools(
-            mcp,
-            mgr,
-            auth_mgr,
-            file_logger,
-            stdlib_logger,
-            ssh_cm,
-            file_transfer,
-            "",  # ssh_key_path
-            50000,  # max_command_output
-            executor,
-        )
-        tool = asyncio.run(mcp.get_tool("ssh_check_connection"))
-        return tool.fn, file_logger
-
     def test_check_connection_success(self, tmp_path, monkeypatch):
         """Successful check returns success=True, output, exit_code, checkcommand."""
-        config = self._make_check_config()
+        config = _make_check_config()
         ssh_cm, _client = _make_mock_ssh_client_manager(b"ping\n")
-        fn, _logger = self._wire_tool(tmp_path, config, monkeypatch, ssh_cm)
+        fn, _file_logger, _stdlib_logger, _auth_spy, _sudo_spy = _wire_tool(
+            tmp_path, config, monkeypatch, "ssh_check_connection",
+            ssh_client_manager=ssh_cm,
+        )
 
         result = fn(server_name="testbox")
         payload = json.loads(result)
@@ -1655,10 +1769,13 @@ class TestSshCheckConnection:
 
     def test_check_connection_auth_failure(self, tmp_path, monkeypatch):
         """Auth failure returns error with SSHAuthenticationError type."""
-        config = self._make_check_config()
+        config = _make_check_config()
         ssh_cm = MagicMock()
         ssh_cm.connect.side_effect = SSHAuthenticationError("Auth failed")
-        fn, _logger = self._wire_tool(tmp_path, config, monkeypatch, ssh_cm)
+        fn, _file_logger, _stdlib_logger, _auth_spy, _sudo_spy = _wire_tool(
+            tmp_path, config, monkeypatch, "ssh_check_connection",
+            ssh_client_manager=ssh_cm,
+        )
 
         result = fn(server_name="testbox")
         payload = json.loads(result)
@@ -1668,10 +1785,13 @@ class TestSshCheckConnection:
 
     def test_check_connection_timeout(self, tmp_path, monkeypatch):
         """Timeout returns error with SSHTimeoutError type."""
-        config = self._make_check_config()
+        config = _make_check_config()
         ssh_cm = MagicMock()
         ssh_cm.connect.side_effect = SSHTimeoutError("Timed out")
-        fn, _logger = self._wire_tool(tmp_path, config, monkeypatch, ssh_cm)
+        fn, _file_logger, _stdlib_logger, _auth_spy, _sudo_spy = _wire_tool(
+            tmp_path, config, monkeypatch, "ssh_check_connection",
+            ssh_client_manager=ssh_cm,
+        )
 
         result = fn(server_name="testbox")
         payload = json.loads(result)
@@ -1681,8 +1801,10 @@ class TestSshCheckConnection:
 
     def test_check_connection_target_not_found(self, tmp_path, monkeypatch):
         """Unknown target name returns safe user_message, not internal details."""
-        config = self._make_check_config()
-        fn, _logger = self._wire_tool(tmp_path, config, monkeypatch)
+        config = _make_check_config()
+        fn, _file_logger, _stdlib_logger, _auth_spy, _sudo_spy = _wire_tool(
+            tmp_path, config, monkeypatch, "ssh_check_connection"
+        )
 
         result = fn(server_name="nonexistent")
         payload = json.loads(result)
@@ -1692,11 +1814,14 @@ class TestSshCheckConnection:
 
     def test_check_connection_default_checkcommand(self, tmp_path, monkeypatch):
         """Target without checkcommand uses DEFAULT_CHECK_COMMAND."""
-        config = self._make_check_config()
+        config = _make_check_config()
         # Remove the checkcommand from the target
         del config["ssh_targets"]["testbox"]["checkcommand"]
         ssh_cm, _client = _make_mock_ssh_client_manager(b"pong\n")
-        fn, _logger = self._wire_tool(tmp_path, config, monkeypatch, ssh_cm)
+        fn, _file_logger, _stdlib_logger, _auth_spy, _sudo_spy = _wire_tool(
+            tmp_path, config, monkeypatch, "ssh_check_connection",
+            ssh_client_manager=ssh_cm,
+        )
 
         result = fn(server_name="testbox")
         payload = json.loads(result)
@@ -1706,9 +1831,12 @@ class TestSshCheckConnection:
 
     def test_check_connection_log_entry(self, tmp_path, monkeypatch):
         """Log entry includes 'event': 'connection.check' and request metadata."""
-        config = self._make_check_config()
+        config = _make_check_config()
         ssh_cm, _client = _make_mock_ssh_client_manager(b"pong\n")
-        fn, file_logger = self._wire_tool(tmp_path, config, monkeypatch, ssh_cm)
+        fn, file_logger, _stdlib_logger, _auth_spy, _sudo_spy = _wire_tool(
+            tmp_path, config, monkeypatch, "ssh_check_connection",
+            ssh_client_manager=ssh_cm,
+        )
 
         fn(server_name="testbox")
 
@@ -1757,61 +1885,13 @@ class TestCatchAllExceptionSanitization:
         )
         return manager
 
-    @staticmethod
-    def _make_check_config(**target_overrides):
-        """Create a config dict with a target that has a checkcommand."""
-        return _make_minimal_config(
-            **{
-                "ssh_targets": {
-                    "testbox": {
-                        "host": "192.168.1.100",
-                        "port": 22,
-                        "username": "testuser",
-                        "password": "testpass",
-                        "checkcommand": "echo ping",
-                        **target_overrides,
-                    }
-                },
-            }
-        )
-
-    @staticmethod
-    def _wire_tool(tmp_path, config, monkeypatch, tool_name, ssh_client_manager):
-        """Register a tool handler and return (fn, file_logger, stdlib_logger)."""
-        from lib.config import ConfigManager
-
-        _write_config(tmp_path, config)
-        mgr = ConfigManager(str(tmp_path))
-        mgr.reload()
-        auth_mgr = AuthorizationManager(mgr)
-
-        mcp = FastMCP("test")
-        file_logger = MagicMock()
-        stdlib_logger = MagicMock()
-        file_transfer = MagicMock()
-        executor = _SyncExecutor()
-
-        server._register_tools(
-            mcp,
-            mgr,
-            auth_mgr,
-            file_logger,
-            stdlib_logger,
-            ssh_client_manager,
-            file_transfer,
-            "",  # ssh_key_path
-            50000,  # max_command_output
-            executor,
-        )
-        tool = asyncio.run(mcp.get_tool(tool_name))
-        return tool.fn, file_logger, stdlib_logger
-
     def test_execute_command_swallows_exception_details(self, tmp_path, monkeypatch):
         """ssh_execute_command catch-all must not leak exception text."""
         config = _make_minimal_config()
         ssh_cm = self._make_raising_ssh_manager()
-        fn, file_logger, stdlib_logger = self._wire_tool(
-            tmp_path, config, monkeypatch, "ssh_execute_command", ssh_cm
+        fn, file_logger, stdlib_logger, _auth_spy, _sudo_spy = _wire_tool(
+            tmp_path, config, monkeypatch, "ssh_execute_command",
+            ssh_client_manager=ssh_cm,
         )
 
         result = fn(server_name="testserver", command="hostname")
@@ -1846,10 +1926,11 @@ class TestCatchAllExceptionSanitization:
 
     def test_check_connection_swallows_exception_details(self, tmp_path, monkeypatch):
         """ssh_check_connection catch-all must not leak exception text."""
-        config = self._make_check_config()
+        config = _make_check_config()
         ssh_cm = self._make_raising_ssh_manager()
-        fn, file_logger, stdlib_logger = self._wire_tool(
-            tmp_path, config, monkeypatch, "ssh_check_connection", ssh_cm
+        fn, file_logger, stdlib_logger, _auth_spy, _sudo_spy = _wire_tool(
+            tmp_path, config, monkeypatch, "ssh_check_connection",
+            ssh_client_manager=ssh_cm,
         )
 
         result = fn(server_name="testbox")
@@ -1897,8 +1978,9 @@ class TestCatchAllExceptionSanitization:
             },
         )
         ssh_cm = self._make_raising_ssh_manager()
-        fn, file_logger, stdlib_logger = self._wire_tool(
-            tmp_path, config, monkeypatch, "ssh_download_file", ssh_cm
+        fn, file_logger, stdlib_logger, _auth_spy, _sudo_spy = _wire_tool(
+            tmp_path, config, monkeypatch, "ssh_download_file",
+            ssh_client_manager=ssh_cm,
         )
 
         result = fn(server_name="testbox", remote_path="/tmp/test.txt")
@@ -1946,8 +2028,9 @@ class TestCatchAllExceptionSanitization:
             },
         )
         ssh_cm = self._make_raising_ssh_manager()
-        fn, file_logger, stdlib_logger = self._wire_tool(
-            tmp_path, config, monkeypatch, "ssh_upload_file", ssh_cm
+        fn, file_logger, stdlib_logger, _auth_spy, _sudo_spy = _wire_tool(
+            tmp_path, config, monkeypatch, "ssh_upload_file",
+            ssh_client_manager=ssh_cm,
         )
 
         result = fn(
@@ -1997,38 +2080,6 @@ class TestUserMessageSanitization:
         manager.connect.side_effect = exc
         return manager
 
-    @staticmethod
-    def _wire_and_call(tmp_path, monkeypatch, config, ssh_cm, tool_name, **tool_kwargs):
-        """Wire *tool_name*, call it, and return the parsed JSON payload."""
-        from lib.config import ConfigManager
-
-        _write_config(tmp_path, config)
-        mgr = ConfigManager(str(tmp_path))
-        mgr.reload()
-        auth_mgr = AuthorizationManager(mgr)
-
-        mcp = FastMCP("test")
-        file_logger = MagicMock()
-        stdlib_logger = MagicMock()
-        file_transfer = MagicMock()
-        executor = _SyncExecutor()
-
-        server._register_tools(
-            mcp,
-            mgr,
-            auth_mgr,
-            file_logger,
-            stdlib_logger,
-            ssh_cm,
-            file_transfer,
-            "",  # ssh_key_path
-            50000,  # max_command_output
-            executor,
-        )
-        tool = asyncio.run(mcp.get_tool(tool_name))
-        result = tool.fn(**tool_kwargs)
-        return json.loads(result)
-
     # ------------------------------------------------------------------
     # Tests
     # ------------------------------------------------------------------
@@ -2044,7 +2095,7 @@ class TestUserMessageSanitization:
 
         ssh_cm = self._make_ssh_manager_raise(exc)
         config = _make_minimal_config()
-        payload = self._wire_and_call(
+        payload = _wire_and_call(
             tmp_path, monkeypatch, config, ssh_cm,
             "ssh_execute_command",
             server_name="testserver", command="hostname",
@@ -2066,7 +2117,7 @@ class TestUserMessageSanitization:
 
         ssh_cm = self._make_ssh_manager_raise(exc)
         config = _make_minimal_config()
-        payload = self._wire_and_call(
+        payload = _wire_and_call(
             tmp_path, monkeypatch, config, ssh_cm,
             "ssh_execute_command",
             server_name="testserver", command="hostname",
@@ -2087,7 +2138,7 @@ class TestUserMessageSanitization:
 
         ssh_cm = self._make_ssh_manager_raise(exc)
         config = _make_minimal_config()
-        payload = self._wire_and_call(
+        payload = _wire_and_call(
             tmp_path, monkeypatch, config, ssh_cm,
             "ssh_execute_command",
             server_name="testserver", command="hostname",
@@ -2126,7 +2177,7 @@ class TestUserMessageSanitization:
                 "networks": [],
             },
         )
-        payload = self._wire_and_call(
+        payload = _wire_and_call(
             tmp_path, monkeypatch, config, ssh_cm,
             "ssh_download_file",
             server_name="testbox", remote_path="/tmp/test.txt",
@@ -2162,7 +2213,7 @@ class TestUserMessageSanitization:
                 "networks": [],
             },
         )
-        payload = self._wire_and_call(
+        payload = _wire_and_call(
             tmp_path, monkeypatch, config, ssh_cm,
             "ssh_download_file",
             server_name="testbox", remote_path="/tmp/test.txt",
@@ -2203,3 +2254,32 @@ class TestUserMessageSanitization:
                 f"str({type(exc).__name__}) must contain "
                 f"{expected_substring!r} for logging, got {str(exc)!r}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Tests: narrowed exception handling in create_app startup
+# ---------------------------------------------------------------------------
+
+
+class TestCreateAppFallbackBehavior:
+    """Tests for narrowed exception handling in create_app startup."""
+
+    def test_create_app_raises_when_fallback_also_fails(self, tmp_path, monkeypatch):
+        """If both primary and fallback ConfigManager fail, server raises."""
+        import server
+        from lib.exceptions import MCPSSHError
+
+        call_count = 0
+
+        def _failing_init(self_cm, config_dir, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            raise OSError("simulated config failure")
+
+        monkeypatch.setattr(server.ConfigManager, "__init__", _failing_init)
+
+        with pytest.raises(OSError, match="simulated config failure"):
+            server.create_app(str(tmp_path))
+
+        # Both primary and fallback were attempted
+        assert call_count == 2

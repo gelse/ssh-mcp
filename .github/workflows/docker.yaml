@@ -2,7 +2,7 @@ name: Build and Push Docker Image
 
 on:
   push:
-    branches: [main]
+    branches: [main, testing]
     tags: ["v*"]
 
 jobs:
@@ -29,10 +29,31 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract version from tag
-        if: startsWith(github.ref, 'refs/tags/v')
-        id: version
-        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+      - name: Set image tags
+        id: tags
+        run: |
+          IMAGE=ghcr.io/gelse/ssh-mcp
+          if [ "$GITHUB_REF" = "refs/heads/testing" ]; then
+            # Testing branch: only the :testing tag — never :latest, :{sha}, or version tags
+            echo "tags=${IMAGE}:testing" >> "$GITHUB_OUTPUT"
+          elif [ "${GITHUB_REF#refs/tags/v}" != "$GITHUB_REF" ]; then
+            # Version tag push (v*): :latest, :{sha}, and version tag
+            {
+              echo "tags<<EOF"
+              echo "${IMAGE}:latest"
+              echo "${IMAGE}:${GITHUB_SHA}"
+              echo "${IMAGE}:${GITHUB_REF#refs/tags/v}"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            # Main branch: :latest and :{sha} tags
+            {
+              echo "tags<<EOF"
+              echo "${IMAGE}:latest"
+              echo "${IMAGE}:${GITHUB_SHA}"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
@@ -40,10 +61,7 @@ jobs:
           context: .
           push: ${{ github.event_name != 'pull_request' }}
           load: ${{ github.event_name == 'pull_request' }}
-          tags: |
-            ghcr.io/gelse/ssh-mcp:latest
-            ghcr.io/gelse/ssh-mcp:${{ github.sha }}
-            ${{ startsWith(github.ref, 'refs/tags/v') && format('ghcr.io/gelse/ssh-mcp:{0}', steps.version.outputs.version) || '' }}
+          tags: ${{ steps.tags.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

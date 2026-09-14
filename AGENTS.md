@@ -65,7 +65,11 @@ mcp-ssh/
 ## Plans & CI
 
 - **Plans:** No `plans/` directory — implemented work lives in code. Keep future design docs as lightweight `.md` at repo root.
-- **CI:** Single `pip-audit` job in [`.forgejo/workflows/audit.yml`](.forgejo/workflows/audit.yml). No lint, no type-check, no test — run `make test` and `make integrationtest` locally before opening a PR.
+- **CI:** Unit tests on every push
+  ([`.github/workflows/test.yml`](.github/workflows/test.yml)); integration tests on `release*` tags
+  ([`.github/workflows/integration.yml`](.github/workflows/integration.yml)); Docker build+push to GHCR on
+  `main`, `testing`, `v*` tags ([`.github/workflows/docker.yaml`](.github/workflows/docker.yaml)).
+  No lint, no type-check — run `make test` and `make integrationtest` locally before opening a PR.
 - **Renovate:** [`renovate.json`](renovate.json) extends `config:recommended` with dependency dashboard, Docker digest pinning.
 
 ## Testing
@@ -107,7 +111,7 @@ No lint or type-check tooling exists. `.editorconfig` provides formatting defaul
 3. **Unit test** — `tests/test_<module>.py`; cover success + error paths
 4. **Integration test** — add scenarios to [`tests/integration/test_mcp_ssh_integration.py`](tests/integration/test_mcp_ssh_integration.py) if touching SSH/auth/rate-limiting/HTTP
 5. **Commit** — immediate, short imperative-mood message, one commit per task
-6. **PR** — feature branch → PR against `main`; never push directly to `main`; delete branch after merge
+6. **PR** — feature branch → PR against `testing`; never push directly to `main` or `testing`; delete branch after merge
 
 ## Coding Conventions
 
@@ -122,7 +126,7 @@ No lint or type-check tooling exists. `.editorconfig` provides formatting defaul
 | **Config access** | Always `config_manager.data.get("settings", {})` with fallback |
 | **Logging** | `file_logger.log(dict)` — include `request_id`, `event`, `log_level`, `log_format_version` |
 | **Metrics** | Increment `REQUESTS_TOTAL` per tool call; observe `COMMAND_DURATION_SECONDS` for SSH |
-| **Line length** | 88 chars (followed in practice) |
+| **Line length** | Python: 88; Markdown: 120 (`max_line_length` in [`.editorconfig`](.editorconfig)) |
 | **Imports** | `from __future__ import annotations` in all files; stdlib → third-party → local |
 
 ## Authorization Model
@@ -155,7 +159,7 @@ Before considering a task complete, verify:
 - [ ] **README updated** — new settings, tools, config keys documented
 - [ ] **Security consulted** — if touching crypto/auth/command_security/file_transfer/sudo/request_context/secrets/sanitize, read [`docs/SECURITY.md`](docs/SECURITY.md)
 - [ ] **Commit created** — short imperative-mood message
-- [ ] **PR opened** — targeting `main` (never push directly)
+- [ ] **PR opened** — targeting `testing` (never push directly to `main` or `testing`)
 
 ## Dependency Management
 

@@ -8,3 +8,4 @@ logs/
 config/
 secrets.json
 plans/
+test_logs_relative/

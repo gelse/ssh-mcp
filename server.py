@@ -33,6 +33,8 @@ from lib.config import build_default_config, ConfigManager
 from lib.connection_pool import SSHConnectionPool
 from lib.constants import (
     APP_NAME,
+    SERVER_BIND_HOST,
+    SERVER_BIND_PORT,
     DEFAULT_CHECK_COMMAND,
     DEFAULT_CIRCUIT_BREAKER_FAILURE_THRESHOLD,
     DEFAULT_CIRCUIT_BREAKER_TIMEOUT_SECONDS,
@@ -250,29 +252,33 @@ def _run_server(
         # --- Start uvicorn inside the FastMCP lifespan context --------
         config = uvicorn.Config(
             starlette_app,
-            host="0.0.0.0",
-            port=8080,
+            host=SERVER_BIND_HOST,
+            port=SERVER_BIND_PORT,
             timeout_graceful_shutdown=2,
             lifespan="on",
             ws="websockets-sansio",
         )
-        server = uvicorn.Server(config)
 
-        async with app._lifespan_manager():  # type: ignore[attr-defined]
-            serve_task = asyncio.create_task(server.serve())
-            await shutdown_event.wait()
-            serve_task.cancel()
-            try:
-                await serve_task
-            except asyncio.CancelledError:
-                pass
-            finally:
-                timeout = getattr(
-                    app.state,  # type: ignore[attr-defined]
-                    "shutdown_timeout",
-                    DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
+        # Pre-bind the socket so asyncio leaves IPV6_V6ONLY unset,
+        # enabling dual-stack IPv4+IPv6 on the same port.
+        sock = config.bind_socket()
+
+        server = uvicorn.Server(config)
+        try:
+            async with app._lifespan_manager():  # type: ignore[attr-defined]
+                serve_task = asyncio.create_task(
+                    server.serve(sockets=[sock])
                 )
-                app.shutdown()  # type: ignore[attr-defined]   # bounded + resource release
+                await shutdown_event.wait()
+                serve_task.cancel()
+                try:
+                    await serve_task
+                except asyncio.CancelledError:
+                    pass
+                finally:
+                    app.shutdown()  # type: ignore[attr-defined]
+        finally:
+            sock.close()
 
     asyncio.run(_serve())
 
@@ -326,13 +332,15 @@ def create_app(
     # ConfigManager is created first (before the structured logger) so that
     # its settings can drive LoggingManager.  ConfigManager uses stdlib
     # logging, not the structured file_logger, so this ordering is safe.
-    config_manager = ConfigManager(
-        config_dir, fix_permissions=fix_permissions
-    )
     try:
+        config_manager = ConfigManager(
+            config_dir, fix_permissions=fix_permissions
+        )
         # Start hot-reload watcher (15-second polling)
         config_manager.start_watcher(polling_interval=DEFAULT_WATCHER_INTERVAL_SECONDS)
-    except Exception:
+    except (OSError, json.JSONDecodeError, RuntimeError, MCPSSHError):
+        # Recoverable config errors (missing/unreadable file, invalid JSON,
+        # watcher startup failure) trigger fallback to the bundled default.
         _fallback_log = logging.getLogger(__name__)
         _fallback_log.warning(
             "Cannot initialize ConfigManager from %s — falling back to "
@@ -344,10 +352,17 @@ def create_app(
         # Fallback: load bundled default-config.json via ConfigManager
         # pointed at the project root (which is always readable).
         _fallback_config_dir = str(BASE_DIR)
-        config_manager = ConfigManager(
-            _fallback_config_dir,
-            fix_permissions=fix_permissions,
-        )
+        try:
+            config_manager = ConfigManager(
+                _fallback_config_dir,
+                fix_permissions=fix_permissions,
+            )
+        except (OSError, json.JSONDecodeError, RuntimeError, MCPSSHError):
+            _fallback_log.critical(
+                "Fallback config also failed; cannot start server",
+                exc_info=True,
+            )
+            raise
         _fallback_log.info(
             "Config loaded from fallback path: %s",
             config_manager.config_path,
@@ -756,6 +771,7 @@ def _register_tools(
             target=target_name,
             source_ip=source_ip,
             api_key=api_key,
+            sudo=sudo,
         )
         log_command = sanitize_log_string(command)
         log_target_name = sanitize_log_string(target_name)
@@ -1055,7 +1071,10 @@ def _register_tools(
         (if the target has a password) or ``sudo -n`` (for passwordless
         sudo).  The authorization check runs against the **unwrapped**
         command, not sudo.  Raw ``'sudo'`` in the command string is always
-        blocked by block_patterns.
+        blocked by block_patterns.  Additionally, with sudo=True the
+        matched rule's ``sudo_allowed`` list must contain the command (or
+        the ``"*"`` wildcard) for the command to be permitted; rules
+        without ``sudo_allowed`` deny all sudo attempts.
 
         Args:
             server_name: The identifier of the SSH server (as configured)
@@ -1063,7 +1082,8 @@ def _register_tools(
             timeout: Command timeout in seconds (1-300)
             sudo: If True, execute the command with sudo on the remote
                   host.  Requires the SSH target to have a password
-                  configured or NOPASSWD sudoers entry.
+                  configured or NOPASSWD sudoers entry, and the command to
+                  be listed in the matched rule's ``sudo_allowed``.
 
         Returns:
             Command output (stdout + stderr combined) or auth denial

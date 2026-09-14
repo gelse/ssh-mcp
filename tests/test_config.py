@@ -115,7 +115,7 @@ class TestLoadValidConfig:
             data = mgr.data
             assert data["version"] == 1
             # At least one target from the real default-config.json
-            assert len(data["ssh_targets"]) >= 1
+            assert data["ssh_targets"]
             assert os.path.exists(mgr.config_path)
 
     def test_get_ssh_target_returns_correct_dict(self):
@@ -182,8 +182,8 @@ class TestBuildDefaultConfig:
     def test_emits_single_placeholder_target_and_rule(self) -> None:
         """Ships one placeholder target and one default rule (non-empty)."""
         cfg = build_default_config()
-        assert len(cfg["ssh_targets"]) >= 1
-        assert len(cfg["allowed_commands"]["default"]) >= 1
+        assert cfg["ssh_targets"]
+        assert cfg["allowed_commands"]["default"]
 
     def test_emitted_config_passes_validation(self) -> None:
         """A config produced by build_default_config() loads successfully."""
@@ -330,6 +330,82 @@ class TestValidationFailures:
         with tempfile.TemporaryDirectory() as td:
             _write_config(td, cfg)
             with pytest.raises(ConfigValidationError, match="Unknown key"):
+                ConfigManager(td)
+
+    def test_validation_fails_empty_default_rules(self) -> None:
+        """Empty allowed_commands.default list raises ConfigValidationError."""
+        cfg = _minimal_valid_config()
+        cfg["allowed_commands"]["default"] = []
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(
+                ConfigValidationError,
+                match="allowed_commands.default.*must be a non-empty list",
+            ):
+                ConfigManager(td)
+
+    def test_validation_fails_empty_api_keys_rules(self) -> None:
+        """Empty api_keys rules list raises ConfigValidationError."""
+        cfg = _minimal_valid_config()
+        cfg["allowed_commands"]["api_keys"] = [
+            {
+                "name": "testkey",
+                "key_hash": "sha256:" + "a" * 64,
+                "rules": [],
+            }
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(
+                ConfigValidationError,
+                match="api_keys.*rules.*must be a non-empty list",
+            ):
+                ConfigManager(td)
+
+    def test_validation_fails_empty_networks_rules(self) -> None:
+        """Empty networks rules list raises ConfigValidationError."""
+        cfg = _minimal_valid_config()
+        cfg["allowed_commands"]["networks"] = [
+            {
+                "name": "office",
+                "range": "10.0.0.0/8",
+                "rules": [],
+            }
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(
+                ConfigValidationError,
+                match="networks.*rules.*must be a non-empty list",
+            ):
+                ConfigManager(td)
+
+    def test_validation_fails_empty_rule_targets(self) -> None:
+        """Rule with empty targets list raises ConfigValidationError."""
+        cfg = _minimal_valid_config()
+        cfg["allowed_commands"]["default"] = [
+            {"targets": [], "commands": ["hostname"]}
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(
+                ConfigValidationError,
+                match="targets.*must be a non-empty list",
+            ):
+                ConfigManager(td)
+
+    def test_validation_fails_empty_rule_commands(self) -> None:
+        """Rule with empty commands list raises ConfigValidationError."""
+        cfg = _minimal_valid_config()
+        cfg["allowed_commands"]["default"] = [
+            {"targets": ["*"], "commands": []}
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(
+                ConfigValidationError,
+                match="commands.*must be a non-empty list",
+            ):
                 ConfigManager(td)
 
 
@@ -2176,3 +2252,227 @@ class TestSettingsLoggingValidation:
             # Should not raise — extra fields are not validated
             mgr = ConfigManager(td)
             assert mgr.data["settings"]["logging"]["log_targets"][0].get("extra_field") == "allowed"
+
+
+# ---------------------------------------------------------------------------
+# Tests: sudo_allowed rule validation
+# ---------------------------------------------------------------------------
+
+
+class TestSudoAllowedRuleValidation:
+    """Validation of the optional ``sudo_allowed`` key on command rules."""
+
+    @staticmethod
+    def _config_with_default_rule(rule: dict) -> dict:
+        """Return a minimal valid config whose default rule is *rule*."""
+        cfg = _minimal_valid_config()
+        cfg["allowed_commands"]["default"] = [rule]
+        return cfg
+
+    def test_absent_sudo_allowed_defaults_to_empty_list(self) -> None:
+        """Rule without sudo_allowed gains an empty sudo_allowed list."""
+        cfg = self._config_with_default_rule(
+            {"targets": ["*"], "commands": ["hostname"]}
+        )
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            mgr = ConfigManager(td)
+            rule = mgr.data["allowed_commands"]["default"][0]
+            assert rule["sudo_allowed"] == []
+
+    def test_empty_sudo_allowed_passes(self) -> None:
+        """An explicitly empty sudo_allowed list is accepted."""
+        cfg = self._config_with_default_rule(
+            {
+                "targets": ["*"],
+                "commands": ["hostname"],
+                "sudo_allowed": [],
+            }
+        )
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            mgr = ConfigManager(td)
+            rule = mgr.data["allowed_commands"]["default"][0]
+            assert rule["sudo_allowed"] == []
+
+    def test_sudo_allowed_subset_of_commands_passes(self) -> None:
+        """sudo_allowed entries naming commands from the rule are accepted."""
+        cfg = self._config_with_default_rule(
+            {
+                "targets": ["*"],
+                "commands": ["hostname", "systemctl"],
+                "sudo_allowed": ["systemctl"],
+            }
+        )
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            mgr = ConfigManager(td)
+            rule = mgr.data["allowed_commands"]["default"][0]
+            assert rule["sudo_allowed"] == ["systemctl"]
+
+    def test_sudo_allowed_wildcard_passes(self) -> None:
+        """The '*' sudo_allowed marker is accepted for concrete commands."""
+        cfg = self._config_with_default_rule(
+            {
+                "targets": ["*"],
+                "commands": ["hostname", "systemctl"],
+                "sudo_allowed": ["*"],
+            }
+        )
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            mgr = ConfigManager(td)
+            rule = mgr.data["allowed_commands"]["default"][0]
+            assert rule["sudo_allowed"] == ["*"]
+
+    def test_sudo_allowed_unknown_command_raises_error(self) -> None:
+        """sudo_allowed naming a command outside 'commands' raises error."""
+        cfg = self._config_with_default_rule(
+            {
+                "targets": ["*"],
+                "commands": ["hostname"],
+                "sudo_allowed": ["nonexistent"],
+            }
+        )
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(ConfigValidationError) as exc:
+                ConfigManager(td)
+            assert "sudo_allowed" in str(exc.value.field)
+
+    def test_sudo_allowed_non_string_entry_raises_error(self) -> None:
+        """sudo_allowed with a non-string entry raises error."""
+        cfg = self._config_with_default_rule(
+            {
+                "targets": ["*"],
+                "commands": ["hostname"],
+                "sudo_allowed": ["hostname", 42],
+            }
+        )
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(ConfigValidationError) as exc:
+                ConfigManager(td)
+            assert "sudo_allowed" in str(exc.value.field)
+
+    def test_sudo_allowed_non_list_raises_error(self) -> None:
+        """sudo_allowed as a non-list value raises error."""
+        cfg = self._config_with_default_rule(
+            {
+                "targets": ["*"],
+                "commands": ["hostname"],
+                "sudo_allowed": "hostname",
+            }
+        )
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(ConfigValidationError) as exc:
+                ConfigManager(td)
+            assert "sudo_allowed" in str(exc.value.field)
+
+    def test_sudo_allowed_wildcard_with_wildcard_commands_rejects_concrete(
+        self,
+    ) -> None:
+        """Non-'*' sudo_allowed entries are rejected for commands == ['*']."""
+        cfg = self._config_with_default_rule(
+            {
+                "targets": ["*"],
+                "commands": ["*"],
+                "sudo_allowed": ["systemctl"],
+            }
+        )
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(ConfigValidationError) as exc:
+                ConfigManager(td)
+            assert "sudo_allowed" in str(exc.value.field)
+
+    def test_sudo_allowed_wildcard_with_wildcard_commands_passes(self) -> None:
+        """'*' sudo_allowed is accepted when commands == ['*']."""
+        cfg = self._config_with_default_rule(
+            {
+                "targets": ["*"],
+                "commands": ["*"],
+                "sudo_allowed": ["*"],
+            }
+        )
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            mgr = ConfigManager(td)
+            rule = mgr.data["allowed_commands"]["default"][0]
+            assert rule["sudo_allowed"] == ["*"]
+
+    def test_sudo_allowed_validated_on_api_key_rules(self) -> None:
+        """sudo_allowed subset semantics also apply to api_keys rules."""
+        cfg = _minimal_valid_config()
+        cfg["allowed_commands"]["api_keys"] = [
+            {
+                "name": "svc",
+                "key_hash": "sha256:" + "a" * 64,
+                "rules": [
+                    {
+                        "targets": ["*"],
+                        "commands": ["hostname"],
+                        "sudo_allowed": ["reboot"],
+                    }
+                ],
+            }
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            _write_config(td, cfg)
+            with pytest.raises(ConfigValidationError) as exc:
+                ConfigManager(td)
+            assert "api_keys[0].rules[0].sudo_allowed" in str(exc.value.field)
+
+
+# ---------------------------------------------------------------------------
+# Tests: atomic default-config creation (TOCTOU fix)
+# ---------------------------------------------------------------------------
+
+
+class TestEnsureDefaultConfigAtomicity:
+    """Tests for atomic default-config creation (TOCTOU fix)."""
+
+    def test_replace_failure_cleans_up_tmp(self, tmp_path, monkeypatch):
+        """If os.replace fails, temp file is cleaned up and no config remains."""
+        import lib.config
+
+        def _replace_fail(src, dst):
+            raise OSError("simulated replace failure")
+
+        monkeypatch.setattr(lib.config.os, "replace", _replace_fail)
+
+        with pytest.raises(OSError, match="simulated replace failure"):
+            lib.config.ConfigManager(str(tmp_path))
+
+        # No config file or tmp files should remain
+        assert not (tmp_path / "ssh-mcp-config.json").exists()
+        assert list(tmp_path.glob(".config_*.tmp")) == []
+
+    def test_chmod_failure_cleans_up_tmp(self, tmp_path, monkeypatch):
+        """If os.chmod fails, temp file is cleaned up."""
+        import lib.config
+
+        def _chmod_fail(path, mode, **kwargs):
+            # Accept **kwargs: shutil.copy2's internal copystat() also calls
+            # os.chmod with follow_symlinks; either call site must be fatal.
+            raise PermissionError("simulated chmod failure")
+
+        monkeypatch.setattr(lib.config.os, "chmod", _chmod_fail)
+
+        with pytest.raises(PermissionError, match="simulated chmod failure"):
+            lib.config.ConfigManager(str(tmp_path))
+
+        assert not (tmp_path / "ssh-mcp-config.json").exists()
+        assert list(tmp_path.glob(".config_*.tmp")) == []
+
+    def test_default_config_mode_is_restricted(self, tmp_path):
+        """Created default config has RESTRICTED_FILE_MODE permissions."""
+        import lib.config
+        import stat
+        from lib.constants import RESTRICTED_FILE_MODE
+
+        lib.config.ConfigManager(str(tmp_path))
+        config_file = tmp_path / "ssh-mcp-config.json"
+        assert config_file.exists()
+        assert stat.S_IMODE(config_file.stat().st_mode) == RESTRICTED_FILE_MODE
