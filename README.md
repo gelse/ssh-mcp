@@ -188,8 +188,9 @@ Security model: [`docs/SECURITY.md`](docs/SECURITY.md)
 
 **Architectural:**
 
-- Config API sessions are in-memory, single-instance, lost on
-  restart
+- Config API dashboard login sessions are in-memory only — they
+  don't survive restarts and the API is single-instance (config
+  changes themselves persist to the config file normally)
 - No tamper protection for audit logs
 
 ---

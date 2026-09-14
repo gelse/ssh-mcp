@@ -133,9 +133,11 @@ Valid sections: `ssh_targets`, `block_patterns`,
 - **Max age** — 3600 seconds hard expiry
 - **Idle timeout** — 1800 seconds of inactivity
 
-These limitations are acceptable for single-instance deployments.
-For multi-instance setups, use Bearer token auth instead of
-session cookies.
+These limitations apply only to **dashboard login sessions** —
+configuration changes made via the API are always persisted to the
+config file normally. These limitations are acceptable for
+single-instance deployments. For multi-instance setups, use Bearer
+token auth instead of session cookies.
 
 ---
 
