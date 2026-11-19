@@ -22,6 +22,9 @@
     /* Tab active */
     .tab-btn { border-bottom: 2px solid transparent; transition: border-color 0.15s, color 0.15s; }
     .tab-btn.active { border-bottom-color: #3b82f6; color: #1e40af; font-weight: 600; }
+    /* Rule-group tables: one divider above each rule group, whole-group hover */
+    .rule-group-start { border-top: 1px solid #e5e7eb; }
+    .rule-group-hover { background-color: #f9fafb; }
   </style>
 </head>
 <body class="bg-gray-100 min-h-screen">
@@ -1040,6 +1043,84 @@ function renderDefaultRules(container, rules) {
   });
 }
 
+// ===========================================================================
+// Rule-Group Rows (shared by API Key Rules and Network Rules)
+// ===========================================================================
+
+/**
+ * Append one table row per rule entry to a rules table body.
+ *
+ * Cells that must appear once per group (e.g. Name, Range, Actions) are built
+ * by the caller and passed as `leading` (before the Targets/Commands columns)
+ * and `trailing` (after them). They anchor the group's first row with rowspan
+ * so they span every entry's row and stay usable for any group size. Every row
+ * of the group shares whole-group hover highlighting, and only the group's
+ * first row carries the divider border, so a group reads as a single block.
+ *
+ * @param {HTMLTableSectionElement} tbody - table body to append rows to
+ * @param {Object} spec - rendering specification
+ * @param {HTMLElement[]} [spec.leading] - span cells before Targets/Commands
+ * @param {HTMLElement[]} [spec.trailing] - span cells after Targets/Commands
+ * @param {Array<Object>} [spec.entries] - rule entries in config order; when
+ *   empty, a single muted placeholder row is rendered instead
+ * @param {number} spec.placeholderColspan - colspan of the placeholder cell
+ *   covering the Targets/Commands columns
+ */
+function appendRuleGroupRows(tbody, spec) {
+  const leading = spec.leading || [];
+  const trailing = spec.trailing || [];
+  const entries = Array.isArray(spec.entries) ? spec.entries : [];
+  const rowSpan = Math.max(entries.length, 1);
+  const rows = [];
+
+  leading.concat(trailing).forEach((cell) => {
+    cell.rowSpan = rowSpan;
+    cell.classList.add('align-top');
+  });
+
+  if (entries.length === 0) {
+    const row = document.createElement('tr');
+    leading.forEach((cell) => row.appendChild(cell));
+    const placeholderCell = document.createElement('td');
+    placeholderCell.colSpan = spec.placeholderColspan;
+    placeholderCell.className = 'px-4 py-3 text-sm text-gray-500';
+    placeholderCell.textContent = 'No target configurations';
+    row.appendChild(placeholderCell);
+    trailing.forEach((cell) => row.appendChild(cell));
+    rows.push(row);
+  } else {
+    entries.forEach((entry, i) => {
+      const rule = entry || {};
+      const row = document.createElement('tr');
+      if (i === 0) leading.forEach((cell) => row.appendChild(cell));
+
+      const targetsCell = document.createElement('td');
+      targetsCell.className = 'px-4 py-3 text-sm';
+      targetsCell.textContent = (rule.targets || []).join(', ') || '(none)';
+      row.appendChild(targetsCell);
+
+      const cmdsCell = document.createElement('td');
+      cmdsCell.className = 'px-4 py-3 text-sm font-mono';
+      cmdsCell.textContent = (rule.commands || []).join(', ') || '(none)';
+      row.appendChild(cmdsCell);
+
+      if (i === 0) trailing.forEach((cell) => row.appendChild(cell));
+      rows.push(row);
+    });
+  }
+
+  // Exactly one divider above each group except the very first row of the
+  // table; rows within a group share a single highlight class so hovering any
+  // row of a rule highlights every row of that rule.
+  const needsDivider = tbody.children.length > 0;
+  rows.forEach((row, i) => {
+    if (i === 0 && needsDivider) row.classList.add('rule-group-start');
+    row.addEventListener('mouseenter', () => rows.forEach((r) => r.classList.add('rule-group-hover')));
+    row.addEventListener('mouseleave', () => rows.forEach((r) => r.classList.remove('rule-group-hover')));
+    tbody.appendChild(row);
+  });
+}
+
 function renderApiKeyRules(container, apiKeys, defaultRules) {
   // Header
   const header = document.createElement('div');
@@ -1069,7 +1150,6 @@ function renderApiKeyRules(container, apiKeys, defaultRules) {
   table.appendChild(thead);
 
   const tbody = document.createElement('tbody');
-  tbody.className = 'divide-y divide-gray-200';
 
   if (apiKeys.length === 0) {
     const emptyRow = document.createElement('tr');
@@ -1082,27 +1162,11 @@ function renderApiKeyRules(container, apiKeys, defaultRules) {
   }
 
   apiKeys.forEach((key, idx) => {
-    const row = document.createElement('tr');
-    row.className = 'hover:bg-gray-50';
-
     const nameCell = document.createElement('td');
     nameCell.className = 'px-4 py-3 font-medium text-sm';
     nameCell.textContent = key.name || `Key ${idx}`;
-    row.appendChild(nameCell);
 
     const rules = key.rules || [];
-    const allTargets = [...new Set(rules.flatMap(r => r.targets || []))];
-    const allCommands = [...new Set(rules.flatMap(r => r.commands || []))];
-
-    const targetsCell = document.createElement('td');
-    targetsCell.className = 'px-4 py-3 text-sm';
-    targetsCell.textContent = allTargets.join(', ') || '(none)';
-    row.appendChild(targetsCell);
-
-    const cmdsCell = document.createElement('td');
-    cmdsCell.className = 'px-4 py-3 text-sm font-mono';
-    cmdsCell.textContent = allCommands.join(', ') || '(none)';
-    row.appendChild(cmdsCell);
 
     const actionsCell = document.createElement('td');
     actionsCell.className = 'px-4 py-3';
@@ -1114,7 +1178,6 @@ function renderApiKeyRules(container, apiKeys, defaultRules) {
     deleteBtn.textContent = 'Delete';
     actionsCell.appendChild(editBtn);
     actionsCell.appendChild(deleteBtn);
-    row.appendChild(actionsCell);
 
     editBtn.addEventListener('click', () => {
       const editRuleTitle = `Edit Rules: ${key.name || `Key ${idx}`}`;
@@ -1168,7 +1231,12 @@ function renderApiKeyRules(container, apiKeys, defaultRules) {
       renderRules();
     });
 
-    tbody.appendChild(row);
+    appendRuleGroupRows(tbody, {
+      leading: [nameCell],
+      trailing: [actionsCell],
+      entries: rules,
+      placeholderColspan: 2,
+    });
   });
 
   table.appendChild(tbody);
@@ -1336,7 +1404,6 @@ function renderNetworkRules(container, networks) {
   table.appendChild(thead);
 
   const tbody = document.createElement('tbody');
-  tbody.className = 'divide-y divide-gray-200';
 
   if (networks.length === 0) {
     const emptyRow = document.createElement('tr');
@@ -1349,32 +1416,15 @@ function renderNetworkRules(container, networks) {
   }
 
   networks.forEach((net, idx) => {
-    const row = document.createElement('tr');
-    row.className = 'hover:bg-gray-50';
+    const rules = net.rules || [];
 
     const nameCell = document.createElement('td');
     nameCell.className = 'px-4 py-3 font-medium text-sm';
     nameCell.textContent = net.name || `Network ${idx}`;
-    row.appendChild(nameCell);
 
     const rangeCell = document.createElement('td');
     rangeCell.className = 'px-4 py-3 text-sm font-mono';
     rangeCell.textContent = net.range || '';
-    row.appendChild(rangeCell);
-
-    const rules = net.rules || [];
-    const allTargets = [...new Set(rules.flatMap(r => r.targets || []))];
-    const allCommands = [...new Set(rules.flatMap(r => r.commands || []))];
-
-    const targetsCell = document.createElement('td');
-    targetsCell.className = 'px-4 py-3 text-sm';
-    targetsCell.textContent = allTargets.join(', ') || '(none)';
-    row.appendChild(targetsCell);
-
-    const cmdsCell = document.createElement('td');
-    cmdsCell.className = 'px-4 py-3 text-sm font-mono';
-    cmdsCell.textContent = allCommands.join(', ') || '(none)';
-    row.appendChild(cmdsCell);
 
     const actionsCell = document.createElement('td');
     actionsCell.className = 'px-4 py-3';
@@ -1386,7 +1436,6 @@ function renderNetworkRules(container, networks) {
     deleteBtn.textContent = 'Delete';
     actionsCell.appendChild(editBtn);
     actionsCell.appendChild(deleteBtn);
-    row.appendChild(actionsCell);
 
     editBtn.addEventListener('click', () => {
       showModal('Edit Network Rule', () => {
@@ -1448,7 +1497,12 @@ function renderNetworkRules(container, networks) {
       renderRules();
     });
 
-    tbody.appendChild(row);
+    appendRuleGroupRows(tbody, {
+      leading: [nameCell, rangeCell],
+      trailing: [actionsCell],
+      entries: rules,
+      placeholderColspan: 2,
+    });
   });
 
   table.appendChild(tbody);
