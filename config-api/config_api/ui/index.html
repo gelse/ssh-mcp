@@ -25,6 +25,15 @@
     /* Rule-group tables: one divider above each rule group, whole-group hover */
     .rule-group-start { border-top: 1px solid #e5e7eb; }
     .rule-group-hover { background-color: #f9fafb; }
+    /* Inline-editable Commands cells (Network Rules): text cursor plus a dashed
+       underline hint on hover/focus; suppressed while the editor is open so the
+       affordance never fights the editing state or the group hover highlight */
+    .commands-cell { cursor: text; }
+    .commands-cell:not(.is-editing):hover,
+    .commands-cell:not(.is-editing):focus {
+      text-decoration: underline dashed;
+      text-underline-offset: 3px;
+    }
   </style>
 </head>
 <body class="bg-gray-100 min-h-screen">
@@ -1065,6 +1074,9 @@ function renderDefaultRules(container, rules) {
  *   empty, a single muted placeholder row is rendered instead
  * @param {number} spec.placeholderColspan - colspan of the placeholder cell
  *   covering the Targets/Commands columns
+ * @param {Function} [spec.onCommandsCell] - optional hook invoked as
+ *   (cell, entry, index) for every Commands cell so a caller can make it
+ *   interactive; when absent the cell stays plain text (API Key Rules)
  */
 function appendRuleGroupRows(tbody, spec) {
   const leading = spec.leading || [];
@@ -1101,7 +1113,8 @@ function appendRuleGroupRows(tbody, spec) {
 
       const cmdsCell = document.createElement('td');
       cmdsCell.className = 'px-4 py-3 text-sm font-mono';
-      cmdsCell.textContent = (rule.commands || []).join(', ') || '(none)';
+      cmdsCell.textContent = renderCommandsText(rule.commands);
+      if (typeof spec.onCommandsCell === 'function') spec.onCommandsCell(cmdsCell, entry, i);
       row.appendChild(cmdsCell);
 
       if (i === 0) trailing.forEach((cell) => row.appendChild(cell));
@@ -1375,6 +1388,287 @@ function renderApiKeyRules(container, apiKeys, defaultRules) {
   });
 }
 
+// ===========================================================================
+// Inline Commands Editor (Network Rules)
+// ===========================================================================
+
+/**
+ * Render a stored command list as read-only cell text.
+ *
+ * @param {string[]} [commands] - stored command list
+ * @returns {string} comma-joined commands, or '(none)' when the list is empty
+ */
+function renderCommandsText(commands) {
+  return (Array.isArray(commands) ? commands : []).join(', ') || '(none)';
+}
+
+/**
+ * Parse editor content into a command list: one command per line, each line
+ * trimmed, empty lines dropped; original order and duplicates are preserved.
+ *
+ * @param {string} text - raw textarea content
+ * @returns {string[]} parsed commands
+ */
+function parseCommandsText(text) {
+  return String(text).split('\n').map((line) => line.trim()).filter((line) => line !== '');
+}
+
+/**
+ * Compare two command lists element-wise.
+ *
+ * @param {string[]} a - first command list
+ * @param {string[]} b - second command list
+ * @returns {boolean} true when both lists hold the same commands in the same
+ *   order (non-arrays are treated as empty lists)
+ */
+function sameCommands(a, b) {
+  const left = Array.isArray(a) ? a : [];
+  const right = Array.isArray(b) ? b : [];
+  return left.length === right.length && left.every((value, i) => value === right[i]);
+}
+
+// Editor writes are applied strictly in the order the user made them: each
+// payload is built right before its PUT goes out, so it reflects every edit
+// committed while earlier requests were still in flight, and a slow earlier
+// request can never overwrite a newer one.
+let pendingCommandsPuts = Promise.resolve();
+
+/**
+ * Queue one allowed_commands PUT behind all editor PUTs already in flight.
+ *
+ * @param {Function} buildNetworks - called at send time; returns the payload's
+ *   networks array (freshly derived from the current in-memory state)
+ * @returns {Promise<Response>} resolves with the PUT response once sent
+ */
+function enqueueCommandsPut(buildNetworks) {
+  const run = pendingCommandsPuts.then(() =>
+    api('PUT', '/config/allowed_commands', { networks: buildNetworks() })
+  );
+  // Keep the chain alive after a rejected PUT so later edits still send.
+  pendingCommandsPuts = run.catch(() => {});
+  return run;
+}
+
+/**
+ * Make one Network Rules Commands cell inline-editable.
+ *
+ * Clicking or focusing the cell replaces its content with a textarea holding
+ * the entry's commands one per line. Blurring saves; Ctrl+Enter/Cmd+Enter
+ * saves immediately; Escape aborts and restores the previous text without any
+ * API call. Only the edited entry's `commands` value ever changes: the save
+ * body replaces exactly that entry (spread copy) inside exactly that network,
+ * leaving targets, sudo_allowed, name, range and every other network/entry
+ * untouched. An empty list deletes the entry after the existing confirm
+ * dialog; the last entry of a network is refused because the schema requires
+ * at least one rule. All config-derived text is written via textContent /
+ * textarea.value, never innerHTML.
+ *
+ * @param {HTMLTableCellElement} cell - the Commands cell to make editable
+ * @param {Object} entry - the rule entry this cell renders
+ * @param {number} entryIdx - index of the entry within its network's rules
+ * @param {Object} ctx - rendering context captured by the caller
+ * @param {Object[]} ctx.networks - full in-memory networks array
+ * @param {number} ctx.netIdx - index of the entry's network in `networks`
+ * @param {Object[]} ctx.rules - the network's rules array
+ */
+function makeCommandsCellEditable(cell, entry, entryIdx, ctx) {
+  if (!entry || typeof entry !== 'object') return;
+
+  const storedText = () => renderCommandsText(entry.commands);
+  const targetList = Array.isArray(entry.targets) ? entry.targets : [];
+
+  cell.classList.add('commands-cell');
+  cell.tabIndex = 0;
+  cell.title = 'Click to edit';
+  cell.setAttribute('aria-label', `Edit commands for ${targetList.join(', ') || '(none)'}`);
+
+  // Skip the reopen that refocusing the cell right after Escape would trigger.
+  let suppressNextOpen = false;
+  // While a PUT is in flight the cell holds the optimistic text and reopening
+  // would edit state a later failure is about to roll back, so the cell stays
+  // read-only until the request settles.
+  let saveInFlight = false;
+
+  function openEditor() {
+    if (suppressNextOpen) {
+      suppressNextOpen = false;
+      return;
+    }
+    if (saveInFlight) return;
+    if (cell.querySelector('textarea')) return;
+
+    const commands = Array.isArray(entry.commands) ? entry.commands : [];
+    const textarea = document.createElement('textarea');
+    textarea.value = commands.join('\n');
+    textarea.rows = Math.max(commands.length, 3);
+    textarea.className = 'w-full px-2 py-1 border border-gray-300 rounded text-sm font-mono';
+    textarea.setAttribute('aria-label', 'Commands, one per line');
+
+    // Idempotency guard: whichever of blur / Ctrl+Enter / Escape gets there
+    // first handles the edit exactly once; later triggers become no-ops.
+    let handled = false;
+
+    /** Close the editor and show `text` as the cell's read-only content. */
+    function close(text) {
+      textarea.remove();
+      cell.classList.remove('is-editing');
+      cell.textContent = text;
+    }
+
+    /** Abort the edit: restore the stored text, never call the API. */
+    function abort() {
+      if (handled) return;
+      handled = true;
+      close(storedText());
+      // Refocus the cell for keyboard users without letting its focus handler
+      // reopen the editor. focus() dispatches synchronously (consumed above);
+      // clear the flag afterwards so a skipped event cannot swallow the next
+      // legitimate focus-open.
+      suppressNextOpen = true;
+      cell.focus();
+      suppressNextOpen = false;
+    }
+
+    /** Read the server error message, falling back to `Fallback`. */
+    async function errorMessage(res, fallback) {
+      try {
+        const err = await res.json();
+        return err.message || fallback;
+      } catch (e) {
+        return fallback;
+      }
+    }
+
+    /**
+     * Parse, validate and persist the edit (blur / Ctrl+Enter entry point).
+     * Runs the edit exactly once: the guard makes later blur/Escape/Ctrl+Enter
+     * triggers no-ops, and `saveInFlight` keeps the cell read-only until the
+     * PUT settles.
+     */
+    async function commit() {
+      if (handled) return;
+      handled = true;
+      saveInFlight = true;
+      try {
+        await persist();
+      } finally {
+        saveInFlight = false;
+      }
+    }
+
+    /** Validate the parsed list and persist it (at most once per edit). */
+    async function persist() {
+      const parsed = parseCommandsText(textarea.value);
+
+      // No-op: identical list — close silently, no PUT, no toast.
+      if (sameCommands(parsed, entry.commands)) {
+        close(storedText());
+        return;
+      }
+
+      // The literal '*' wildcard is valid only as the sole command.
+      if (parsed.includes('*') && parsed.length > 1) {
+        close(storedText());
+        showToast("'*' must be the only command", 'error');
+        return;
+      }
+
+      // Empty list: this entry (targets and commands) would be deleted.
+      if (parsed.length === 0) {
+        close(storedText());
+        if (ctx.rules.length <= 1) {
+          showToast(
+            'A network rule needs at least one target configuration — delete the rule instead',
+            'error'
+          );
+          return;
+        }
+        const ok = await confirm('Do you want to delete the target?');
+        if (!ok) return;
+        let res;
+        try {
+          res = await enqueueCommandsPut(() =>
+            ctx.networks.map((network, i) =>
+              i === ctx.netIdx
+                ? { ...network, rules: ctx.rules.filter((_, j) => j !== entryIdx) }
+                : network
+            )
+          );
+        } catch (e) {
+          showToast('Failed to save', 'error');
+          return;
+        }
+        if (!res.ok) {
+          showToast(await errorMessage(res, 'Failed to save'), 'error');
+          return;
+        }
+        showToast('Target deleted');
+        renderRules();
+        return;
+      }
+
+      // Regular save: optimistic in-memory commit + read-only view, both
+      // reverted if the server refuses. Committing before the await keeps
+      // every later payload built from current state, so concurrent edits
+      // (or the Edit modal opened mid-save) never see stale commands.
+      const previous = entry.commands;
+      entry.commands = parsed;
+      close(parsed.join(', '));
+      let res;
+      try {
+        res = await enqueueCommandsPut(() =>
+          ctx.networks.map((network, i) =>
+            i === ctx.netIdx
+              ? {
+                  ...network,
+                  rules: ctx.rules.map((rule, j) =>
+                    j === entryIdx ? { ...rule, commands: parsed } : rule
+                  ),
+                }
+              : network
+          )
+        );
+      } catch (e) {
+        entry.commands = previous;
+        close(storedText());
+        showToast('Failed to save', 'error');
+        return;
+      }
+      if (!res.ok) {
+        entry.commands = previous;
+        close(storedText());
+        showToast(await errorMessage(res, 'Failed to save'), 'error');
+        return;
+      }
+      showToast('Commands updated');
+    }
+
+    textarea.addEventListener('blur', () => {
+      commit();
+    });
+    textarea.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        abort();
+        return;
+      }
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        commit();
+      }
+    });
+
+    cell.classList.add('is-editing');
+    cell.textContent = '';
+    cell.appendChild(textarea);
+    textarea.focus();
+  }
+
+  cell.addEventListener('click', openEditor);
+  cell.addEventListener('focus', openEditor);
+}
+
 function renderNetworkRules(container, networks) {
   // Header
   const header = document.createElement('div');
@@ -1502,6 +1796,8 @@ function renderNetworkRules(container, networks) {
       trailing: [actionsCell],
       entries: rules,
       placeholderColspan: 2,
+      onCommandsCell: (cmdsCell, entry, entryIdx) =>
+        makeCommandsCellEditable(cmdsCell, entry, entryIdx, { networks, netIdx: idx, rules }),
     });
   });
 
