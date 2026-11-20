@@ -578,7 +578,9 @@ async function renderTargets() {
         const privateKeyTA = el('textarea', 'w-full px-3 py-2 border rounded text-sm');
         privateKeyTA.id = 'm-private-key';
         privateKeyTA.rows = 3;
-        privateKeyTA.placeholder = 'Leave empty to keep unchanged';
+        privateKeyTA.placeholder = target.has_private_key
+          ? 'Leave empty to keep unchanged'
+          : 'No private key stored';
         const checkCmdInput = el('input', 'w-full px-3 py-2 border rounded text-sm');
         checkCmdInput.type = 'text';
         checkCmdInput.id = 'm-checkcommand';
@@ -591,15 +593,26 @@ async function renderTargets() {
         portGroup.querySelector('input').replaceWith(portInput);
         div.appendChild(portGroup);
         div.appendChild(makeFormGroup('Username', { id: 'm-username' }));
-        const passwordGroup = makeFormGroup('Password', { id: 'm-password', type: 'password', placeholder: 'Leave empty to keep unchanged' });
+        // Each removal checkbox sits directly under the field it clears, so it
+        // cannot be mistaken for an option on the next field.
+        const passwordGroup = makeFormGroup('Password', {
+          id: 'm-password',
+          type: 'password',
+          placeholder: target.has_password ? 'Leave empty to keep unchanged' : 'No password stored',
+        });
         div.appendChild(passwordGroup);
         const passwordInput = passwordGroup.querySelector('input');
-        const privateKeyGroup = makeFormGroup('Private Key', { id: 'm-private-key', type: 'textarea', rows: 3, placeholder: 'Leave empty to keep unchanged' });
-        privateKeyGroup.querySelector('textarea').replaceWith(privateKeyTA);
-        div.appendChild(privateKeyGroup);
         const removePasswordBox = target.has_password
           ? makeRemoveCheckbox(div, 'm-remove-password', 'Remove the stored password', passwordInput)
           : null;
+        const privateKeyGroup = makeFormGroup('Private Key', {
+          id: 'm-private-key',
+          type: 'textarea',
+          rows: 3,
+          placeholder: target.has_private_key ? 'Leave empty to keep unchanged' : 'No private key stored',
+        });
+        privateKeyGroup.querySelector('textarea').replaceWith(privateKeyTA);
+        div.appendChild(privateKeyGroup);
         const removeKeyBox = target.has_private_key
           ? makeRemoveCheckbox(div, 'm-remove-private-key', 'Remove the stored private key', privateKeyTA)
           : null;

@@ -119,8 +119,10 @@ new value replaces it:
 
 Deleting the last credential is rejected with 400 — the config needs at
 least one of `password` or `private_key` per target. In the dashboard, the
-Edit dialog offers a *Remove the stored password* checkbox (and the same
-for the key) whenever the server reports one is stored.
+Edit dialog offers a *Remove the stored password* checkbox directly under
+the password field, and the same for the key, whenever the server reports
+one is stored; when nothing is stored the field says so instead
+(*No password stored*).
 
 #### Sudoers generation
 
