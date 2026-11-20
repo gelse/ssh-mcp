@@ -1588,6 +1588,11 @@ function enqueueCommandsPut(buildBody) {
  * `sudo_allowed` are ever written; every other value in the payload is
  * preserved by spreading the untouched objects.
  *
+ * A command that is already listed is refused: pressing Enter on it shows the
+ * collision, keeps focus in that field and adds no row, and Save refuses while
+ * any collision remains. Values are compared and stored trimmed, so trailing
+ * whitespace cannot produce a second copy of the same command.
+ *
  * Commands that a default rule with the same targets also grants are shown
  * but not written back: those already in the rule render as fixed text with an
  * info marker, the remaining ones as grey italic rows that are added to the
@@ -1802,6 +1807,12 @@ function openCommandsModal(cell, entry, entryIdx, ctx) {
           moveToNextRow(row);
         }
       });
+      input.addEventListener('input', () => {
+        // Mark the field as it is typed, and drop a stale "already listed"
+        // error as soon as this field no longer collides.
+        const dup = refreshDuplicates();
+        if (!dup) clearError();
+      });
       row.input = input;
       cmdTd.appendChild(input);
     } else if (kind === 'shared') {
@@ -1860,6 +1871,7 @@ function openCommandsModal(cell, entry, entryIdx, ctx) {
         const i = rows.indexOf(row);
         if (i >= 0) rows.splice(i, 1);
         tr.remove();
+        if (!refreshDuplicates()) clearError();
       });
       row.removeBtn = removeBtn;
       removeTd.appendChild(removeBtn);
@@ -1900,6 +1912,7 @@ function openCommandsModal(cell, entry, entryIdx, ctx) {
     row.tr.remove();
     const gone = rows.indexOf(row);
     if (gone >= 0) rows.splice(gone, 1);
+    if (!refreshDuplicates()) clearError();
     if (spec.kind === 'own' && next.input) next.input.focus();
     return next;
   }
@@ -1915,9 +1928,80 @@ function openCommandsModal(cell, entry, entryIdx, ctx) {
   }
 
   /**
+   * Find another row that already shows *value*.
+   *
+   * Compared on trimmed text, so `uptime ` and `uptime` are the same command
+   * and stray whitespace cannot smuggle a second copy into the rule. Inherited
+   * rows count too: the modal already offers that command, as a grey row that
+   * is clicked to add it.
+   *
+   * @param {Object} row - the row being checked
+   * @param {string} value - its current (untrimmed) text
+   * @returns {Object|null} the conflicting row, or null
+   */
+  function conflictingRow(row, value) {
+    const wanted = value.trim();
+    if (!wanted) return null;
+    return rows.find((other) => other !== row && rowText(other) === wanted) || null;
+  }
+
+  /**
+   * Explain a duplicate in the words that fit the colliding row.
+   *
+   * @param {Object} dup - the conflicting row from conflictingRow
+   * @param {string} value - the trimmed command text
+   * @returns {string} inline error message
+   */
+  function duplicateMessage(dup, value) {
+    return dup.kind === 'inherited'
+      ? `'${value}' is already allowed by the default rule — click it in the list to add it to this rule`
+      : `'${value}' is already in this rule — remove the other entry first`;
+  }
+
+  /**
+   * The inline error for a colliding field, if it collides.
+   *
+   * @param {Object} row - row record
+   * @returns {string|null} message, or null when the row is clean
+   */
+  function duplicateErrorFor(row) {
+    if (!row || !row.input) return null;
+    const dup = conflictingRow(row, row.input.value);
+    return dup ? duplicateMessage(dup, rowText(row)) : null;
+  }
+
+  /**
+   * Flag every field whose trimmed text collides with another row, and clear
+   * the flag from the ones that do not.
+   *
+   * @returns {Object|null} the first conflicting row, or null when clean
+   */
+  function refreshDuplicates() {
+    let first = null;
+    rows.forEach((row) => {
+      if (!row.input) return;
+      const dup = conflictingRow(row, row.input.value);
+      if (dup && !first) first = row;
+      row.input.classList.toggle('border-red-500', !!dup);
+      row.input.classList.toggle('border-gray-300', !dup);
+      if (dup) {
+        row.input.setAttribute('aria-invalid', 'true');
+        row.input.title = duplicateMessage(dup, rowText(row));
+      } else {
+        row.input.removeAttribute('aria-invalid');
+        row.input.removeAttribute('title');
+      }
+    });
+    return first;
+  }
+
+  /**
    * Enter-key navigation: focus the next command field, or append a fresh
    * empty row when already on the bottom row. An empty bottom row is a no-op
    * so repeated Enter presses cannot stack blank rows.
+   *
+   * A duplicate is not committed: the value is trimmed in place, the collision
+   * is shown, and focus stays in the field so the user can correct it.
    *
    * @param {Object} row - the row whose input received Enter
    * @returns {void}
@@ -1925,13 +2009,22 @@ function openCommandsModal(cell, entry, entryIdx, ctx) {
   function moveToNextRow(row) {
     const i = rows.indexOf(row);
     if (i < 0) return;
+    const value = rowText(row);
+    if (row.input) row.input.value = value;
+    const dup = conflictingRow(row, value);
+    if (dup) {
+      refreshDuplicates();
+      showError(duplicateMessage(dup, value));
+      if (row.input) row.input.focus();
+      return;
+    }
     // Skip rows without a field (the greyed-out inherited commands).
     const nextField = rows.slice(i + 1).find((entry) => entry.input);
     if (nextField) {
       nextField.input.focus();
       return;
     }
-    if (!rowText(row)) return;
+    if (!value) return;
     promoteTrailing(row);
     const next = addRow({ command: '', trailing: true });
     next.input.focus();
@@ -2012,6 +2105,20 @@ function openCommandsModal(cell, entry, entryIdx, ctx) {
     if (commands.includes(SUDO_ALLOWED_WILDCARD) && commands.length > 1) {
       showError("'*' must be the only command");
       return;
+    }
+
+    // Duplicates mean the same command twice in one rule: refuse instead of
+    // storing them. The offending field keeps focus so it can be fixed.
+    const seen = new Set();
+    for (const command of commands) {
+      if (seen.has(command)) {
+        refreshDuplicates();
+        showError(`'${command}' is listed twice — remove one`);
+        const dupRow = rows.find((row) => row.input && rowText(row) === command);
+        if (dupRow) dupRow.input.focus();
+        return;
+      }
+      seen.add(command);
     }
 
     const storedCommands = Array.isArray(entry.commands) ? entry.commands : [];
@@ -2128,6 +2235,10 @@ function openCommandsModal(cell, entry, entryIdx, ctx) {
   const trailingRow = addRow({ command: '', trailing: true });
   if (inheritedOnly.length > 0) applySort('asc');
   (rows.find((row) => row.input) || trailingRow).input.focus();
+  // A hand-written config can carry the same command twice; flag it up front
+  // so the reason the save refuses is visible immediately.
+  const seededDup = refreshDuplicates();
+  if (seededDup) showError(duplicateErrorFor(seededDup));
 }
 
 /**
