@@ -25,11 +25,15 @@
     /* Rule-group tables: one divider above each rule group, whole-group hover */
     .rule-group-start { border-top: 1px solid #e5e7eb; }
     .rule-group-hover { background-color: #f9fafb; }
-    /* Editable Commands cells (Network Rules): text cursor plus a dashed
-       underline hint on hover/focus; the cell opens the commands modal */
-    .commands-cell { cursor: pointer; }
-    .commands-cell:hover,
-    .commands-cell:focus {
+    /* Editable Network Rules cells (Targets, Range, Commands): pointer cursor
+       plus a dashed underline hint on hover/focus; suppressed while the inline
+       range editor is open */
+    .commands-cell,
+    .editable-cell { cursor: pointer; }
+    .commands-cell:not(.is-editing):hover,
+    .commands-cell:not(.is-editing):focus,
+    .editable-cell:not(.is-editing):hover,
+    .editable-cell:not(.is-editing):focus {
       text-decoration: underline dashed;
       text-underline-offset: 3px;
     }
@@ -904,7 +908,7 @@ async function renderRules() {
     } else if (_rulesActiveTab === 'api_keys') {
       renderApiKeyRules(content, apiKeys, defaultRules);
     } else {
-      renderNetworkRules(content, networks);
+      renderNetworkRules(content, networks, Object.keys(config.ssh_targets || {}));
     }
 
   } catch (err) {
@@ -1078,6 +1082,9 @@ function renderDefaultRules(container, rules) {
  * @param {Function} [spec.onCommandsCell] - optional hook invoked as
  *   (cell, entry, index) for every Commands cell so a caller can make it
  *   interactive; when absent the cell stays plain text (API Key Rules)
+ * @param {Function} [spec.onTargetsCell] - optional hook invoked as
+ *   (cell, entry, index) for every Targets cell, used by Network Rules to open
+ *   the targets modal
  */
 function appendRuleGroupRows(tbody, spec) {
   const leading = spec.leading || [];
@@ -1109,7 +1116,8 @@ function appendRuleGroupRows(tbody, spec) {
 
       const targetsCell = document.createElement('td');
       targetsCell.className = 'px-4 py-3 text-sm';
-      targetsCell.textContent = (rule.targets || []).join(', ') || '(none)';
+      renderTargetsCell(targetsCell, rule.targets);
+      if (typeof spec.onTargetsCell === 'function') spec.onTargetsCell(targetsCell, entry, i);
       row.appendChild(targetsCell);
 
       const cmdsCell = document.createElement('td');
@@ -1992,7 +2000,667 @@ function attachCommandsEditor(cell, entry, entryIdx, ctx) {
   });
 }
 
-function renderNetworkRules(container, networks) {
+// ===========================================================================
+// Targets Modal + Range Editor (Network Rules)
+// ===========================================================================
+
+/** IPv4 dotted-quad check: four decimal octets, no leading zeros. */
+function isValidIPv4(address) {
+  const parts = address.split('.');
+  if (parts.length !== 4) return false;
+  return parts.every((part) => {
+    if (!/^\d{1,3}$/.test(part)) return false;
+    if (part.length > 1 && part.startsWith('0')) return false;
+    return Number(part) <= 255;
+  });
+}
+
+/**
+ * Check a CIDR string the same way lib/config.py does: IPv4 or IPv6, with or
+ * without a prefix length, host bits tolerated (e.g. '10.1.2.3/8' is accepted
+ * and a bare address means /32 or /128).
+ *
+ * @param {string} value - candidate range text
+ * @returns {boolean} true when the backend would accept the CIDR shape
+ */
+function isValidCidr(value) {
+  const text = String(value || '').trim();
+  if (!text) return false;
+  const slash = text.indexOf('/');
+  const address = slash === -1 ? text : text.slice(0, slash);
+  const prefixText = slash === -1 ? null : text.slice(slash + 1);
+  if (!address) return false;
+
+  const isV6 = address.includes(':');
+  if (isV6) {
+    try {
+      // The WHATWG URL parser validates and normalises IPv6 literals.
+      new URL(`http://[${address}]/`);
+    } catch (e) {
+      return false;
+    }
+  } else if (!isValidIPv4(address)) {
+    return false;
+  }
+
+  if (prefixText === null) return true;
+  if (!/^\d{1,3}$/.test(prefixText)) return false;
+  return Number(prefixText) <= (isV6 ? 128 : 32);
+}
+
+/**
+ * Render the read-only Targets cell content.
+ *
+ * @param {HTMLTableCellElement} cell - the Targets cell
+ * @param {string[]} targets - stored target list
+ * @returns {void}
+ */
+function renderTargetsCell(cell, targets) {
+  const list = Array.isArray(targets) ? targets : [];
+  cell.textContent = list.join(', ') || '(none)';
+}
+
+/**
+ * Make one Network Rules Targets cell open the targets modal.
+ *
+ * @param {HTMLTableCellElement} cell - the Targets cell
+ * @param {Object} entry - the rule entry this cell renders
+ * @param {number} entryIdx - index of the entry within its network's rules
+ * @param {Object} ctx - rendering context captured by the caller
+ * @returns {void}
+ */
+function attachTargetsEditor(cell, entry, entryIdx, ctx) {
+  if (!entry || typeof entry !== 'object') return;
+
+  cell.classList.add('editable-cell');
+  cell.tabIndex = 0;
+  cell.title = 'Click to edit';
+  const current = Array.isArray(entry.targets) ? entry.targets : [];
+  cell.setAttribute('aria-label', `Edit targets (${current.join(', ') || 'none'})`);
+
+  const open = () => openTargetsModal(cell, entry, entryIdx, ctx);
+  cell.addEventListener('click', open);
+  cell.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      open();
+    }
+  });
+}
+
+/**
+ * Open the modal targets editor for one Network Rules target configuration.
+ *
+ * A table holds one dropdown per target, listing only the targets that are not
+ * already used by another row (plus the row's own value). An "All targets"
+ * checkbox clears the list without touching anything until Save; unticking it
+ * brings the rows back. A trailing blank row appears only while unused targets
+ * remain. Save writes `["*"]` when All is ticked, otherwise the selected list;
+ * Delete removes the whole target configuration (last entry refused). Blur and
+ * backdrop clicks do nothing, Escape cancels, Ctrl/Cmd+Enter saves.
+ *
+ * @param {HTMLTableCellElement} cell - the Targets cell that opened the modal
+ * @param {Object} entry - the rule entry being edited
+ * @param {number} entryIdx - index of that entry inside its network's rules
+ * @param {Object} ctx - rendering context captured by the caller
+ * @param {Object[]} ctx.networks - full in-memory networks array
+ * @param {number} ctx.netIdx - index of the entry's network in `networks`
+ * @param {Object[]} ctx.rules - the network's rules array
+ * @param {string[]} ctx.sshTargets - configured SSH target ids
+ * @returns {void}
+ */
+function openTargetsModal(cell, entry, entryIdx, ctx) {
+  if (!entry || typeof entry !== 'object') return;
+
+  const allTargets = Array.isArray(ctx.sshTargets) ? ctx.sshTargets.slice() : [];
+  const storedTargets = Array.isArray(entry.targets) ? entry.targets.slice() : [];
+  const storedAll = storedTargets.includes('*');
+
+  const container = document.getElementById('modal-container');
+
+  // Overlay: inert on click — losing focus must never save or cancel.
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay fixed inset-0 z-40 flex items-center justify-center';
+
+  const card = document.createElement('div');
+  card.className = 'bg-white rounded-lg shadow-xl w-full max-w-xl mx-4 max-h-[90vh] flex flex-col';
+  overlay.appendChild(card);
+
+  // Header: title plus Save / Delete / Cancel on the right
+  const header = document.createElement('div');
+  header.className = 'flex items-center justify-between gap-4 px-6 py-4 border-b';
+  const h3 = document.createElement('h3');
+  h3.className = 'text-lg font-semibold truncate flex-1 min-w-0';
+  const networkName = (ctx.networks[ctx.netIdx] || {}).name || 'network';
+  h3.textContent = `Targets for ${networkName}`;
+
+  const actions = document.createElement('div');
+  actions.className = 'flex items-center gap-2 flex-shrink-0';
+
+  const saveBtn = document.createElement('button');
+  saveBtn.type = 'button';
+  saveBtn.id = 'm-targets-save';
+  saveBtn.className = 'px-3 py-1.5 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm';
+  saveBtn.textContent = 'Save';
+
+  const deleteBtn = document.createElement('button');
+  deleteBtn.type = 'button';
+  deleteBtn.id = 'm-targets-delete';
+  deleteBtn.className = 'px-3 py-1.5 bg-red-600 text-white rounded hover:bg-red-700 text-sm';
+  deleteBtn.textContent = 'Delete';
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.id = 'm-targets-cancel';
+  cancelBtn.className = 'px-3 py-1.5 text-gray-700 bg-gray-200 rounded hover:bg-gray-300 text-sm';
+  cancelBtn.textContent = 'Cancel';
+
+  actions.appendChild(saveBtn);
+  actions.appendChild(deleteBtn);
+  actions.appendChild(cancelBtn);
+  header.appendChild(h3);
+  header.appendChild(actions);
+  card.appendChild(header);
+
+  // Body
+  const body = document.createElement('div');
+  body.className = 'px-6 py-4 overflow-y-auto flex-1';
+
+  // "All targets" checkbox: clears the list on screen, persisted on Save only.
+  const allWrap = document.createElement('label');
+  allWrap.className = 'flex items-center gap-2 mb-4 text-sm text-gray-700 cursor-pointer';
+  const allBox = document.createElement('input');
+  allBox.type = 'checkbox';
+  allBox.id = 'm-targets-all';
+  allBox.className = 'h-4 w-4';
+  allBox.checked = storedAll;
+  const allLabel = document.createElement('span');
+  allLabel.textContent = 'All targets (*)';
+  allWrap.appendChild(allBox);
+  allWrap.appendChild(allLabel);
+  body.appendChild(allWrap);
+
+  const table = document.createElement('table');
+  table.id = 'm-targets-table';
+  table.className = 'min-w-full text-sm';
+  const thead = document.createElement('thead');
+  const headRow = document.createElement('tr');
+  [
+    { text: 'Target', className: 'text-left font-medium text-gray-600 pb-2 pr-2' },
+    { text: '', className: 'w-8' },
+  ].forEach((spec) => {
+    const th = document.createElement('th');
+    th.className = spec.className;
+    th.textContent = spec.text;
+    headRow.appendChild(th);
+  });
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+  const tbody = document.createElement('tbody');
+  table.appendChild(tbody);
+  body.appendChild(table);
+
+  const errorP = document.createElement('p');
+  errorP.id = 'm-targets-error';
+  errorP.className = 'text-red-600 text-sm mt-3 hidden';
+  body.appendChild(errorP);
+  card.appendChild(body);
+
+  container.appendChild(overlay);
+
+  const rows = [];
+  let busy = false;
+
+  /** Show an inline error, keeping the current selection. */
+  function showError(message) {
+    errorP.textContent = message;
+    errorP.classList.remove('hidden');
+  }
+
+  /** Clear the inline error area. */
+  function clearError() {
+    errorP.textContent = '';
+    errorP.classList.add('hidden');
+  }
+
+  /** Disable the header buttons while a request is in flight. */
+  function setBusy(next) {
+    busy = next;
+    [saveBtn, deleteBtn, cancelBtn].forEach((btn) => { btn.disabled = next; });
+    [saveBtn, deleteBtn, cancelBtn].forEach((btn) => btn.classList.toggle('opacity-50', next));
+  }
+
+  /** Close the modal without saving. */
+  function close() {
+    overlay.remove();
+  }
+
+  /** Apply the All-targets visibility toggle. */
+  function syncAllVisibility() {
+    table.classList.toggle('hidden', allBox.checked);
+  }
+
+  /**
+   * Fill a row's select with the options currently available to it.
+   *
+   * @param {Object} row - the row record
+   * @param {string[]} used - values selected by every row
+   * @returns {void}
+   */
+  function fillOptions(row, used) {
+    const own = row.select.value;
+    const previous = own;
+    row.select.textContent = '';
+    if (row.trailing) {
+      const blank = document.createElement('option');
+      blank.value = '';
+      blank.textContent = 'Select target…';
+      row.select.appendChild(blank);
+    }
+    const available = allTargets.filter(
+      (target) => target === previous || !used.includes(target)
+    );
+    // Keep a stale value visible so it can be inspected or removed.
+    if (previous && !available.includes(previous)) available.unshift(previous);
+    available.forEach((target) => {
+      const option = document.createElement('option');
+      option.value = target;
+      option.textContent = target;
+      row.select.appendChild(option);
+    });
+    row.select.value = available.includes(previous) ? previous : '';
+  }
+
+  /**
+   * Rebuild the option lists and keep exactly one trailing row while unused
+   * targets remain.
+   *
+   * @returns {void}
+   */
+  function sync() {
+    const used = rows
+      .filter((row) => !row.trailing)
+      .map((row) => row.select.value)
+      .filter(Boolean);
+    rows.forEach((row) => fillOptions(row, used));
+    const free = allTargets.filter((target) => !used.includes(target));
+    const trailingRows = rows.filter((row) => row.trailing);
+    if (free.length > 0 && trailingRows.length === 0) {
+      const row = addRow('', true);
+      fillOptions(row, used);
+    } else if (free.length === 0) {
+      trailingRows.forEach((row) => removeRow(row));
+    }
+    syncAllVisibility();
+  }
+
+  /**
+   * Append a row.
+   *
+   * @param {string} value - selected target
+   * @param {boolean} trailing - true for the blank "add target" row
+   * @returns {Object} the row record
+   */
+  function addRow(value, trailing) {
+    const tr = document.createElement('tr');
+
+    const selectTd = document.createElement('td');
+    selectTd.className = 'py-1 pr-2';
+    const select = document.createElement('select');
+    select.className = 'w-full px-2 py-1 border border-gray-300 rounded text-sm font-mono';
+    select.setAttribute('aria-label', 'Target');
+    selectTd.appendChild(select);
+
+    const removeTd = document.createElement('td');
+    removeTd.className = 'py-1 text-right';
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.textContent = '\u00d7';
+    removeBtn.title = 'Remove target';
+    removeBtn.setAttribute('aria-label', 'Remove target');
+    removeBtn.className = 'text-gray-400 hover:text-red-600 text-lg leading-none px-1';
+    removeTd.appendChild(removeBtn);
+
+    tr.appendChild(selectTd);
+    tr.appendChild(removeTd);
+    tbody.appendChild(tr);
+
+    const row = { tr, select, removeBtn, removeTd, trailing: !!trailing };
+    rows.push(row);
+
+    if (value) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = value;
+      select.appendChild(option);
+      select.value = value;
+    }
+    if (trailing) {
+      removeTd.classList.add('invisible');
+      removeBtn.disabled = true;
+    }
+
+    removeBtn.addEventListener('click', () => {
+      if (row.trailing) return;
+      removeRow(row);
+      sync();
+    });
+
+    select.addEventListener('change', () => {
+      if (!row.trailing && !select.value) return;
+      if (row.trailing && select.value) promoteTrailing(row);
+      sync();
+    });
+
+    return row;
+  }
+
+  /** Remove a row from the table and the model. */
+  function removeRow(row) {
+    const i = rows.indexOf(row);
+    if (i >= 0) rows.splice(i, 1);
+    row.tr.remove();
+  }
+
+  /** Turn the trailing row into a normal row once it holds a target. */
+  function promoteTrailing(row) {
+    row.trailing = false;
+    row.removeBtn.disabled = false;
+    row.removeTd.classList.remove('invisible');
+  }
+
+  /** Save the selection (header Save button, Ctrl/Cmd+Enter). */
+  async function doSave() {
+    if (busy) return;
+    clearError();
+
+    let targets;
+    if (allBox.checked) {
+      targets = ['*'];
+    } else {
+      targets = rows
+        .filter((row) => !row.trailing)
+        .map((row) => row.select.value)
+        .filter(Boolean);
+      const duplicate = targets.find((t, i) => targets.indexOf(t) !== i);
+      if (duplicate) {
+        showError(`Duplicate target: ${duplicate}`);
+        return;
+      }
+    }
+
+    if (targets.length === 0) {
+      const ok = await confirm('Are you sure you want to delete this target configuration?');
+      if (!ok) return;
+      await doDelete(true);
+      return;
+    }
+
+    const current = Array.isArray(entry.targets) ? entry.targets : [];
+    if (sameList(targets, current)) {
+      close();
+      return;
+    }
+
+    const previous = entry.targets;
+    entry.targets = targets;
+    setBusy(true);
+
+    let res;
+    try {
+      res = await enqueueCommandsPut(() =>
+        ctx.networks.map((network, i) =>
+          i === ctx.netIdx
+            ? { ...network, rules: ctx.rules.map((rule) => ({ ...rule })) }
+            : network
+        )
+      );
+    } catch (e) {
+      entry.targets = previous;
+      setBusy(false);
+      showError('Failed to save');
+      return;
+    }
+    if (!res.ok) {
+      entry.targets = previous;
+      setBusy(false);
+      showError(await responseErrorMessage(res, 'Failed to save'));
+      return;
+    }
+
+    close();
+    showToast('Targets updated');
+    renderTargetsCell(cell, targets);
+  }
+
+  /**
+   * Delete this target configuration (header Delete button, empty save).
+   *
+   * @param {boolean} alreadyConfirmed - true when the caller already asked
+   * @returns {Promise<void>} resolves once the modal closed or the request
+   *   failed (shown inline, modal stays open)
+   */
+  async function doDelete(alreadyConfirmed) {
+    if (busy) return;
+    clearError();
+    if (!alreadyConfirmed) {
+      const ok = await confirm('Are you sure you want to delete this target configuration?');
+      if (!ok) return;
+    }
+    if (ctx.rules.length <= 1) {
+      showError(
+        'A network rule needs at least one target configuration — delete the rule instead'
+      );
+      return;
+    }
+    setBusy(true);
+
+    let res;
+    try {
+      res = await enqueueCommandsPut(() =>
+        ctx.networks.map((network, i) =>
+          i === ctx.netIdx
+            ? { ...network, rules: ctx.rules.filter((_, j) => j !== entryIdx) }
+            : network
+        )
+      );
+    } catch (e) {
+      setBusy(false);
+      showError('Failed to save');
+      return;
+    }
+    if (!res.ok) {
+      setBusy(false);
+      showError(await responseErrorMessage(res, 'Failed to save'));
+      return;
+    }
+
+    close();
+    showToast('Target deleted');
+    renderRules();
+  }
+
+  saveBtn.addEventListener('click', () => { doSave(); });
+  deleteBtn.addEventListener('click', () => { doDelete(false); });
+  cancelBtn.addEventListener('click', close);
+
+  allBox.addEventListener('change', () => { clearError(); syncAllVisibility(); });
+
+  overlay.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      if (busy) return;
+      e.preventDefault();
+      e.stopPropagation();
+      close();
+      return;
+    }
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      doSave();
+    }
+  });
+
+  // Seed: one row per concrete stored target, then let sync() decide whether a
+  // trailing row is needed (it is not when every target is already used).
+  storedTargets.filter((target) => target !== '*').forEach((target) => addRow(target, false));
+  sync();
+  if (allBox.checked) {
+    syncAllVisibility();
+  } else {
+    const first = rows.find((row) => !row.trailing);
+    if (first) first.select.focus();
+  }
+}
+
+/**
+ * Make one Network Rules Range cell inline-editable.
+ *
+ * Clicking the cell turns the range into a text field. Enter or Ctrl/Cmd+Enter
+ * validates the CIDR and saves; a rejected or invalid value keeps the field
+ * editable with the wrong text and an inline message; Escape (and blur) cancel
+ * back to the stored range. Only this network's `range` is ever written.
+ *
+ * @param {HTMLTableCellElement} cell - the Range cell
+ * @param {Object} network - the network this cell renders
+ * @param {number} netIdx - index of that network in `networks`
+ * @param {Object} ctx - rendering context captured by the caller
+ * @returns {void}
+ */
+function attachRangeEditor(cell, network, netIdx, ctx) {
+  if (!network || typeof network !== 'object') return;
+
+  const stored = () => (typeof network.range === 'string' ? network.range : '');
+
+  cell.classList.add('editable-cell');
+  cell.tabIndex = 0;
+  cell.title = 'Click to edit';
+  cell.setAttribute('aria-label', `Edit CIDR range for ${network.name || 'network'}`);
+
+  let editing = false;
+
+  function open() {
+    if (editing) return;
+    // Only one inline editor may be open at a time.
+    const other = document.querySelector('td.is-editing');
+    if (other) return;
+
+    editing = true;
+    cell.classList.add('is-editing');
+    cell.textContent = '';
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.value = stored();
+    input.className = 'w-full px-2 py-1 border border-gray-300 rounded text-sm font-mono';
+    input.setAttribute('aria-label', 'CIDR range');
+    const errorP = document.createElement('p');
+    errorP.className = 'text-red-600 text-xs mt-1 hidden';
+    cell.appendChild(input);
+    cell.appendChild(errorP);
+    input.focus();
+    input.select();
+
+    let handled = false;
+    let busy = false;
+
+    /** Leave the editor, showing `text` as the read-only value. */
+    function close(text) {
+      editing = false;
+      cell.classList.remove('is-editing');
+      cell.textContent = text;
+    }
+
+    /** Show the inline error and keep the field editable. */
+    function showError(message) {
+      errorP.textContent = message;
+      errorP.classList.remove('hidden');
+      input.classList.add('border-red-500');
+      input.classList.remove('border-gray-300');
+    }
+
+    /** Validate, then persist the value (Enter / Ctrl+Enter). */
+    async function save() {
+      if (handled) return;
+      const value = input.value.trim();
+
+      if (value === stored()) {
+        handled = true;
+        close(stored());
+        return;
+      }
+      if (!isValidCidr(value)) {
+        showError('Not a valid CIDR');
+        return;
+      }
+
+      handled = true;
+      busy = true;
+      const previous = network.range;
+      // Optimistic in-memory commit keeps any queued payload current.
+      network.range = value;
+
+      let res;
+      try {
+        res = await enqueueCommandsPut(() =>
+          ctx.networks.map((networkEntry, i) =>
+            i === netIdx ? { ...networkEntry } : networkEntry
+          )
+        );
+      } catch (e) {
+        network.range = previous;
+        handled = false;
+        busy = false;
+        showError('Failed to save');
+        return;
+      }
+      if (!res.ok) {
+        network.range = previous;
+        handled = false;
+        busy = false;
+        showError(await responseErrorMessage(res, 'Failed to save'));
+        return;
+      }
+      close(value);
+      showToast('Range updated');
+    }
+
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        if (busy) return;
+        e.preventDefault();
+        e.stopPropagation();
+        handled = true;
+        close(stored());
+        return;
+      }
+      if (e.key === 'Enter') {
+        if (busy) return;
+        e.preventDefault();
+        save();
+      }
+    });
+
+    // Losing focus cancels: the stored range comes back, no request is sent.
+    input.addEventListener('blur', () => {
+      if (handled || busy) return;
+      handled = true;
+      close(stored());
+    });
+  }
+
+  cell.addEventListener('click', open);
+  cell.addEventListener('keydown', (e) => {
+    // Keys pressed inside the open editor belong to the input: letting them
+    // bubble would re-open the editor right after Enter closed it.
+    if (e.target !== cell) return;
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      open();
+    }
+  });
+}
+
+function renderNetworkRules(container, networks, sshTargets) {
   // Header
   const header = document.createElement('div');
   header.className = 'flex items-center justify-between mb-4';
@@ -2042,6 +2710,7 @@ function renderNetworkRules(container, networks) {
     const rangeCell = document.createElement('td');
     rangeCell.className = 'px-4 py-3 text-sm font-mono';
     rangeCell.textContent = net.range || '';
+    attachRangeEditor(rangeCell, net, idx, { networks });
 
     const actionsCell = document.createElement('td');
     actionsCell.className = 'px-4 py-3';
@@ -2122,6 +2791,10 @@ function renderNetworkRules(container, networks) {
       showSudo: true,
       onCommandsCell: (cmdsCell, entry, entryIdx) =>
         attachCommandsEditor(cmdsCell, entry, entryIdx, { networks, netIdx: idx, rules }),
+      onTargetsCell: (targetsCell, entry, entryIdx) =>
+        attachTargetsEditor(targetsCell, entry, entryIdx, {
+          networks, netIdx: idx, rules, sshTargets,
+        }),
     });
   });
 
