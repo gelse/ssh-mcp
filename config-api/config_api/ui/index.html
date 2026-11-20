@@ -25,7 +25,7 @@
     /* Rule-group tables: one divider above each rule group, whole-group hover */
     .rule-group-start { border-top: 1px solid #e5e7eb; }
     .rule-group-hover { background-color: #f9fafb; }
-    /* Editable Network Rules cells (Name, Range, Targets, Commands): pointer
+    /* Editable rules-table cells (Name, Range, Targets, Commands): pointer
        cursor plus a dashed underline hint on hover/focus; suppressed while an
        inline editor is open */
     .commands-cell,
@@ -904,7 +904,7 @@ async function renderRules() {
     main.appendChild(container);
 
     if (_rulesActiveTab === 'default') {
-      renderDefaultRules(content, defaultRules);
+      renderDefaultRules(content, defaultRules, Object.keys(config.ssh_targets || {}));
     } else if (_rulesActiveTab === 'api_keys') {
       renderApiKeyRules(content, apiKeys, defaultRules);
     } else {
@@ -916,7 +916,7 @@ async function renderRules() {
   }
 }
 
-function renderDefaultRules(container, rules) {
+function renderDefaultRules(container, rules, sshTargets) {
   // Header
   const header = document.createElement('div');
   header.className = 'flex items-center justify-between mb-4';
@@ -925,6 +925,16 @@ function renderDefaultRules(container, rules) {
   addBtn.textContent = 'Add Rule';
   header.appendChild(addBtn);
   container.appendChild(header);
+
+  const ctx = {
+    rules,
+    sshTargets,
+    emptyMessage: 'Default rules need at least one entry — add another first',
+    deletePrompt: 'Delete this rule?',
+    deletedToast: 'Rule deleted',
+    payload: (nextRules) => ({ default: nextRules }),
+    refresh: () => renderRules(),
+  };
 
   // Table
   const tableWrap = document.createElement('div');
@@ -963,62 +973,42 @@ function renderDefaultRules(container, rules) {
 
     const targetsCell = document.createElement('td');
     targetsCell.className = 'px-4 py-3 text-sm';
-    targetsCell.textContent = (rule.targets || []).join(', ');
+    renderTargetsCell(targetsCell, rule.targets);
+    attachTargetsEditor(targetsCell, rule, idx, { ...ctx, label: `default rule ${idx + 1}` });
     row.appendChild(targetsCell);
 
     const cmdsCell = document.createElement('td');
     cmdsCell.className = 'px-4 py-3 text-sm font-mono';
-    cmdsCell.textContent = (rule.commands || []).join(', ');
+    renderCommandsCell(cmdsCell, rule.commands, rule.sudo_allowed);
+    attachCommandsEditor(cmdsCell, rule, idx, { ...ctx, label: `default rule ${idx + 1}` });
     row.appendChild(cmdsCell);
 
     const actionsCell = document.createElement('td');
     actionsCell.className = 'px-4 py-3';
-    const editBtn = document.createElement('button');
-    editBtn.className = 'text-blue-600 hover:text-blue-800 text-sm mr-3';
-    editBtn.textContent = 'Edit';
     const deleteBtn = document.createElement('button');
     deleteBtn.className = 'text-red-600 hover:text-red-800 text-sm';
     deleteBtn.textContent = 'Delete';
-    actionsCell.appendChild(editBtn);
     actionsCell.appendChild(deleteBtn);
     row.appendChild(actionsCell);
 
-    editBtn.addEventListener('click', () => {
-      showModal('Edit Rule', () => {
-        const div = el('div', 'space-y-4');
-        div.appendChild(makeFormGroup('Targets (comma-separated)', { id: 'm-targets' }));
-        div.appendChild(makeFormGroup('Commands (comma-separated, or * for all)', { id: 'm-commands' }));
-        return div;
-      }, async (body) => {
-        const targets = body.querySelector('#m-targets').value.split(',').map(s => s.trim()).filter(Boolean);
-        const commands = body.querySelector('#m-commands').value.split(',').map(s => s.trim()).filter(Boolean);
-        if (!targets.length) throw new Error('At least one target is required');
-        if (!commands.length) throw new Error('At least one command is required');
-        const updated = [...rules];
-        updated[idx] = { targets, commands };
-        const r = await api('PUT', '/config/allowed_commands', { default: updated });
-        if (!r.ok) {
-          const err = await r.json();
-          throw new Error(err.message || 'Failed to save');
-        }
-        showToast('Rule updated');
-        renderRules();
-      },
-        (body) => {
-          body.querySelector('#m-targets').value = (rule.targets || []).join(', ');
-          body.querySelector('#m-commands').value = (rule.commands || []).join(', ');
-        }
-      );
-    });
-
     deleteBtn.addEventListener('click', async () => {
+      if (rules.length <= 1) {
+        showToast(ctx.emptyMessage, 'error');
+        return;
+      }
       const ok = await confirm('Delete this rule?');
       if (!ok) return;
-      const updated = rules.filter((_, i) => i !== idx);
-      const r = await api('PUT', '/config/allowed_commands', { default: updated });
-      if (!r.ok) {
-        const err = await r.json();
-        showToast(err.message || 'Failed to delete', 'error');
+      let res;
+      try {
+        res = await enqueueCommandsPut(() => ({
+          default: rules.filter((_, i) => i !== idx),
+        }));
+      } catch (e) {
+        showToast('Failed to save', 'error');
+        return;
+      }
+      if (!res.ok) {
+        showToast(await responseErrorMessage(res, 'Failed to delete'), 'error');
         return;
       }
       showToast('Rule deleted');
@@ -1032,26 +1022,22 @@ function renderDefaultRules(container, rules) {
   tableWrap.appendChild(table);
   container.appendChild(tableWrap);
 
-  addBtn.addEventListener('click', () => {
-    showModal('Add Rule', () => {
-      const div = el('div', 'space-y-4');
-      div.appendChild(makeFormGroup('Targets (comma-separated)', { id: 'm-targets', placeholder: 'e.g. server1, server2' }));
-      div.appendChild(makeFormGroup('Commands (comma-separated, or * for all)', { id: 'm-commands', placeholder: 'e.g. ls, df -h, *' }));
-      return div;
-    }, async (body) => {
-      const targets = body.querySelector('#m-targets').value.split(',').map(s => s.trim()).filter(Boolean);
-      const commands = body.querySelector('#m-commands').value.split(',').map(s => s.trim()).filter(Boolean);
-      if (!targets.length) throw new Error('At least one target is required');
-      if (!commands.length) throw new Error('At least one command is required');
-      const updated = [...rules, { targets, commands }];
-      const r = await api('PUT', '/config/allowed_commands', { default: updated });
-      if (!r.ok) {
-        const err = await r.json();
-        throw new Error(err.message || 'Failed to save');
-      }
-      showToast('Rule added');
-      renderRules();
-    });
+  // Default rules have nothing to ask for up front: a new rule arrives seeded
+  // with ls on all targets and is then edited in place.
+  addBtn.addEventListener('click', async () => {
+    let res;
+    try {
+      res = await enqueueCommandsPut(() => ({ default: [...rules, seededRule()] }));
+    } catch (e) {
+      showToast('Failed to save', 'error');
+      return;
+    }
+    if (!res.ok) {
+      showToast(await responseErrorMessage(res, 'Failed to add'), 'error');
+      return;
+    }
+    showToast('Rule added');
+    renderRules();
   });
 }
 
@@ -1078,13 +1064,14 @@ function renderDefaultRules(container, rules) {
  * @param {number} spec.placeholderColspan - colspan of the placeholder cell
  *   covering the Targets/Commands columns
  * @param {boolean} [spec.showSudo] - when true, sudo-allowed commands in a
- *   Commands cell render bold (Network Rules); other tabs stay plain text
+ *   Commands cell render bold (Network Rules, Default Rules); other tabs stay
+ *   plain text
  * @param {Function} [spec.onCommandsCell] - optional hook invoked as
  *   (cell, entry, index) for every Commands cell so a caller can make it
  *   interactive; when absent the cell stays plain text (API Key Rules)
  * @param {Function} [spec.onTargetsCell] - optional hook invoked as
- *   (cell, entry, index) for every Targets cell, used by Network Rules to open
- *   the targets modal
+ *   (cell, entry, index) for every Targets cell, used by Network Rules and
+ *   Default Rules to open the targets modal
  */
 function appendRuleGroupRows(tbody, spec) {
   const leading = spec.leading || [];
@@ -1402,7 +1389,7 @@ function renderApiKeyRules(container, apiKeys, defaultRules) {
 }
 
 // ===========================================================================
-// Commands Editor (Network Rules)
+// Commands Editor (Network Rules, Default Rules)
 // ===========================================================================
 
 /** Wildcard marker for sudo_allowed meaning "every command in the rule". */
@@ -1512,13 +1499,14 @@ let pendingCommandsPuts = Promise.resolve();
 /**
  * Queue one allowed_commands PUT behind all editor PUTs already in flight.
  *
- * @param {Function} buildNetworks - called at send time; returns the payload's
- *   networks array (freshly derived from the current in-memory state)
+ * @param {Function} buildBody - called at send time; returns the request body
+ *   (e.g. `{ networks }` or `{ default }`) freshly derived from the current
+ *   in-memory state
  * @returns {Promise<Response>} resolves with the PUT response once sent
  */
-function enqueueCommandsPut(buildNetworks) {
+function enqueueCommandsPut(buildBody) {
   const run = pendingCommandsPuts.then(() =>
-    api('PUT', '/config/allowed_commands', { networks: buildNetworks() })
+    api('PUT', '/config/allowed_commands', buildBody())
   );
   // Keep the chain alive after a rejected PUT so later edits still send.
   pendingCommandsPuts = run.catch(() => {});
@@ -1526,7 +1514,7 @@ function enqueueCommandsPut(buildNetworks) {
 }
 
 /**
- * Open the modal commands editor for one Network Rules target configuration.
+ * Open the modal commands editor for one rule's command list.
  *
  * The modal shows a table with one row per command: the command text and a
  * sudo checkbox. A trailing empty row adds new commands; Enter moves to the
@@ -1537,11 +1525,15 @@ function enqueueCommandsPut(buildNetworks) {
  *
  * @param {HTMLTableCellElement} cell - the Commands cell that opened the modal
  * @param {Object} entry - the rule entry being edited
- * @param {number} entryIdx - index of that entry inside its network's rules
- * @param {Object} ctx - rendering context captured by the caller
- * @param {Object[]} ctx.networks - full in-memory networks array
- * @param {number} ctx.netIdx - index of the entry's network in `networks`
- * @param {Object[]} ctx.rules - the network's rules array
+ * @param {number} entryIdx - index of that entry inside `ctx.rules`
+ * @param {Object} ctx - rules context captured by the caller
+ * @param {Object[]} ctx.rules - the live rules array of the owning section
+ * @param {string} ctx.emptyMessage - refusal shown when the last rule may not
+ *   be deleted
+ * @param {string} ctx.deletePrompt - confirmation asked before deleting
+ * @param {string} ctx.deletedToast - toast shown after a successful delete
+ * @param {Function} ctx.payload - (rules) => allowed_commands PUT body
+ * @param {Function} ctx.refresh - () => void, re-renders the owning table
  * @returns {void}
  */
 function openCommandsModal(cell, entry, entryIdx, ctx) {
@@ -1844,7 +1836,7 @@ function openCommandsModal(cell, entry, entryIdx, ctx) {
 
     // Nothing left to store: offer to delete the target configuration.
     if (commands.length === 0) {
-      const ok = await confirm('Are you sure you want to delete this target configuration?');
+      const ok = await confirm(ctx.deletePrompt);
       if (!ok) return;
       await doDelete(true);
       return;
@@ -1873,11 +1865,7 @@ function openCommandsModal(cell, entry, entryIdx, ctx) {
     let res;
     try {
       res = await enqueueCommandsPut(() =>
-        ctx.networks.map((network, i) =>
-          i === ctx.netIdx
-            ? { ...network, rules: ctx.rules.map((rule) => ({ ...rule })) }
-            : network
-        )
+        ctx.payload(ctx.rules.map((rule) => ({ ...rule })))
       );
     } catch (e) {
       entry.commands = previousCommands;
@@ -1910,13 +1898,11 @@ function openCommandsModal(cell, entry, entryIdx, ctx) {
     if (busy) return;
     clearError();
     if (!alreadyConfirmed) {
-      const ok = await confirm('Are you sure you want to delete this target configuration?');
+      const ok = await confirm(ctx.deletePrompt);
       if (!ok) return;
     }
     if (ctx.rules.length <= 1) {
-      showError(
-        'A network rule needs at least one target configuration — delete the rule instead'
-      );
+      showError(ctx.emptyMessage);
       return;
     }
     setBusy(true);
@@ -1924,11 +1910,7 @@ function openCommandsModal(cell, entry, entryIdx, ctx) {
     let res;
     try {
       res = await enqueueCommandsPut(() =>
-        ctx.networks.map((network, i) =>
-          i === ctx.netIdx
-            ? { ...network, rules: ctx.rules.filter((_, j) => j !== entryIdx) }
-            : network
-        )
+        ctx.payload(ctx.rules.filter((_, j) => j !== entryIdx))
       );
     } catch (e) {
       setBusy(false);
@@ -1942,8 +1924,8 @@ function openCommandsModal(cell, entry, entryIdx, ctx) {
     }
 
     close();
-    showToast('Target deleted');
-    renderRules();
+    showToast(ctx.deletedToast);
+    ctx.refresh();
   }
 
   saveBtn.addEventListener('click', () => { doSave(); });
@@ -1973,12 +1955,12 @@ function openCommandsModal(cell, entry, entryIdx, ctx) {
 }
 
 /**
- * Make one Network Rules Commands cell open the modal editor.
+ * Make one rules-table Commands cell open the modal editor.
  *
  * @param {HTMLTableCellElement} cell - the Commands cell
  * @param {Object} entry - the rule entry this cell renders
- * @param {number} entryIdx - index of the entry within its network's rules
- * @param {Object} ctx - rendering context captured by the caller
+ * @param {number} entryIdx - index of the entry inside `ctx.rules`
+ * @param {Object} ctx - rules context captured by the caller
  * @returns {void}
  */
 function attachCommandsEditor(cell, entry, entryIdx, ctx) {
@@ -2001,7 +1983,7 @@ function attachCommandsEditor(cell, entry, entryIdx, ctx) {
 }
 
 // ===========================================================================
-// Targets Modal + Range Editor (Network Rules)
+// Targets Modal, Range Editor, Inline Editor
 // ===========================================================================
 
 /** IPv4 dotted-quad check: four decimal octets, no leading zeros. */
@@ -2061,12 +2043,12 @@ function renderTargetsCell(cell, targets) {
 }
 
 /**
- * Make one Network Rules Targets cell open the targets modal.
+ * Make one rules-table Targets cell open the targets modal.
  *
  * @param {HTMLTableCellElement} cell - the Targets cell
  * @param {Object} entry - the rule entry this cell renders
- * @param {number} entryIdx - index of the entry within its network's rules
- * @param {Object} ctx - rendering context captured by the caller
+ * @param {number} entryIdx - index of the entry inside `ctx.rules`
+ * @param {Object} ctx - rules context captured by the caller
  * @returns {void}
  */
 function attachTargetsEditor(cell, entry, entryIdx, ctx) {
@@ -2089,7 +2071,7 @@ function attachTargetsEditor(cell, entry, entryIdx, ctx) {
 }
 
 /**
- * Open the modal targets editor for one Network Rules target configuration.
+ * Open the modal targets editor for one rule's targets.
  *
  * A table holds one dropdown per target, listing only the targets that are not
  * already used by another row (plus the row's own value). An "All targets"
@@ -2102,11 +2084,16 @@ function attachTargetsEditor(cell, entry, entryIdx, ctx) {
  * @param {HTMLTableCellElement} cell - the Targets cell that opened the modal
  * @param {Object} entry - the rule entry being edited
  * @param {number} entryIdx - index of that entry inside its network's rules
- * @param {Object} ctx - rendering context captured by the caller
- * @param {Object[]} ctx.networks - full in-memory networks array
- * @param {number} ctx.netIdx - index of the entry's network in `networks`
- * @param {Object[]} ctx.rules - the network's rules array
+ * @param {Object} ctx - rules context captured by the caller
+ * @param {Object[]} ctx.rules - the live rules array of the owning section
  * @param {string[]} ctx.sshTargets - configured SSH target ids
+ * @param {string} ctx.label - how the edited rule is named in the title
+ * @param {string} ctx.emptyMessage - refusal shown when the last rule may not
+ *   be deleted
+ * @param {string} ctx.deletePrompt - confirmation asked before deleting
+ * @param {string} ctx.deletedToast - toast shown after a successful delete
+ * @param {Function} ctx.payload - (rules) => allowed_commands PUT body
+ * @param {Function} ctx.refresh - () => void, re-renders the owning table
  * @returns {void}
  */
 function openTargetsModal(cell, entry, entryIdx, ctx) {
@@ -2131,8 +2118,7 @@ function openTargetsModal(cell, entry, entryIdx, ctx) {
   header.className = 'flex items-center justify-between gap-4 px-6 py-4 border-b';
   const h3 = document.createElement('h3');
   h3.className = 'text-lg font-semibold truncate flex-1 min-w-0';
-  const networkName = (ctx.networks[ctx.netIdx] || {}).name || 'network';
-  h3.textContent = `Targets for ${networkName}`;
+  h3.textContent = `Targets for ${ctx.label}`;
 
   const actions = document.createElement('div');
   actions.className = 'flex items-center gap-2 flex-shrink-0';
@@ -2390,7 +2376,7 @@ function openTargetsModal(cell, entry, entryIdx, ctx) {
     }
 
     if (targets.length === 0) {
-      const ok = await confirm('Are you sure you want to delete this target configuration?');
+      const ok = await confirm(ctx.deletePrompt);
       if (!ok) return;
       await doDelete(true);
       return;
@@ -2409,11 +2395,7 @@ function openTargetsModal(cell, entry, entryIdx, ctx) {
     let res;
     try {
       res = await enqueueCommandsPut(() =>
-        ctx.networks.map((network, i) =>
-          i === ctx.netIdx
-            ? { ...network, rules: ctx.rules.map((rule) => ({ ...rule })) }
-            : network
-        )
+        ctx.payload(ctx.rules.map((rule) => ({ ...rule })))
       );
     } catch (e) {
       entry.targets = previous;
@@ -2444,13 +2426,11 @@ function openTargetsModal(cell, entry, entryIdx, ctx) {
     if (busy) return;
     clearError();
     if (!alreadyConfirmed) {
-      const ok = await confirm('Are you sure you want to delete this target configuration?');
+      const ok = await confirm(ctx.deletePrompt);
       if (!ok) return;
     }
     if (ctx.rules.length <= 1) {
-      showError(
-        'A network rule needs at least one target configuration — delete the rule instead'
-      );
+      showError(ctx.emptyMessage);
       return;
     }
     setBusy(true);
@@ -2458,11 +2438,7 @@ function openTargetsModal(cell, entry, entryIdx, ctx) {
     let res;
     try {
       res = await enqueueCommandsPut(() =>
-        ctx.networks.map((network, i) =>
-          i === ctx.netIdx
-            ? { ...network, rules: ctx.rules.filter((_, j) => j !== entryIdx) }
-            : network
-        )
+        ctx.payload(ctx.rules.filter((_, j) => j !== entryIdx))
       );
     } catch (e) {
       setBusy(false);
@@ -2476,8 +2452,8 @@ function openTargetsModal(cell, entry, entryIdx, ctx) {
     }
 
     close();
-    showToast('Target deleted');
-    renderRules();
+    showToast(ctx.deletedToast);
+    ctx.refresh();
   }
 
   saveBtn.addEventListener('click', () => { doSave(); });
@@ -2513,13 +2489,41 @@ function openTargetsModal(cell, entry, entryIdx, ctx) {
 }
 
 /**
- * Rules every new network starts with: `ls` on all targets, so the network is
- * valid the moment it is created and can be widened in the table afterwards.
+ * The rule every new network and every newly added default rule starts with:
+ * `ls` on all targets, so the rule is valid immediately and can be widened in
+ * the table afterwards.
  *
- * @returns {Object[]} a fresh single-rule list
+ * @returns {Object} a fresh rule entry
  */
-function newNetworkRules() {
-  return [{ targets: ['*'], commands: ['ls'] }];
+function seededRule() {
+  return { targets: ['*'], commands: ['ls'] };
+}
+
+/**
+ * Build the editor context for one network's rules.
+ *
+ * @param {Object[]} networks - all networks, mutated in place by the editors
+ * @param {number} netIdx - index of the edited network in `networks`
+ * @param {string[]} sshTargets - configured SSH target ids
+ * @returns {Object} context shared by the targets, commands and inline editors
+ */
+function networkRulesContext(networks, netIdx, sshTargets) {
+  const network = networks[netIdx] || {};
+  return {
+    rules: network.rules || [],
+    sshTargets,
+    label: network.name || `Network ${netIdx}`,
+    emptyMessage:
+      'A network rule needs at least one target configuration — delete the rule instead',
+    deletePrompt: 'Are you sure you want to delete this target configuration?',
+    deletedToast: 'Target deleted',
+    payload: (nextRules) => ({
+      networks: networks.map((entry, i) =>
+        i === netIdx ? { ...entry, rules: nextRules } : entry
+      ),
+    }),
+    refresh: () => renderRules(),
+  };
 }
 
 /**
@@ -2529,7 +2533,7 @@ function newNetworkRules() {
 let activeInlineEditor = null;
 
 /**
- * Make a Network Rules table cell inline-editable.
+ * Make a rules-table cell inline-editable.
  *
  * Clicking the cell turns its text into a field. Enter, Ctrl/Cmd+Enter and
  * losing focus all validate the value and save it; an invalid or rejected
@@ -2699,9 +2703,9 @@ async function saveNetworkField(network, key, value, netIdx, ctx) {
 
   let res;
   try {
-    res = await enqueueCommandsPut(() =>
-      ctx.networks.map((entry, i) => (i === netIdx ? { ...entry } : entry))
-    );
+    res = await enqueueCommandsPut(() => ({
+      networks: ctx.networks.map((entry, i) => (i === netIdx ? { ...entry } : entry)),
+    }));
   } catch (e) {
     network[key] = previous;
     return 'Failed to save';
@@ -2838,6 +2842,7 @@ function renderNetworkRules(container, networks, sshTargets) {
       renderRules();
     });
 
+    const rulesCtx = networkRulesContext(networks, idx, sshTargets);
     appendRuleGroupRows(tbody, {
       leading: [nameCell, rangeCell],
       trailing: [actionsCell],
@@ -2845,11 +2850,9 @@ function renderNetworkRules(container, networks, sshTargets) {
       placeholderColspan: 2,
       showSudo: true,
       onCommandsCell: (cmdsCell, entry, entryIdx) =>
-        attachCommandsEditor(cmdsCell, entry, entryIdx, { networks, netIdx: idx, rules }),
+        attachCommandsEditor(cmdsCell, entry, entryIdx, rulesCtx),
       onTargetsCell: (targetsCell, entry, entryIdx) =>
-        attachTargetsEditor(targetsCell, entry, entryIdx, {
-          networks, netIdx: idx, rules, sshTargets,
-        }),
+        attachTargetsEditor(targetsCell, entry, entryIdx, rulesCtx),
     });
   });
 
@@ -2875,7 +2878,7 @@ function renderNetworkRules(container, networks, sshTargets) {
       if (!isValidCidr(range)) throw new Error('Not a valid CIDR');
       const updatedNetworks = [
         ...networks,
-        { name, range, rules: newNetworkRules() },
+        { name, range, rules: [seededRule()] },
       ];
       const r = await api('PUT', '/config/allowed_commands', { networks: updatedNetworks });
       if (!r.ok) {
