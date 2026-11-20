@@ -125,6 +125,25 @@ function el(tag, className) {
   return e;
 }
 
+function makeRemoveCheckbox(container, id, labelText, field) {
+  // A destructive option sits below the field it clears, and disables that
+  // field while it is checked so the two cannot disagree.
+  const group = el('label', 'flex items-center gap-2 text-sm text-red-700');
+  const box = document.createElement('input');
+  box.type = 'checkbox';
+  box.id = id;
+  const text = el('span');
+  text.textContent = labelText;
+  group.appendChild(box);
+  group.appendChild(text);
+  container.appendChild(group);
+  box.addEventListener('change', () => {
+    field.disabled = box.checked;
+    if (box.checked) field.value = '';
+  });
+  return box;
+}
+
 function makeFormGroup(labelText, opts) {
   const group = el('div');
   const label = el('label', 'block text-sm font-medium text-gray-700 mb-1');
@@ -518,14 +537,32 @@ async function renderTargets() {
       editBtn.className = 'text-blue-600 hover:text-blue-800 text-sm mr-3';
       editBtn.textContent = 'Edit';
 
+      const sudoersBtn = document.createElement('button');
+      sudoersBtn.className = 'text-purple-600 hover:text-purple-800 text-sm mr-3';
+      sudoersBtn.textContent = 'Sudoers';
+      sudoersBtn.title = 'Generate a sudoers file from the configured sudo commands';
+
       const deleteBtn = document.createElement('button');
       deleteBtn.className = 'text-red-600 hover:text-red-800 text-sm';
       deleteBtn.textContent = 'Delete';
 
       actionsCell.appendChild(checkBtn);
       actionsCell.appendChild(editBtn);
+      actionsCell.appendChild(sudoersBtn);
       actionsCell.appendChild(deleteBtn);
       row.appendChild(actionsCell);
+
+      // Sudoers handler
+      sudoersBtn.addEventListener('click', async () => {
+        sudoersBtn.disabled = true;
+        sudoersBtn.textContent = 'Generating...';
+        try {
+          await openSudoersDialog(name);
+        } finally {
+          sudoersBtn.disabled = false;
+          sudoersBtn.textContent = 'Sudoers';
+        }
+      });
 
       // Edit handler
       editBtn.addEventListener('click', () => {
@@ -541,22 +578,47 @@ async function renderTargets() {
         const privateKeyTA = el('textarea', 'w-full px-3 py-2 border rounded text-sm');
         privateKeyTA.id = 'm-private-key';
         privateKeyTA.rows = 3;
-        privateKeyTA.placeholder = 'Leave empty to keep unchanged';
+        privateKeyTA.placeholder = target.has_private_key
+          ? 'Leave empty to keep unchanged'
+          : 'No private key stored';
         const checkCmdInput = el('input', 'w-full px-3 py-2 border rounded text-sm');
         checkCmdInput.type = 'text';
         checkCmdInput.id = 'm-checkcommand';
         checkCmdInput.placeholder = 'echo ping';
-        div.appendChild(makeFormGroup('Name', { id: 'm-name' }));
-        div.children[0].querySelector('input').replaceWith(nameInput);
+        const nameGroup = makeFormGroup('Name', { id: 'm-name' });
+        nameGroup.querySelector('input').replaceWith(nameInput);
+        div.appendChild(nameGroup);
         div.appendChild(makeFormGroup('Host', { id: 'm-host' }));
-        div.appendChild(makeFormGroup('Port', { id: 'm-port', type: 'number' }));
-        div.children[2].querySelector('input').replaceWith(portInput);
+        const portGroup = makeFormGroup('Port', { id: 'm-port', type: 'number' });
+        portGroup.querySelector('input').replaceWith(portInput);
+        div.appendChild(portGroup);
         div.appendChild(makeFormGroup('Username', { id: 'm-username' }));
-        div.appendChild(makeFormGroup('Password', { id: 'm-password', type: 'password', placeholder: 'Leave empty to keep unchanged' }));
-        div.appendChild(makeFormGroup('Private Key', { id: 'm-private-key', type: 'textarea', rows: 3, placeholder: 'Leave empty to keep unchanged' }));
-        div.children[5].querySelector('textarea').replaceWith(privateKeyTA);
-        div.appendChild(makeFormGroup('Check Command', { id: 'm-checkcommand', placeholder: 'echo ping' }));
-        div.children[6].querySelector('input').replaceWith(checkCmdInput);
+        // Each removal checkbox sits directly under the field it clears, so it
+        // cannot be mistaken for an option on the next field.
+        const passwordGroup = makeFormGroup('Password', {
+          id: 'm-password',
+          type: 'password',
+          placeholder: target.has_password ? 'Leave empty to keep unchanged' : 'No password stored',
+        });
+        div.appendChild(passwordGroup);
+        const passwordInput = passwordGroup.querySelector('input');
+        const removePasswordBox = target.has_password
+          ? makeRemoveCheckbox(div, 'm-remove-password', 'Remove the stored password', passwordInput)
+          : null;
+        const privateKeyGroup = makeFormGroup('Private Key', {
+          id: 'm-private-key',
+          type: 'textarea',
+          rows: 3,
+          placeholder: target.has_private_key ? 'Leave empty to keep unchanged' : 'No private key stored',
+        });
+        privateKeyGroup.querySelector('textarea').replaceWith(privateKeyTA);
+        div.appendChild(privateKeyGroup);
+        const removeKeyBox = target.has_private_key
+          ? makeRemoveCheckbox(div, 'm-remove-private-key', 'Remove the stored private key', privateKeyTA)
+          : null;
+        const checkGroup = makeFormGroup('Check Command', { id: 'm-checkcommand', placeholder: 'echo ping' });
+        checkGroup.querySelector('input').replaceWith(checkCmdInput);
+        div.appendChild(checkGroup);
         showModal(
           'Edit Target',
           () => div,
@@ -570,8 +632,18 @@ async function renderTargets() {
           if (!host) throw new Error('Host is required');
           if (!username) throw new Error('Username is required');
           const payload = { host, port, username };
-          if (password) payload.password = password;
-          if (privateKey) payload.private_key = privateKey;
+          // An explicit null deletes the stored credential; an empty field
+          // keeps whatever is already saved on the server.
+          if (removePasswordBox && body.querySelector('#m-remove-password').checked) {
+            payload.password = null;
+          } else if (password) {
+            payload.password = password;
+          }
+          if (removeKeyBox && body.querySelector('#m-remove-private-key').checked) {
+            payload.private_key = null;
+          } else if (privateKey) {
+            payload.private_key = privateKey;
+          }
           if (checkcommand) payload.checkcommand = checkcommand;
           const r = await api('PUT', `/config/ssh_targets/${encodeURIComponent(name)}`, payload);
           if (!r.ok) {
@@ -672,6 +744,190 @@ async function renderTargets() {
 
   } catch (err) {
     main.innerHTML = `<div class="p-6 text-red-600">Error: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Sudoers dialog — generate the per-target /etc/sudoers.d drop-in
+// ---------------------------------------------------------------------------
+
+async function openSudoersDialog(name) {
+  let doc;
+  try {
+    const r = await api('GET', `/config/ssh_targets/${encodeURIComponent(name)}/sudoers`);
+    if (!r.ok) {
+      let detail = r.statusText || `HTTP ${r.status}`;
+      try {
+        const err = await r.json();
+        if (err && err.message) detail = err.message;
+      } catch (e) {
+        // Not JSON — keep the status text.
+      }
+      showToast(`Sudoers generation failed: ${detail}`, 'error');
+      return;
+    }
+    doc = await r.json();
+  } catch (err) {
+    showToast(`Sudoers generation failed: ${err.message}`, 'error');
+    return;
+  }
+  showSudoersModal(doc);
+}
+
+function sudoersNotice(title, items, className) {
+  const box = el('div', `rounded border px-3 py-2 text-sm ${className}`);
+  const heading = el('p', 'font-medium');
+  heading.textContent = title;
+  box.appendChild(heading);
+  const list = el('ul', 'list-disc pl-5');
+  items.forEach((item) => {
+    const li = el('li');
+    li.textContent = item;
+    list.appendChild(li);
+  });
+  box.appendChild(list);
+  return box;
+}
+
+function downloadTextFile(filename, text) {
+  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function showSudoersModal(doc) {
+  const container = document.getElementById('modal-container');
+
+  const overlay = el('div', 'modal-overlay fixed inset-0 z-40 flex items-center justify-center');
+  const card = el('div', 'bg-white rounded-lg shadow-xl w-full max-w-2xl mx-4 max-h-[90vh] flex flex-col');
+
+  // Header
+  const header = el('div', 'flex items-center justify-between px-6 py-4 border-b');
+  const h2 = el('h3', 'text-lg font-semibold');
+  h2.textContent = `Sudoers File — ${doc.target}`;
+  const closeIcon = el('button', 'text-gray-400 hover:text-gray-600 text-xl');
+  closeIcon.textContent = '\u00d7';
+  header.appendChild(h2);
+  header.appendChild(closeIcon);
+  card.appendChild(header);
+
+  // Body
+  const body = el('div', 'px-6 py-4 overflow-y-auto flex-1 space-y-3');
+
+  const intro = el('p', 'text-sm text-gray-700');
+  intro.textContent = doc.content
+    ? `Grants user "${doc.username}" exactly the sudo commands the mcp-ssh config allows for this target, with any arguments. It applies to the machine you install it on.`
+    : `No sudoers file was generated for "${doc.target}".`;
+  body.appendChild(intro);
+
+  if (doc.unresolved && doc.unresolved.length) {
+    body.appendChild(sudoersNotice(
+      `Not found on ${doc.host} — commented out in the file:`,
+      doc.unresolved,
+      'bg-yellow-50 border-yellow-300 text-yellow-800',
+    ));
+  }
+  if (doc.skipped && doc.skipped.length) {
+    body.appendChild(sudoersNotice(
+      'Skipped, because the rule grants sudo for every command:',
+      doc.skipped,
+      'bg-red-50 border-red-300 text-red-800',
+    ));
+  }
+  if (doc.invalid && doc.invalid.length) {
+    body.appendChild(sudoersNotice(
+      'Ignored, because these are not command names:',
+      doc.invalid,
+      'bg-yellow-50 border-yellow-300 text-yellow-800',
+    ));
+  }
+  if (doc.notes && doc.notes.length) {
+    body.appendChild(sudoersNotice(
+      'Notes:', doc.notes, 'bg-gray-50 border-gray-300 text-gray-700',
+    ));
+  }
+
+  if (doc.content) {
+    const filenameP = el('p', 'text-sm text-gray-600');
+    filenameP.textContent = `Suggested file name: ${doc.filename}`;
+    body.appendChild(filenameP);
+
+    const pre = el('pre', 'bg-gray-100 p-3 rounded font-mono text-xs overflow-x-auto whitespace-pre');
+    pre.id = 'sudoers-text';
+    pre.textContent = doc.content;
+    body.appendChild(pre);
+
+    const stepsP = el('p', 'text-sm font-medium text-gray-800');
+    stepsP.textContent = 'Install on the target host:';
+    body.appendChild(stepsP);
+    const steps = el('ol', 'list-decimal pl-5 text-sm font-mono text-gray-700 space-y-1');
+    [
+      `visudo -c -f ${doc.filename}`,
+      `install -m 0440 -o root -g root ${doc.filename} /etc/sudoers.d/${doc.filename}`,
+      'visudo -c',
+    ].forEach((step) => {
+      const li = el('li');
+      li.textContent = step;
+      steps.appendChild(li);
+    });
+    body.appendChild(steps);
+  } else {
+    const hint = el('p', 'text-sm text-gray-600');
+    hint.textContent = 'Fix the notes above (configure sudo commands for this target and make sure it is reachable), then generate again.';
+    body.appendChild(hint);
+  }
+
+  card.appendChild(body);
+
+  // Footer
+  const footer = el('div', 'flex justify-end gap-3 px-6 py-4 border-t');
+  const copyBtn = el('button', 'px-4 py-2 text-gray-700 bg-gray-200 rounded hover:bg-gray-300 text-sm disabled:opacity-50 disabled:cursor-not-allowed');
+  copyBtn.id = 'sudoers-copy';
+  copyBtn.textContent = 'Copy';
+  const downloadBtn = el('button', 'px-4 py-2 text-gray-700 bg-gray-200 rounded hover:bg-gray-300 text-sm disabled:opacity-50 disabled:cursor-not-allowed');
+  downloadBtn.id = 'sudoers-download';
+  downloadBtn.textContent = 'Download';
+  const closeBtn = el('button', 'px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm');
+  closeBtn.id = 'sudoers-close';
+  closeBtn.textContent = 'Close';
+  footer.appendChild(copyBtn);
+  footer.appendChild(downloadBtn);
+  footer.appendChild(closeBtn);
+  card.appendChild(footer);
+
+  overlay.appendChild(card);
+  container.appendChild(overlay);
+
+  function close() {
+    overlay.remove();
+  }
+
+  closeIcon.addEventListener('click', close);
+  closeBtn.addEventListener('click', close);
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) close();
+  });
+
+  if (!doc.content) {
+    copyBtn.disabled = true;
+    downloadBtn.disabled = true;
+  } else {
+    copyBtn.addEventListener('click', () => {
+      if (!navigator.clipboard) { showToast('Clipboard unavailable', 'error'); return; }
+      navigator.clipboard.writeText(doc.content)
+        .then(() => showToast('Sudoers file copied'))
+        .catch(() => showToast('Copy failed', 'error'));
+    });
+    downloadBtn.addEventListener('click', () => {
+      downloadTextFile(doc.filename, doc.content);
+      showToast(`Downloaded ${doc.filename}`);
+    });
   }
 }
 
@@ -1588,6 +1844,11 @@ function enqueueCommandsPut(buildBody) {
  * `sudo_allowed` are ever written; every other value in the payload is
  * preserved by spreading the untouched objects.
  *
+ * A command that is already listed is refused: pressing Enter on it shows the
+ * collision, keeps focus in that field and adds no row, and Save refuses while
+ * any collision remains. Values are compared and stored trimmed, so trailing
+ * whitespace cannot produce a second copy of the same command.
+ *
  * Commands that a default rule with the same targets also grants are shown
  * but not written back: those already in the rule render as fixed text with an
  * info marker, the remaining ones as grey italic rows that are added to the
@@ -1802,6 +2063,12 @@ function openCommandsModal(cell, entry, entryIdx, ctx) {
           moveToNextRow(row);
         }
       });
+      input.addEventListener('input', () => {
+        // Mark the field as it is typed, and drop a stale "already listed"
+        // error as soon as this field no longer collides.
+        const dup = refreshDuplicates();
+        if (!dup) clearError();
+      });
       row.input = input;
       cmdTd.appendChild(input);
     } else if (kind === 'shared') {
@@ -1860,6 +2127,7 @@ function openCommandsModal(cell, entry, entryIdx, ctx) {
         const i = rows.indexOf(row);
         if (i >= 0) rows.splice(i, 1);
         tr.remove();
+        if (!refreshDuplicates()) clearError();
       });
       row.removeBtn = removeBtn;
       removeTd.appendChild(removeBtn);
@@ -1900,6 +2168,7 @@ function openCommandsModal(cell, entry, entryIdx, ctx) {
     row.tr.remove();
     const gone = rows.indexOf(row);
     if (gone >= 0) rows.splice(gone, 1);
+    if (!refreshDuplicates()) clearError();
     if (spec.kind === 'own' && next.input) next.input.focus();
     return next;
   }
@@ -1915,9 +2184,80 @@ function openCommandsModal(cell, entry, entryIdx, ctx) {
   }
 
   /**
+   * Find another row that already shows *value*.
+   *
+   * Compared on trimmed text, so `uptime ` and `uptime` are the same command
+   * and stray whitespace cannot smuggle a second copy into the rule. Inherited
+   * rows count too: the modal already offers that command, as a grey row that
+   * is clicked to add it.
+   *
+   * @param {Object} row - the row being checked
+   * @param {string} value - its current (untrimmed) text
+   * @returns {Object|null} the conflicting row, or null
+   */
+  function conflictingRow(row, value) {
+    const wanted = value.trim();
+    if (!wanted) return null;
+    return rows.find((other) => other !== row && rowText(other) === wanted) || null;
+  }
+
+  /**
+   * Explain a duplicate in the words that fit the colliding row.
+   *
+   * @param {Object} dup - the conflicting row from conflictingRow
+   * @param {string} value - the trimmed command text
+   * @returns {string} inline error message
+   */
+  function duplicateMessage(dup, value) {
+    return dup.kind === 'inherited'
+      ? `'${value}' is already allowed by the default rule — click it in the list to add it to this rule`
+      : `'${value}' is already in this rule — remove the other entry first`;
+  }
+
+  /**
+   * The inline error for a colliding field, if it collides.
+   *
+   * @param {Object} row - row record
+   * @returns {string|null} message, or null when the row is clean
+   */
+  function duplicateErrorFor(row) {
+    if (!row || !row.input) return null;
+    const dup = conflictingRow(row, row.input.value);
+    return dup ? duplicateMessage(dup, rowText(row)) : null;
+  }
+
+  /**
+   * Flag every field whose trimmed text collides with another row, and clear
+   * the flag from the ones that do not.
+   *
+   * @returns {Object|null} the first conflicting row, or null when clean
+   */
+  function refreshDuplicates() {
+    let first = null;
+    rows.forEach((row) => {
+      if (!row.input) return;
+      const dup = conflictingRow(row, row.input.value);
+      if (dup && !first) first = row;
+      row.input.classList.toggle('border-red-500', !!dup);
+      row.input.classList.toggle('border-gray-300', !dup);
+      if (dup) {
+        row.input.setAttribute('aria-invalid', 'true');
+        row.input.title = duplicateMessage(dup, rowText(row));
+      } else {
+        row.input.removeAttribute('aria-invalid');
+        row.input.removeAttribute('title');
+      }
+    });
+    return first;
+  }
+
+  /**
    * Enter-key navigation: focus the next command field, or append a fresh
    * empty row when already on the bottom row. An empty bottom row is a no-op
    * so repeated Enter presses cannot stack blank rows.
+   *
+   * A duplicate is not committed: the value is trimmed in place, the collision
+   * is shown, and focus stays in the field so the user can correct it.
    *
    * @param {Object} row - the row whose input received Enter
    * @returns {void}
@@ -1925,13 +2265,22 @@ function openCommandsModal(cell, entry, entryIdx, ctx) {
   function moveToNextRow(row) {
     const i = rows.indexOf(row);
     if (i < 0) return;
+    const value = rowText(row);
+    if (row.input) row.input.value = value;
+    const dup = conflictingRow(row, value);
+    if (dup) {
+      refreshDuplicates();
+      showError(duplicateMessage(dup, value));
+      if (row.input) row.input.focus();
+      return;
+    }
     // Skip rows without a field (the greyed-out inherited commands).
     const nextField = rows.slice(i + 1).find((entry) => entry.input);
     if (nextField) {
       nextField.input.focus();
       return;
     }
-    if (!rowText(row)) return;
+    if (!value) return;
     promoteTrailing(row);
     const next = addRow({ command: '', trailing: true });
     next.input.focus();
@@ -2012,6 +2361,20 @@ function openCommandsModal(cell, entry, entryIdx, ctx) {
     if (commands.includes(SUDO_ALLOWED_WILDCARD) && commands.length > 1) {
       showError("'*' must be the only command");
       return;
+    }
+
+    // Duplicates mean the same command twice in one rule: refuse instead of
+    // storing them. The offending field keeps focus so it can be fixed.
+    const seen = new Set();
+    for (const command of commands) {
+      if (seen.has(command)) {
+        refreshDuplicates();
+        showError(`'${command}' is listed twice — remove one`);
+        const dupRow = rows.find((row) => row.input && rowText(row) === command);
+        if (dupRow) dupRow.input.focus();
+        return;
+      }
+      seen.add(command);
     }
 
     const storedCommands = Array.isArray(entry.commands) ? entry.commands : [];
@@ -2128,6 +2491,10 @@ function openCommandsModal(cell, entry, entryIdx, ctx) {
   const trailingRow = addRow({ command: '', trailing: true });
   if (inheritedOnly.length > 0) applySort('asc');
   (rows.find((row) => row.input) || trailingRow).input.focus();
+  // A hand-written config can carry the same command twice; flag it up front
+  // so the reason the save refuses is visible immediately.
+  const seededDup = refreshDuplicates();
+  if (seededDup) showError(duplicateErrorFor(seededDup));
 }
 
 /**

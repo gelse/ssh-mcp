@@ -477,6 +477,49 @@ When ``"*"`` appears in a rule's ``sudo_allowed``, every command in that
 rule's ``commands`` list is permitted to run with ``sudo``.
 """
 
+# =============================================================================
+# Sudoers Drop-in Generation
+# =============================================================================
+
+SUDOERS_DROPIN_DIR: str = "/etc/sudoers.d"
+"""Directory the generated sudoers file is meant to be installed into."""
+
+SUDOERS_FILENAME_PREFIX: str = "mcp-ssh-"
+"""Prefix of the generated file name.
+
+The remainder is the target identifier with every character outside
+``[A-Za-z0-9_-]`` replaced: sudo silently ignores files in
+:data:`SUDOERS_DROPIN_DIR` whose name contains a dot, and target
+identifiers may.
+"""
+
+SUDOERS_FILENAME_UNSAFE_PATTERN: str = r"[^A-Za-z0-9_-]"
+"""Characters replaced in the generated file name.
+
+Only the file name is sanitized: the document itself holds a single user
+specification naming absolute paths, with no alias names to spell.
+"""
+
+SUDOERS_COMMAND_NAME_PATTERN: str = r"[A-Za-z0-9][A-Za-z0-9._+-]*"
+"""Full-match pattern for a command name taken from the config.
+
+A rule stores the command's base name.  Values outside this set (paths,
+whitespace, shell metacharacters) are reported as unresolved rather than
+interpolated into a sudoers line.
+"""
+
+SUDOERS_PATH_PATTERN: str = r"/[A-Za-z0-9._+/-]*"
+"""Full-match pattern for a resolved absolute path.
+
+sudoers cannot quote a command path, so a path containing whitespace or
+other characters outside this set is reported as unresolved.
+"""
+
+SUDOERS_RESOLVE_TIMEOUT_SECONDS: int = 15
+"""Timeout for the single SSH call that resolves command paths."""
+
+SUDOERS_RESOLVE_MAX_OUTPUT_BYTES: int = 65_536
+"""Maximum output read from the path-resolution call."""
 
 # =============================================================================
 # Rate-Limiting Defaults

@@ -1261,6 +1261,8 @@ class TestPutSshTarget:
         assert result["host"] == "10.0.0.2"
         assert result["port"] == 2222
         assert "password" not in result
+        assert result["has_password"] is True
+        assert result["has_private_key"] is False
 
     def test_replaces_existing_target(
         self, service: "ConfigService"
@@ -1360,6 +1362,79 @@ class TestPutSshTarget:
         )
         raw = service.read_config()
         assert raw["ssh_targets"]["test-server"]["password"] == "secret123"
+
+    def test_null_password_removes_the_stored_secret(
+        self, service: "ConfigService"
+    ) -> None:
+        """An explicit null deletes the stored password."""
+        # A key keeps the target valid once the password is gone.
+        config = service.read_config()
+        config["ssh_targets"]["test-server"]["private_key"] = "/app/ssh_key"
+        service.write_config(config)
+
+        result = service.put_ssh_target(
+            "test-server",
+            {"host": "10.0.0.1", "port": 22, "username": "admin", "password": None},
+        )
+
+        assert result["has_password"] is False
+        assert result["has_private_key"] is True
+        raw = service.read_config()
+        assert "password" not in raw["ssh_targets"]["test-server"]
+        assert raw["ssh_targets"]["test-server"]["private_key"] == "/app/ssh_key"
+
+    def test_null_private_key_removes_the_stored_key(
+        self, service: "ConfigService"
+    ) -> None:
+        """An explicit null deletes the stored private key."""
+        result = service.put_ssh_target(
+            "test-server",
+            {"host": "10.0.0.1", "port": 22, "username": "admin",
+             "private_key": None},
+        )
+
+        assert result["has_private_key"] is False
+        raw = service.read_config()
+        assert "private_key" not in raw["ssh_targets"]["test-server"]
+        assert raw["ssh_targets"]["test-server"]["password"] == "secret123"
+
+    def test_removing_the_only_credential_is_rejected(
+        self, service: "ConfigService"
+    ) -> None:
+        """A target must keep at least one credential."""
+        with pytest.raises(ConfigValidationError, match="private_key"):
+            service.put_ssh_target(
+                "test-server",
+                {"host": "10.0.0.1", "port": 22, "username": "admin",
+                 "password": None},
+            )
+
+        raw = service.read_config()
+        assert raw["ssh_targets"]["test-server"]["password"] == "secret123"
+
+    def test_removing_an_absent_secret_is_a_no_op(
+        self, service: "ConfigService"
+    ) -> None:
+        """Null on a target that never had the field does not fail."""
+        result = service.put_ssh_target(
+            "test-server",
+            {"host": "10.0.0.1", "port": 22, "username": "admin",
+             "private_key": None},
+        )
+
+        assert result["has_private_key"] is False
+        raw = service.read_config()
+        assert raw["ssh_targets"]["test-server"]["password"] == "secret123"
+
+    def test_has_flags_reported_on_read(
+        self, service: "ConfigService"
+    ) -> None:
+        """Reads report which credentials exist without exposing them."""
+        target = service.get_ssh_target("test-server")
+
+        assert target["has_password"] is True
+        assert target["has_private_key"] is False
+        assert "password" not in target
 
     def test_replaces_password_when_new_value_provided(
         self, service: "ConfigService"
@@ -2262,3 +2337,175 @@ class TestCheckSSHTarget:
             result = svc.check_ssh_target("test-server")
 
         assert result["checkcommand"] == "echo ping"
+
+
+# ---------------------------------------------------------------------------
+# Sudoers generation
+# ---------------------------------------------------------------------------
+
+
+def _config_with_sudo_grants() -> dict:
+    """Return a config whose default rule grants sudo for two commands."""
+    cfg = _minimal_config()
+    cfg["allowed_commands"] = {
+        "default": [
+            {
+                "targets": ["*"],
+                "commands": ["docker", "ha"],
+                "sudo_allowed": ["docker", "ha"],
+            }
+        ],
+        "api_keys": [],
+        "networks": [],
+    }
+    return cfg
+
+
+class TestGenerateSudoers:
+    """Tests for ConfigService.generate_sudoers()."""
+
+    @pytest.fixture()
+    def svc(self, tmp_path: Path) -> "ConfigService":
+        """ConfigService backed by a config that grants sudo on test-server."""
+        from config_api.config_service import ConfigService
+
+        _write_config(
+            tmp_path / DEFAULT_CONFIG_FILENAME, _config_with_sudo_grants()
+        )
+        return ConfigService(config_dir=str(tmp_path))
+
+    def test_unknown_target_raises_key_error(self, svc) -> None:
+        """An unknown target is rejected."""
+        with pytest.raises(KeyError, match="nope"):
+            svc.generate_sudoers("nope")
+
+    def test_no_grants_produces_no_content(self, tmp_path: Path) -> None:
+        """A target no rule grants sudo for yields an empty document."""
+        from config_api.config_service import ConfigService
+
+        cfg = _config_with_sudo_grants()
+        cfg["ssh_targets"]["other"] = {
+            "host": "10.0.0.2",
+            "port": 22,
+            "username": "admin",
+        }
+        cfg["allowed_commands"]["default"][0]["targets"] = ["test-server"]
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, cfg)
+        svc_inst = ConfigService(config_dir=str(tmp_path))
+
+        doc = svc_inst.generate_sudoers("other")
+
+        assert doc["target"] == "other"
+        assert doc["content"] == ""
+        assert doc["resolved"] == []
+        assert doc["unresolved"] == []
+        assert any("No rule allows" in note for note in doc["notes"])
+
+    def test_metadata_fields(self, svc) -> None:
+        """Filename, alias and identity come from the config."""
+        doc = svc.generate_sudoers("test-server")
+
+        assert doc["username"] == "admin"
+        assert doc["host"] == "10.0.0.1"
+        assert doc["filename"] == "mcp-ssh-test-server"
+
+    def test_standalone_mode_reports_unresolved(self, svc) -> None:
+        """Without direct SSH the commands are unresolved and explained."""
+        assert svc._use_direct_ssh is False
+
+        doc = svc.generate_sudoers("test-server")
+
+        assert doc["content"] == ""
+        assert doc["unresolved"] == ["docker", "ha"]
+        assert doc["resolved"] == []
+        assert any("Path resolution" in note for note in doc["notes"])
+
+    def test_unified_mode_renders_resolved_paths(self, svc) -> None:
+        """Resolved paths are rendered into the document."""
+        svc._ssh_client_manager = MagicMock()
+        svc._ssh_config_manager = MagicMock()
+        fake_ops = MagicMock()
+        fake_ops.resolve_command_paths.return_value = {
+            "docker": "/usr/bin/docker",
+            "ha": None,
+        }
+
+        with patch(
+            "config_api.config_service._ssh_operations_module", fake_ops
+        ):
+            doc = svc.generate_sudoers("test-server")
+
+        assert doc["resolved"] == [
+            {"command": "docker", "path": "/usr/bin/docker"}
+        ]
+        assert doc["unresolved"] == ["ha"]
+        assert (
+            "admin ALL = (root) NOPASSWD: /usr/bin/docker\n" in doc["content"]
+        )
+        assert "# not found on 10.0.0.1: ha" in doc["content"]
+        fake_ops.resolve_command_paths.assert_called_once()
+        kwargs = fake_ops.resolve_command_paths.call_args.kwargs
+        assert kwargs["commands"] == ["docker", "ha"]
+        assert kwargs["target_name"] == "test-server"
+
+    def test_unified_mode_all_unresolved_produces_no_content(self, svc) -> None:
+        """When nothing resolves, the document carries no file."""
+        svc._ssh_client_manager = MagicMock()
+        svc._ssh_config_manager = MagicMock()
+        fake_ops = MagicMock()
+        fake_ops.resolve_command_paths.return_value = {
+            "docker": None,
+            "ha": None,
+        }
+
+        with patch(
+            "config_api.config_service._ssh_operations_module", fake_ops
+        ):
+            doc = svc.generate_sudoers("test-server")
+
+        assert doc["content"] == ""
+        assert doc["unresolved"] == ["docker", "ha"]
+        assert any("No command could be resolved" in n for n in doc["notes"])
+
+    def test_unusable_path_is_reported(self, svc) -> None:
+        """A path sudoers cannot take is treated as unresolved."""
+        svc._ssh_client_manager = MagicMock()
+        svc._ssh_config_manager = MagicMock()
+        fake_ops = MagicMock()
+        fake_ops.resolve_command_paths.return_value = {
+            "docker": "/opt/my tools/docker",
+            "ha": "/usr/local/bin/ha",
+        }
+
+        with patch(
+            "config_api.config_service._ssh_operations_module", fake_ops
+        ):
+            doc = svc.generate_sudoers("test-server")
+
+        assert doc["unresolved"] == ["docker"]
+        assert any("cannot be written" in n for n in doc["notes"])
+        assert "/usr/local/bin/ha" in doc["content"]
+
+    def test_skipped_rules_are_reported(self, tmp_path: Path) -> None:
+        """An unrestricted rule is skipped and surfaced in the document."""
+        from config_api.config_service import ConfigService
+
+        cfg = _minimal_config()
+        cfg["allowed_commands"] = {
+            "default": [
+                {
+                    "targets": ["*"],
+                    "commands": ["*"],
+                    "sudo_allowed": ["*"],
+                }
+            ],
+            "api_keys": [],
+            "networks": [],
+        }
+        _write_config(tmp_path / DEFAULT_CONFIG_FILENAME, cfg)
+        svc_inst = ConfigService(config_dir=str(tmp_path))
+
+        doc = svc_inst.generate_sudoers("test-server")
+
+        assert doc["skipped"] == ["default: sudo for every command"]
+        assert doc["content"] == ""

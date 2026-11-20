@@ -876,6 +876,64 @@ class TestPutSingleSSHTarget:
         )
         assert response.status_code == 200
 
+    def test_edit_removes_password_with_null(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """An explicit null in PUT deletes the stored password."""
+        svc = client.app.state.config_service
+        config = svc.read_config()
+        config["ssh_targets"]["test-server"]["private_key"] = "/app/ssh_key"
+        svc.write_config(config)
+
+        response = client.put(
+            "/config/ssh_targets/test-server",
+            json={
+                "host": "10.0.0.1",
+                "port": 22,
+                "username": "admin",
+                "password": None,
+            },
+            headers=auth_headers,
+        )
+
+        assert response.status_code == 200
+        assert response.json()["has_password"] is False
+        assert response.json()["has_private_key"] is True
+        assert "password" not in svc.read_config()["ssh_targets"]["test-server"]
+
+    def test_edit_removing_last_credential_returns_400(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """A target cannot be left without a password or a key."""
+        response = client.put(
+            "/config/ssh_targets/test-server",
+            json={
+                "host": "10.0.0.1",
+                "port": 22,
+                "username": "admin",
+                "password": None,
+            },
+            headers=auth_headers,
+        )
+
+        assert response.status_code == 400
+        assert "private_key" in response.json()["message"]
+
+    def test_get_reports_which_credentials_exist(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """GET returns has_password/has_private_key and no secret value."""
+        response = client.get(
+            "/config/ssh_targets/test-server",
+            headers=auth_headers,
+        )
+
+        body = response.json()
+        assert body["has_password"] is True
+        assert body["has_private_key"] is False
+        assert "password" not in body
+        assert "private_key" not in body
+
     def test_rejects_invalid_name(
         self, client: TestClient, auth_headers: dict[str, str],
     ) -> None:
@@ -2215,3 +2273,87 @@ class TestSessionEndpoint:
             cookies={"config_api_session": "deadbeef" * 8},
         )
         assert response.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# GET /api/config/ssh_targets/{name}/sudoers
+# ---------------------------------------------------------------------------
+
+
+class TestGetSudoers:
+    """Tests for GET /config/ssh_targets/{name}/sudoers."""
+
+    def test_unknown_target_returns_404(
+        self, client: TestClient, auth_headers: dict[str, str]
+    ) -> None:
+        """An unknown target is a 404, not a 500."""
+        response = client.get(
+            "/config/ssh_targets/nope/sudoers", headers=auth_headers
+        )
+
+        assert response.status_code == 404
+        assert response.json()["error_type"] == "KeyError"
+
+    def test_requires_auth(self, client: TestClient) -> None:
+        """The endpoint is behind the usual bearer token."""
+        response = client.get("/config/ssh_targets/test-server/sudoers")
+
+        assert response.status_code == 401
+
+    def test_returns_document(
+        self, client: TestClient, auth_headers: dict[str, str]
+    ) -> None:
+        """The service document is returned verbatim."""
+        doc = {
+            "target": "test-server",
+            "username": "admin",
+            "host": "10.0.0.1",
+            "filename": "mcp-ssh-test-server",
+            "content": "admin ALL = (root) NOPASSWD: /usr/bin/ls\n",
+            "resolved": [{"command": "ls", "path": "/usr/bin/ls"}],
+            "unresolved": [],
+            "skipped": [],
+            "invalid": [],
+            "notes": [],
+        }
+        with patch("config_api.routes.ConfigService") as MockService:
+            MockService.return_value.generate_sudoers.return_value = doc
+            from config_api import routes as routes_mod
+
+            original = routes_mod._config_service
+            routes_mod._config_service = MockService.return_value
+            try:
+                response = client.get(
+                    "/config/ssh_targets/test-server/sudoers",
+                    headers=auth_headers,
+                )
+            finally:
+                routes_mod._config_service = original
+
+        assert response.status_code == 200
+        assert response.json() == doc
+
+    def test_ssh_failure_returns_502(
+        self, client: TestClient, auth_headers: dict[str, str]
+    ) -> None:
+        """An unreachable target is a bad gateway."""
+        from lib.exceptions import SSHConnectionError
+
+        from config_api import routes as routes_mod
+
+        service = MagicMock()
+        service.generate_sudoers.side_effect = SSHConnectionError("unreachable")
+        original = routes_mod._config_service
+        routes_mod._config_service = service
+        try:
+            response = client.get(
+                "/config/ssh_targets/test-server/sudoers",
+                headers=auth_headers,
+            )
+        finally:
+            routes_mod._config_service = original
+
+        assert response.status_code == 502
+        assert "unreachable" in response.json()["message"].lower() or (
+            "resolve" in response.json()["message"].lower()
+        )

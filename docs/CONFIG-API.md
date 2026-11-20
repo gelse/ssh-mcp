@@ -36,7 +36,8 @@ When enabled, open `http://localhost:9080/api/ui/` in your browser to
 access the web dashboard (Tailwind CSS SPA). The API's own interactive docs
 are at `/api/docs`. The dashboard provides:
 
-- SSH target management (add, edit, delete, connectivity test)
+- SSH target management (add, edit, delete, connectivity test, sudoers
+  file generation)
 - Block pattern editor (add, edit, reorder, delete)
 - Allowed commands editor (default, API key, network rules)
 - Settings editor with validation
@@ -100,8 +101,69 @@ Valid sections: `ssh_targets`, `block_patterns`,
 | PUT | `/api/config/ssh_targets/{name}` | Create or replace target |
 | DELETE | `/api/config/ssh_targets/{name}` | Delete target |
 | POST | `/api/config/ssh_targets/{name}/check` | Test SSH connectivity |
+| GET | `/api/config/ssh_targets/{name}/sudoers` | Generate a sudoers drop-in from the target's sudo grants |
 
 `{name}` is a target id — the same value MCP tools take as `server_name`.
+
+Credentials are never returned: a target read carries `has_password` and
+`has_private_key` instead, so the dashboard can show what is stored without
+seeing it.
+
+`PUT` is read-modify-write for secrets. A missing or empty `password` /
+`private_key` keeps the stored value, an explicit `null` deletes it, and a
+new value replaces it:
+
+```json
+{"host": "10.42.43.13", "port": 22, "username": "werner", "password": null}
+```
+
+Deleting the last credential is rejected with 400 — the config needs at
+least one of `password` or `private_key` per target. In the dashboard, the
+Edit dialog offers a *Remove the stored password* checkbox directly under
+the password field, and the same for the key, whenever the server reports
+one is stored; when nothing is stored the field says so instead
+(*No password stored*).
+
+#### Sudoers generation
+
+`GET /api/config/ssh_targets/{name}/sudoers` builds a
+`/etc/sudoers.d` drop-in for one target, so `sudo=True` works on that host
+without editing sudoers by hand.
+
+- **Scope** — the union of every rule layer that applies to the target:
+  `default`, API-key and network rules. Each rule contributes only the
+  commands named in its own `sudo_allowed`, because all three layers log
+  in as the target's single `username`.
+- **Layout** — one grant line, no aliases:
+  `username ALL = (root) NOPASSWD: /usr/bin/a, /usr/bin/b, …`. The
+  Host field is always `ALL`: sudo compares it against the local machine
+  name and never matches an address, and the file only applies on the
+  machine it is installed on. sudoers has no line-continuation character,
+  so the line stays one line however many commands it holds.
+- **Arguments** — each entry is a bare absolute path, with no argument
+  pattern. A command specification without a pattern permits any
+  arguments, which matches what the rule means (it names the base command
+  only) — so a grant for `docker` is root-equivalent for that binary,
+  which the rule already allows. A trailing `*` would mean the same to
+  classic sudo but is not implemented by sudo-rs before 0.2.9 (Ubuntu
+  25.10), where it makes the entry match nothing at all.
+- **Paths** — resolved live on the target over SSH (`command -v`, with a
+  `PATH` scan fallback for shell builtins), so they match what the server
+  executes. The target must be reachable.
+- **Unresolved commands** — commented out in the file and listed in the
+  dialog. A rule with `commands: ["*"]` and `sudo_allowed: ["*"]` is
+  skipped and reported: the file never grants `ALL`.
+- **Empty result** — when no command resolves, `content` is empty and
+  `notes` explain why, so the dashboard can show the reason instead of an
+  unusable file.
+
+The response carries `target`, `username`, `host`, `filename`,
+`content`, `resolved`, `unresolved`, `skipped`, `invalid` and `notes`.
+Path resolution needs direct SSH access: in a deployment where the config
+API reaches the MCP server over HTTP only, every command is reported as
+unresolved and no file is produced.
+
+Unknown target → 404; unreachable target → 502.
 
 ### API keys (requires auth)
 

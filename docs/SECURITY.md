@@ -306,6 +306,34 @@ be executed with `sudo=True`:
   attempts are denied, matching the previous behaviour where no rule-level
   sudo control existed.
 
+### Generated Sudoers Files
+
+The dashboard can turn those grants into a `/etc/sudoers.d` drop-in
+(`GET /api/config/ssh_targets/{name}/sudoers`, see
+[`lib/sudoers.py`](../lib/sudoers.py)).  This is an operator action behind
+the Config API's authentication — it never runs during a tool call.
+
+- **Root-equivalent grants** — every entry names a bare absolute path with
+  no argument pattern (`/usr/bin/docker`), which permits any arguments.
+  sudoers matches the whole command line while the rule matches the base
+  name only, so a grant for `docker`, `systemctl` or `ha` is
+  root-equivalent for that binary; the dialog says so.
+- **No unrestricted rules** — a rule with `commands: ["*"]` and
+  `sudo_allowed: ["*"]` is skipped and reported, so the generated file never
+  contains `ALL`.
+- **Validated interpolation** — command names and resolved paths must match
+  [`SUDOERS_COMMAND_NAME_PATTERN`](../lib/constants.py) and
+  [`SUDOERS_PATH_PATTERN`](../lib/constants.py) before they reach a
+  sudoers line; anything else is reported as unresolved instead of being
+  written out.
+- **Fixed lookup command** — path resolution ([`resolve_command_paths`](../lib/ssh_operations.py))
+  runs one constant, read-only `command -v`/`PATH`-scan script with
+  shell-quoted names.  It bypasses the command authorization chain on
+  purpose: no caller-supplied text is executed, and the call is made by the
+  config service, not in response to a tool request.
+- **Failure surface** — an unreachable target returns 502 and no file;
+  error messages carry the SSH error type, never credentials or paths.
+
 ---
 
 ## Input Sanitization
