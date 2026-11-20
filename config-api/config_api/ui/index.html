@@ -906,7 +906,12 @@ async function renderRules() {
     if (_rulesActiveTab === 'default') {
       renderDefaultRules(content, defaultRules, Object.keys(config.ssh_targets || {}));
     } else if (_rulesActiveTab === 'api_keys') {
-      renderApiKeyRules(content, apiKeys, defaultRules);
+      renderApiKeyRules(
+        content,
+        apiKeys,
+        Object.keys(config.ssh_targets || {}),
+        defaultRules
+      );
     } else {
       renderNetworkRules(
         content,
@@ -937,7 +942,7 @@ function renderDefaultRules(container, rules, sshTargets) {
     emptyMessage: 'Default rules need at least one entry — add another first',
     deletePrompt: 'Delete this rule?',
     deletedToast: 'Rule deleted',
-    payload: (nextRules) => ({ default: nextRules }),
+    put: (nextRules) => enqueueCommandsPut(() => ({ default: nextRules })),
     refresh: () => renderRules(),
   };
 
@@ -1145,7 +1150,91 @@ function appendRuleGroupRows(tbody, spec) {
   });
 }
 
-function renderApiKeyRules(container, apiKeys, defaultRules) {
+/**
+ * Context shared by the targets and commands editors of one API key.
+ *
+ * Writes go to the per-key endpoint, so the browser never handles the key
+ * hash: the server owns it and the name identifies the entry.
+ *
+ * @param {Object[]} apiKeys - all API key entries, mutated in place
+ * @param {number} keyIdx - index of the edited key in `apiKeys`
+ * @param {string[]} sshTargets - configured SSH target ids
+ * @param {Object[]} defaultRules - `allowed_commands.default`
+ * @returns {Object} context shared by the targets and commands editors
+ */
+function apiKeyRulesContext(apiKeys, keyIdx, sshTargets, defaultRules) {
+  const key = apiKeys[keyIdx] || {};
+  const name = typeof key.name === 'string' ? key.name : '';
+  return {
+    rules: key.rules || [],
+    sshTargets,
+    defaultRules,
+    label: name || `Key ${keyIdx}`,
+    emptyMessage:
+      'An API key needs at least one target configuration — delete the key instead',
+    deletePrompt: 'Are you sure you want to delete this target configuration?',
+    deletedToast: 'Target deleted',
+    put: (nextRules) => enqueueRuleWrite(() => api(
+      'PUT',
+      `/config/api_keys/${encodeURIComponent(name)}`,
+      { rules: nextRules }
+    )),
+    refresh: () => renderRules(),
+  };
+}
+
+/**
+ * Show a freshly generated API key once, with a copy button.
+ *
+ * @param {string} plaintext - the key to display; it is never shown again
+ * @returns {void}
+ */
+function showCreatedKeyModal(plaintext) {
+  showModal('Key Created (save this now)', () => {
+    const div = el('div', 'space-y-3');
+    const infoP = el('p', 'text-sm text-gray-700');
+    infoP.textContent = 'Your API key has been created. Copy it now — it will not be shown again.';
+    div.appendChild(infoP);
+    const keyDiv = el('div', 'bg-gray-100 p-3 rounded font-mono text-sm break-all');
+    keyDiv.id = 'm-created-key';
+    keyDiv.textContent = plaintext;
+    div.appendChild(keyDiv);
+    const copyBtn = el('button', 'text-blue-600 hover:text-blue-800 text-sm');
+    copyBtn.id = 'm-copy-btn';
+    copyBtn.textContent = 'Copy to clipboard';
+    div.appendChild(copyBtn);
+    return div;
+  }, async () => {
+    // Just close the modal
+  }, (body) => {
+    const copyBtn = body.querySelector('#m-copy-btn');
+    if (copyBtn) {
+      copyBtn.addEventListener('click', () => {
+        if (!navigator.clipboard) { showToast('Clipboard unavailable', 'error'); return; }
+        navigator.clipboard.writeText(plaintext)
+          .then(() => showToast('Copied to clipboard'))
+          .catch(() => showToast('Failed to copy', 'error'));
+      });
+    }
+  });
+}
+
+/**
+ * Render the API Key Rules tab.
+ *
+ * Same layout and editing behaviour as Network Rules: one group per key with
+ * its name and rule rows, targets and commands edited in the same modals. The
+ * group's second column stands where Network Rules shows the CIDR range and
+ * reads "hidden" — the key hash never reaches the browser, so it cannot be
+ * displayed. Keys are created and deleted through their own endpoints.
+ *
+ * @param {HTMLElement} container - where the table is rendered
+ * @param {Object[]} apiKeys - `allowed_commands.api_keys`
+ * @param {string[]} sshTargets - configured SSH target ids
+ * @param {Object[]} defaultRules - `allowed_commands.default`
+ * @returns {void}
+ */
+function renderApiKeyRules(container, apiKeys, sshTargets, defaultRules) {
   // Header
   const header = document.createElement('div');
   header.className = 'flex items-center justify-between mb-4';
@@ -1164,7 +1253,7 @@ function renderApiKeyRules(container, apiKeys, defaultRules) {
   const thead = document.createElement('thead');
   const headRow = document.createElement('tr');
   headRow.className = 'bg-gray-50 text-left text-sm text-gray-600';
-  ['Name', 'Targets', 'Commands', 'Actions'].forEach((h) => {
+  ['Name', 'API Key', 'Targets', 'Commands', 'Actions'].forEach((h) => {
     const th = document.createElement('th');
     th.className = 'px-4 py-3 font-medium';
     th.textContent = h;
@@ -1178,7 +1267,7 @@ function renderApiKeyRules(container, apiKeys, defaultRules) {
   if (apiKeys.length === 0) {
     const emptyRow = document.createElement('tr');
     const emptyCell = document.createElement('td');
-    emptyCell.colSpan = 4;
+    emptyCell.colSpan = 5;
     emptyCell.className = 'px-4 py-8 text-center text-gray-500';
     emptyCell.textContent = 'No API keys configured.';
     emptyRow.appendChild(emptyCell);
@@ -1186,68 +1275,32 @@ function renderApiKeyRules(container, apiKeys, defaultRules) {
   }
 
   apiKeys.forEach((key, idx) => {
+    const rules = key.rules || [];
+    const name = typeof key.name === 'string' ? key.name : '';
+
     const nameCell = document.createElement('td');
     nameCell.className = 'px-4 py-3 font-medium text-sm';
-    nameCell.textContent = key.name || `Key ${idx}`;
+    nameCell.textContent = name || `Key ${idx}`;
+    nameCell.title = 'The key name identifies the entry and cannot be changed';
 
-    const rules = key.rules || [];
+    const keyCell = document.createElement('td');
+    keyCell.className = 'px-4 py-3 text-sm italic text-gray-400';
+    keyCell.textContent = 'hidden';
+    keyCell.title = 'The key hash never leaves the server';
 
     const actionsCell = document.createElement('td');
     actionsCell.className = 'px-4 py-3';
-    const editBtn = document.createElement('button');
-    editBtn.className = 'text-blue-600 hover:text-blue-800 text-sm mr-3';
-    editBtn.textContent = 'Edit Rules';
     const deleteBtn = document.createElement('button');
     deleteBtn.className = 'text-red-600 hover:text-red-800 text-sm';
     deleteBtn.textContent = 'Delete';
-    actionsCell.appendChild(editBtn);
     actionsCell.appendChild(deleteBtn);
 
-    editBtn.addEventListener('click', () => {
-      const editRuleTitle = `Edit Rules: ${key.name || `Key ${idx}`}`;
-      showModal(editRuleTitle, () => {
-        const div = el('div');
-        div.appendChild(makeFormGroup('Rules (JSON array)', { id: 'm-rules', type: 'textarea', rows: 8, class: 'w-full px-3 py-2 border rounded text-sm font-mono' }));
-        const helpP = el('p', 'text-xs text-gray-500 mt-1');
-        helpP.textContent = 'Format: [{"targets": ["..."], "commands": ["..."]}]';
-        div.appendChild(helpP);
-        const errP = el('p', 'text-red-600 text-xs mt-1 hidden');
-        errP.id = 'm-rules-error';
-        div.appendChild(errP);
-        return div;
-      }, async (body) => {
-        const errEl = body.querySelector('#m-rules-error');
-        let newRules;
-        try {
-          newRules = JSON.parse(body.querySelector('#m-rules').value);
-        } catch (e) {
-          errEl.textContent = 'Invalid JSON: ' + e.message;
-          errEl.classList.remove('hidden');
-          throw new Error('Invalid JSON');
-        }
-        if (!Array.isArray(newRules)) throw new Error('Rules must be a JSON array');
-        const updatedKeys = [...apiKeys];
-        updatedKeys[idx] = { ...key, rules: newRules };
-        const r = await api('PUT', '/config/allowed_commands', { api_keys: updatedKeys });
-        if (!r.ok) {
-          const err = await r.json();
-          throw new Error(err.message || 'Failed to save');
-        }
-        showToast('Rules updated');
-        renderRules();
-      },
-      (body) => {
-        body.querySelector('#m-rules').value = JSON.stringify(rules, null, 2);
-      });
-    });
-
     deleteBtn.addEventListener('click', async () => {
-      const ok = await confirm(`Delete API key "${key.name || `Key ${idx}`}"?`);
+      const ok = await confirm(`Delete API key "${name || `Key ${idx}`}"?`);
       if (!ok) return;
-      const updatedKeys = apiKeys.filter((_, i) => i !== idx);
-      const r = await api('PUT', '/config/allowed_commands', { api_keys: updatedKeys });
+      const r = await api('DELETE', `/config/api_keys/${encodeURIComponent(name)}`);
       if (!r.ok) {
-        const err = await r.json();
+        const err = await r.json().catch(() => ({}));
         showToast(err.message || 'Failed to delete', 'error');
         return;
       }
@@ -1255,11 +1308,18 @@ function renderApiKeyRules(container, apiKeys, defaultRules) {
       renderRules();
     });
 
+    const rulesCtx = apiKeyRulesContext(apiKeys, idx, sshTargets, defaultRules);
     appendRuleGroupRows(tbody, {
-      leading: [nameCell],
+      leading: [nameCell, keyCell],
       trailing: [actionsCell],
       entries: rules,
       placeholderColspan: 2,
+      showSudo: true,
+      inheritedCommands: (entry) => defaultCommandsFor(entry.targets, defaultRules),
+      onCommandsCell: (cmdsCell, entry, entryIdx) =>
+        attachCommandsEditor(cmdsCell, entry, entryIdx, rulesCtx),
+      onTargetsCell: (targetsCell, entry, entryIdx) =>
+        attachTargetsEditor(targetsCell, entry, entryIdx, rulesCtx),
     });
   });
 
@@ -1267,134 +1327,51 @@ function renderApiKeyRules(container, apiKeys, defaultRules) {
   tableWrap.appendChild(table);
   container.appendChild(tableWrap);
 
-  // Add API Key
+  // Add API Key: the secret is generated on the server and shown once.
   addBtn.addEventListener('click', () => {
     showModal('Add API Key', () => {
       const div = el('div', 'space-y-4');
       div.appendChild(makeFormGroup('Name', { id: 'm-key-name', placeholder: 'e.g. deploy-key' }));
 
-      // Plaintext Key with eye-toggle
-      const keyGroup = el('div');
-      const keyLabel = el('label', 'block text-sm font-medium text-gray-700 mb-1');
-      keyLabel.textContent = 'Plaintext Key';
-      const relDiv = el('div', 'relative');
-      const keyInput = el('input', 'w-full px-3 py-2 pr-10 border rounded text-sm');
-      keyInput.type = 'password';
-      keyInput.id = 'm-key-plaintext';
-      keyInput.placeholder = 'The secret API key';
-      keyInput.autocomplete = 'off';
-      const toggleBtn = document.createElement('button');
-      toggleBtn.type = 'button';
-      toggleBtn.id = 'm-key-toggle';
-      toggleBtn.className = 'absolute inset-y-0 right-0 px-3 flex items-center text-gray-500 hover:text-gray-700 focus:outline-none focus:text-gray-700';
-      toggleBtn.setAttribute('aria-label', 'Show API key');
-      toggleBtn.setAttribute('aria-pressed', 'false');
-      const SVG_NS = 'http://www.w3.org/2000/svg';
-      const eyeOpen = document.createElementNS(SVG_NS, 'svg');
-      eyeOpen.id = 'm-key-eye-open';
-      eyeOpen.setAttribute('class', 'h-5 w-5');
-      eyeOpen.setAttribute('fill', 'none');
-      eyeOpen.setAttribute('stroke', 'currentColor');
-      eyeOpen.setAttribute('viewBox', '0 0 24 24');
-      const p1 = document.createElementNS(SVG_NS, 'path');
-      p1.setAttribute('stroke-linecap', 'round');
-      p1.setAttribute('stroke-linejoin', 'round');
-      p1.setAttribute('stroke-width', '2');
-      p1.setAttribute('d', 'M15 12a3 3 0 11-6 0 3 3 0 016 0z');
-      const p2 = document.createElementNS(SVG_NS, 'path');
-      p2.setAttribute('stroke-linecap', 'round');
-      p2.setAttribute('stroke-linejoin', 'round');
-      p2.setAttribute('stroke-width', '2');
-      p2.setAttribute('d', 'M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z');
-      eyeOpen.appendChild(p1);
-      eyeOpen.appendChild(p2);
-      const eyeClosed = document.createElementNS(SVG_NS, 'svg');
-      eyeClosed.id = 'm-key-eye-closed';
-      eyeClosed.setAttribute('class', 'h-5 w-5 hidden');
-      eyeClosed.setAttribute('fill', 'none');
-      eyeClosed.setAttribute('stroke', 'currentColor');
-      eyeClosed.setAttribute('viewBox', '0 0 24 24');
-      const p3 = document.createElementNS(SVG_NS, 'path');
-      p3.setAttribute('stroke-linecap', 'round');
-      p3.setAttribute('stroke-linejoin', 'round');
-      p3.setAttribute('stroke-width', '2');
-      p3.setAttribute('d', 'M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.542-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.878 9.878L3 3m6.878 6.879L21 21');
-      eyeClosed.appendChild(p3);
-      toggleBtn.appendChild(eyeOpen);
-      toggleBtn.appendChild(eyeClosed);
-      relDiv.appendChild(keyInput);
-      relDiv.appendChild(toggleBtn);
-      keyGroup.appendChild(keyLabel);
-      keyGroup.appendChild(relDiv);
-      div.appendChild(keyGroup);
+      const targetGroup = el('div');
+      const targetLabel = el('label', 'block text-sm font-medium text-gray-700 mb-1');
+      targetLabel.textContent = 'Target';
+      const targetSelect = document.createElement('select');
+      targetSelect.id = 'm-key-target';
+      targetSelect.className = 'w-full px-3 py-2 border rounded text-sm';
+      const allOption = document.createElement('option');
+      allOption.value = TARGETS_WILDCARD;
+      allOption.textContent = 'All targets (*)';
+      targetSelect.appendChild(allOption);
+      (Array.isArray(sshTargets) ? sshTargets : []).forEach((target) => {
+        const option = document.createElement('option');
+        option.value = target;
+        option.textContent = target;
+        targetSelect.appendChild(option);
+      });
+      targetGroup.appendChild(targetLabel);
+      targetGroup.appendChild(targetSelect);
+      div.appendChild(targetGroup);
 
+      const helpP = el('p', 'text-xs text-gray-500');
+      helpP.textContent = 'The key is generated on save and shown once. It starts with '
+        + 'one rule allowing "ls" on the chosen target — edit targets and commands '
+        + 'in the table afterwards.';
+      div.appendChild(helpP);
       return div;
     }, async (body) => {
       const name = body.querySelector('#m-key-name').value.trim();
-      const plaintext = body.querySelector('#m-key-plaintext').value.trim();
+      const target = body.querySelector('#m-key-target').value;
       if (!name) throw new Error('Name is required');
-      if (!plaintext) throw new Error('Key is required');
-      // Hash the key
-      const hashRes = await api('POST', '/hash-key', { key: plaintext });
-      if (!hashRes.ok) {
-        const err = await hashRes.json();
-        throw new Error(err.message || 'Failed to hash key');
-      }
-      const hashData = await hashRes.json();
-      const keyHash = hashData.key_hash;
-      // Add to api_keys
-      const newKey = { name, key_hash: keyHash, rules: [] };
-      const updatedKeys = [...apiKeys, newKey];
-      const r = await api('PUT', '/config/allowed_commands', { api_keys: updatedKeys });
+      const r = await api('POST', '/config/api_keys', { name, target });
       if (!r.ok) {
-        const err = await r.json();
+        const err = await r.json().catch(() => ({}));
         throw new Error(err.message || 'Failed to save');
       }
-      // Show the plaintext key once
-      showModal('Key Created (save this now)', () => {
-        const div = el('div', 'space-y-3');
-        const infoP = el('p', 'text-sm text-gray-700');
-        infoP.textContent = 'Your API key has been created. Copy it now — it will not be shown again.';
-        div.appendChild(infoP);
-        const keyDiv = el('div', 'bg-gray-100 p-3 rounded font-mono text-sm break-all');
-        keyDiv.id = 'm-created-key';
-        keyDiv.textContent = plaintext;
-        div.appendChild(keyDiv);
-        const copyBtn = el('button', 'text-blue-600 hover:text-blue-800 text-sm');
-        copyBtn.id = 'm-copy-btn';
-        copyBtn.textContent = 'Copy to clipboard';
-        div.appendChild(copyBtn);
-        return div;
-      }, async () => {
-        // Just close the modal
-      }, (body) => {
-        const copyBtn = body.querySelector('#m-copy-btn');
-        if (copyBtn) {
-          copyBtn.addEventListener('click', () => {
-            if (!navigator.clipboard) { showToast('Clipboard unavailable', 'error'); return; }
-            navigator.clipboard.writeText(plaintext)
-              .then(() => showToast('Copied to clipboard'))
-              .catch(() => showToast('Failed to copy', 'error'));
-          });
-        }
-      });
+      const created = await r.json();
+      showCreatedKeyModal(created.key);
       showToast('API key created');
       renderRules();
-    }, (body) => {
-      const input = body.querySelector('#m-key-plaintext');
-      const toggle = body.querySelector('#m-key-toggle');
-      const eyeOpen = body.querySelector('#m-key-eye-open');
-      const eyeClosed = body.querySelector('#m-key-eye-closed');
-      if (toggle && input && eyeOpen && eyeClosed) {
-        toggle.addEventListener('click', () => {
-          const isPassword = input.type === 'password';
-          input.type = isPassword ? 'text' : 'password';
-          eyeOpen.classList.toggle('hidden', !isPassword);
-          eyeClosed.classList.toggle('hidden', isPassword);
-          toggle.setAttribute('aria-pressed', isPassword ? 'true' : 'false');
-          toggle.setAttribute('aria-label', isPassword ? 'Hide API key' : 'Show API key');
-        });
-      }
     });
   });
 }
@@ -1572,10 +1549,23 @@ async function responseErrorMessage(res, fallback) {
 // payload is built right before its PUT goes out, so it reflects every edit
 // committed while earlier requests were still in flight, and a slow earlier
 // request can never overwrite a newer one.
-let pendingCommandsPuts = Promise.resolve();
+let pendingRuleWrites = Promise.resolve();
 
 /**
- * Queue one allowed_commands PUT behind all editor PUTs already in flight.
+ * Queue one rule write behind every editor write already in flight.
+ *
+ * @param {Function} run - called at send time; performs the request
+ * @returns {Promise<Response>} resolves with the response once sent
+ */
+function enqueueRuleWrite(run) {
+  const queued = pendingRuleWrites.then(run);
+  // Keep the chain alive after a rejected write so later edits still send.
+  pendingRuleWrites = queued.catch(() => {});
+  return queued;
+}
+
+/**
+ * Queue one allowed_commands PUT behind all editor writes already in flight.
  *
  * @param {Function} buildBody - called at send time; returns the request body
  *   (e.g. `{ networks }` or `{ default }`) freshly derived from the current
@@ -1583,12 +1573,9 @@ let pendingCommandsPuts = Promise.resolve();
  * @returns {Promise<Response>} resolves with the PUT response once sent
  */
 function enqueueCommandsPut(buildBody) {
-  const run = pendingCommandsPuts.then(() =>
+  return enqueueRuleWrite(() =>
     api('PUT', '/config/allowed_commands', buildBody())
   );
-  // Keep the chain alive after a rejected PUT so later edits still send.
-  pendingCommandsPuts = run.catch(() => {});
-  return run;
 }
 
 /**
@@ -1615,7 +1602,7 @@ function enqueueCommandsPut(buildBody) {
  *   be deleted
  * @param {string} ctx.deletePrompt - confirmation asked before deleting
  * @param {string} ctx.deletedToast - toast shown after a successful delete
- * @param {Function} ctx.payload - (rules) => allowed_commands PUT body
+ * @param {Function} ctx.put - (rules) => Promise<Response>, writes the list
  * @param {Function} ctx.refresh - () => void, re-renders the owning table
  * @returns {void}
  */
@@ -2044,9 +2031,7 @@ function openCommandsModal(cell, entry, entryIdx, ctx) {
 
     let res;
     try {
-      res = await enqueueCommandsPut(() =>
-        ctx.payload(ctx.rules.map((rule) => ({ ...rule })))
-      );
+      res = await ctx.put(ctx.rules.map((rule) => ({ ...rule })));
     } catch (e) {
       entry.commands = previousCommands;
       entry.sudo_allowed = previousSudo;
@@ -2089,9 +2074,7 @@ function openCommandsModal(cell, entry, entryIdx, ctx) {
 
     let res;
     try {
-      res = await enqueueCommandsPut(() =>
-        ctx.payload(ctx.rules.filter((_, j) => j !== entryIdx))
-      );
+      res = await ctx.put(ctx.rules.filter((_, j) => j !== entryIdx));
     } catch (e) {
       setBusy(false);
       showError('Failed to save');
@@ -2285,7 +2268,7 @@ function attachTargetsEditor(cell, entry, entryIdx, ctx) {
  *   be deleted
  * @param {string} ctx.deletePrompt - confirmation asked before deleting
  * @param {string} ctx.deletedToast - toast shown after a successful delete
- * @param {Function} ctx.payload - (rules) => allowed_commands PUT body
+ * @param {Function} ctx.put - (rules) => Promise<Response>, writes the list
  * @param {Function} ctx.refresh - () => void, re-renders the owning table
  * @returns {void}
  */
@@ -2587,9 +2570,7 @@ function openTargetsModal(cell, entry, entryIdx, ctx) {
 
     let res;
     try {
-      res = await enqueueCommandsPut(() =>
-        ctx.payload(ctx.rules.map((rule) => ({ ...rule })))
-      );
+      res = await ctx.put(ctx.rules.map((rule) => ({ ...rule })));
     } catch (e) {
       entry.targets = previous;
       setBusy(false);
@@ -2630,9 +2611,7 @@ function openTargetsModal(cell, entry, entryIdx, ctx) {
 
     let res;
     try {
-      res = await enqueueCommandsPut(() =>
-        ctx.payload(ctx.rules.filter((_, j) => j !== entryIdx))
-      );
+      res = await ctx.put(ctx.rules.filter((_, j) => j !== entryIdx));
     } catch (e) {
       setBusy(false);
       showError('Failed to save');
@@ -2713,11 +2692,11 @@ function networkRulesContext(networks, netIdx, sshTargets, defaultRules) {
       'A network rule needs at least one target configuration — delete the rule instead',
     deletePrompt: 'Are you sure you want to delete this target configuration?',
     deletedToast: 'Target deleted',
-    payload: (nextRules) => ({
+    put: (nextRules) => enqueueCommandsPut(() => ({
       networks: networks.map((entry, i) =>
         i === netIdx ? { ...entry, rules: nextRules } : entry
       ),
-    }),
+    })),
     refresh: () => renderRules(),
   };
 }

@@ -94,7 +94,7 @@ from lib.constants import (
     SUPPORTED_LOG_TARGETS,
     DEFAULT_TEXT_LOG_FORMAT,
 )
-from lib.crypto import hash_api_key, verify_api_key
+from lib.crypto import generate_api_key, hash_api_key, verify_api_key
 from lib.exceptions import (
     AuthorizationError,
     ConfigError,
@@ -211,6 +211,7 @@ __all__ = [
     "sanitize_log_string",
     "sanitize_target_name",
     # Crypto
+    "generate_api_key",
     "hash_api_key",
     "verify_api_key",
     # Constants

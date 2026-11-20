@@ -19,12 +19,14 @@ from pathlib import Path
 from config_api.mcp_client import MCPClient, MCPClientError, MCPToolError
 from lib.config import ConfigManager
 from lib.constants import (
+    API_KEY_SEED_COMMAND,
     DEFAULT_CONFIG_DIR,
     DEFAULT_CONFIG_FILENAME,
     DEFAULT_SSH_KEY_FILENAME,
     RESTRICTED_FILE_MODE,
     TARGET_NAME_PATTERN,
 )
+from lib.crypto import generate_api_key, hash_api_key
 from lib.exceptions import ConfigValidationError
 
 # Attempt to import ssh_operations for direct SSH calls (unified mode).
@@ -445,6 +447,16 @@ class ConfigService:
         # Read current config
         current = self.read_config()
 
+        # API keys carry a hash the browser never sees, so they are written
+        # through their own per-key endpoints instead of a round-tripped array.
+        if section == "allowed_commands" and isinstance(data, dict) and "api_keys" in data:
+            raise ConfigValidationError(
+                "'allowed_commands.api_keys' cannot be written through the config "
+                "section endpoint; use POST /config/api_keys, PUT "
+                "/config/api_keys/{name} and DELETE /config/api_keys/{name}",
+                field="allowed_commands.api_keys",
+            )
+
         # Merge allowed_commands sub-keys to preserve untouched siblings
         # (e.g. updating "networks" should not wipe "default" or "api_keys")
         if section == "allowed_commands":
@@ -534,6 +546,122 @@ class ConfigService:
         if name not in targets:
             raise KeyError(f"SSH target '{name}' not found in config")
         del targets[name]
+        self.write_config(current)
+
+    # ------------------------------------------------------------------
+    # API key operations
+    # ------------------------------------------------------------------
+
+    def create_api_key(self, name: str, target: str) -> dict:
+        """Create an API key with a generated secret and a seeded first rule.
+
+        The plaintext secret is generated here, hashed for storage, and
+        returned to the caller exactly once — it is never written to disk or
+        to the logs. The first rule allows ``ls`` on *target* so the key is
+        usable immediately; further rules are added through
+        :meth:`put_api_key_rules`.
+
+        Args:
+            name: Operator-visible name, unique in ``allowed_commands.api_keys``.
+            target: SSH target for the seeded rule, or ``"*"`` for all targets.
+
+        Returns:
+            ``{"name": ..., "key": <plaintext>, "rules": [...]}``.
+
+        Raises:
+            ValueError: If *name* or *target* is empty or *name* is taken.
+            ConfigValidationError: If the resulting config fails validation
+                (e.g. *target* does not exist).
+            FileNotFoundError: If the config file does not exist.
+        """
+        clean_name = name.strip() if isinstance(name, str) else ""
+        if not clean_name:
+            raise ValueError("API key name is required")
+
+        clean_target = target.strip() if isinstance(target, str) else ""
+        if not clean_target:
+            raise ValueError("Target is required")
+
+        current = self.read_config()
+        allowed = current.setdefault("allowed_commands", {})
+        if not isinstance(allowed, dict):
+            raise ValueError("'allowed_commands' must be an object")
+        keys = allowed.setdefault("api_keys", [])
+        if not isinstance(keys, list):
+            raise ValueError("'allowed_commands.api_keys' must be a list")
+
+        if any(
+            isinstance(entry, dict) and entry.get("name") == clean_name
+            for entry in keys
+        ):
+            raise ValueError(f"API key '{clean_name}' already exists")
+
+        secret = generate_api_key()
+        rules = [{"targets": [clean_target], "commands": [API_KEY_SEED_COMMAND]}]
+        keys.append(
+            {
+                "name": clean_name,
+                "key_hash": hash_api_key(secret),
+                "rules": rules,
+            }
+        )
+
+        self.write_config(current)
+        return {"name": clean_name, "key": secret, "rules": rules}
+
+    def put_api_key_rules(self, name: str, rules: list) -> dict:
+        """Replace the rule list of one API key, keeping its hash untouched.
+
+        Args:
+            name: Name of the API key to update.
+            rules: The new rule list (targets, commands, sudo_allowed).
+
+        Returns:
+            ``{"name": ..., "rules": [...]}``.
+
+        Raises:
+            ValueError: If *rules* is not a list.
+            KeyError: If no API key carries *name*.
+            ConfigValidationError: If the resulting config fails validation
+                (e.g. an empty rule list or an unknown target).
+            FileNotFoundError: If the config file does not exist.
+        """
+        if not isinstance(rules, list):
+            raise ValueError("'rules' must be a list")
+
+        current = self.read_config()
+        keys = current.get("allowed_commands", {}).get("api_keys", [])
+        for entry in keys:
+            if isinstance(entry, dict) and entry.get("name") == name:
+                entry["rules"] = copy.deepcopy(rules)
+                self.write_config(current)
+                return {"name": name, "rules": copy.deepcopy(rules)}
+
+        raise KeyError(f"API key '{name}' not found")
+
+    def delete_api_key(self, name: str) -> None:
+        """Delete one API key by name.
+
+        Args:
+            name: Name of the API key to delete.
+
+        Raises:
+            KeyError: If no API key carries *name*.
+            ConfigValidationError: If the resulting config fails validation.
+            FileNotFoundError: If the config file does not exist.
+        """
+        current = self.read_config()
+        allowed = current.get("allowed_commands", {})
+        keys = allowed.get("api_keys", []) if isinstance(allowed, dict) else []
+        remaining = [
+            entry
+            for entry in keys
+            if not (isinstance(entry, dict) and entry.get("name") == name)
+        ]
+        if len(remaining) == len(keys):
+            raise KeyError(f"API key '{name}' not found")
+
+        allowed["api_keys"] = remaining
         self.write_config(current)
 
     def put_block_pattern(self, index: int, pattern: str) -> list[str]:

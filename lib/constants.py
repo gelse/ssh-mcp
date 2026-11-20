@@ -116,6 +116,15 @@ PBKDF2_ITERATIONS: int = 100_000
 PBKDF2_SALT_BYTES: int = 16
 """Length of the random per-key salt in bytes."""
 
+API_KEY_SECRET_BYTES: int = 32
+"""Length of a generated API key secret in bytes (43 URL-safe characters)."""
+
+API_KEY_SEED_COMMAND: str = "ls"
+"""Command seeded into the first rule of a newly created API key."""
+
+API_KEY_SEED_TARGET: str = "*"
+"""Target seeded into the first rule of a newly created API key."""
+
 MAX_TARGET_NAME_LENGTH: int = 128
 """Maximum length (characters) of an SSH target identifier."""
 

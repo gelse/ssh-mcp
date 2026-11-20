@@ -77,8 +77,8 @@ Configure via `settings.logging.log_targets` in the config:
     "logging": {
       "log_targets": [
         { "target": "stdout" },
-        { "target": "jsonfile", "path": "/logs/ssh-mcp.log" },
-        { "target": "file", "path": "/logs/ssh-mcp.log" }
+        { "target": "jsonfile", "filepath": "/logs/ssh-mcp.log" },
+        { "target": "file", "filepath": "/logs/ssh-mcp.txt" }
       ]
     }
   }
@@ -91,14 +91,17 @@ Configure via `settings.logging.log_targets` in the config:
 | `jsonfile` | JSONL file with rotation and gzip |
 | `file` | Plain text file with rotation |
 
+File targets take `filepath` (required) and may override `log_level`,
+`max_log_output`, and `compress_rotated` per target.
+
 ### Log rotation
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `max_log_output` | `4096` | Max chars for output field |
-| `compress_rotated` | `true` | gzip rotated backups |
-| `max_file_size_mb` | `10` | Max file size before rotation |
-| `backup_count` | `5` | Rotated files to keep |
+| `max_log_output` | `4096` | Max chars for output field (`settings` or per log target) |
+| `compress_rotated` | `true` | gzip rotated backups (`settings` or per log target) |
+| File size before rotation | `10` MiB | Built-in default of the file loggers |
+| Rotated files kept | `5` | Built-in default of the file loggers |
 
 ### Request correlation
 

@@ -32,14 +32,15 @@ the `/api` prefix.
 
 ## Dashboard
 
-When enabled, open `http://localhost:9080/api` in your browser to
-access the web dashboard (Tailwind CSS SPA). The dashboard provides:
+When enabled, open `http://localhost:9080/api/ui/` in your browser to
+access the web dashboard (Tailwind CSS SPA). The API's own interactive docs
+are at `/api/docs`. The dashboard provides:
 
 - SSH target management (add, edit, delete, connectivity test)
 - Block pattern editor (add, edit, reorder, delete)
 - Allowed commands editor (default, API key, network rules)
 - Settings editor with validation
-- API key hash utility
+- API key creation — the server generates the key, returns it once, and stores only its hash
 - Backup management (list, restore, delete)
 - Config validation (dry-run)
 
@@ -99,6 +100,26 @@ Valid sections: `ssh_targets`, `block_patterns`,
 | PUT | `/api/config/ssh_targets/{name}` | Create or replace target |
 | DELETE | `/api/config/ssh_targets/{name}` | Delete target |
 | POST | `/api/config/ssh_targets/{name}/check` | Test SSH connectivity |
+
+`{name}` is a target id — the same value MCP tools take as `server_name`.
+
+### API keys (requires auth)
+
+API keys are written one entry at a time. The key hash never leaves the
+server, so a section PUT that round-trips the whole `api_keys` array
+cannot work and is rejected.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/config/api_keys` | Create a key from `{"name", "target"}`; the secret is generated server-side and returned once, with `ls` allowed on the target |
+| PUT | `/api/config/api_keys/{name}` | Replace that key's rules with `{"rules": [...]}` |
+| DELETE | `/api/config/api_keys/{name}` | Delete the key |
+
+The name identifies the entry and cannot be changed, `key_hash` is never
+returned, and every write goes through full config validation. A
+`PUT /api/config/allowed_commands` body containing `api_keys` is
+rejected with 400; write `default` and `networks` there, and keys through
+the endpoints above.
 
 ### Block patterns (requires auth)
 
