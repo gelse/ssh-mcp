@@ -659,11 +659,10 @@ class ConfigService:
                         target_data[field] = existing[field]
 
         targets[name] = target_data
-        written = self.write_config(current)
-        stripped = self._strip_secrets(
-            {"ssh_targets": {name: written["ssh_targets"][name]}}
-        )
-        return stripped["ssh_targets"][name]
+        self.write_config(current)
+        # Read back from disk: write_config() returns the stripped copy, so
+        # its target no longer carries the credential the flags describe.
+        return self.get_ssh_target(name)
 
     def delete_ssh_target(self, name: str) -> None:
         """Delete a single SSH target.

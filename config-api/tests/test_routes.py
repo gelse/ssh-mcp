@@ -898,6 +898,7 @@ class TestPutSingleSSHTarget:
 
         assert response.status_code == 200
         assert response.json()["has_password"] is False
+        assert response.json()["has_private_key"] is True
         assert "password" not in svc.read_config()["ssh_targets"]["test-server"]
 
     def test_edit_removing_last_credential_returns_400(

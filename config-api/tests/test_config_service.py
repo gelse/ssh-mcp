@@ -1261,6 +1261,8 @@ class TestPutSshTarget:
         assert result["host"] == "10.0.0.2"
         assert result["port"] == 2222
         assert "password" not in result
+        assert result["has_password"] is True
+        assert result["has_private_key"] is False
 
     def test_replaces_existing_target(
         self, service: "ConfigService"
@@ -1376,6 +1378,7 @@ class TestPutSshTarget:
         )
 
         assert result["has_password"] is False
+        assert result["has_private_key"] is True
         raw = service.read_config()
         assert "password" not in raw["ssh_targets"]["test-server"]
         assert raw["ssh_targets"]["test-server"]["private_key"] == "/app/ssh_key"
