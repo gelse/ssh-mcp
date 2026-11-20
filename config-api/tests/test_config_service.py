@@ -2333,7 +2333,7 @@ class TestGenerateSudoers:
         assert doc["username"] == "admin"
         assert doc["host"] == "10.0.0.1"
         assert doc["filename"] == "mcp-ssh-test-server"
-        assert doc["alias"] == "SSH_MCP_TEST-SERVER"
+        assert doc["alias"] == "SSH_MCP_TEST_SERVER"
 
     def test_standalone_mode_reports_unresolved(self, svc) -> None:
         """Without direct SSH the commands are unresolved and explained."""
@@ -2365,8 +2365,8 @@ class TestGenerateSudoers:
             {"command": "docker", "path": "/usr/bin/docker"}
         ]
         assert doc["unresolved"] == ["ha"]
-        assert "SSH_MCP_TEST-SERVER = /usr/bin/docker *" in doc["content"]
-        assert "admin ALL = (root) NOPASSWD: SSH_MCP_TEST-SERVER" in doc["content"]
+        assert "SSH_MCP_TEST_SERVER = /usr/bin/docker *" in doc["content"]
+        assert "admin ALL = (root) NOPASSWD: SSH_MCP_TEST_SERVER" in doc["content"]
         assert "# not found on 10.0.0.1: ha" in doc["content"]
         fake_ops.resolve_command_paths.assert_called_once()
         kwargs = fake_ops.resolve_command_paths.call_args.kwargs

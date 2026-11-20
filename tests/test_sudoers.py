@@ -9,18 +9,22 @@ it is exercised with a mocked ``SSHClientManager``.
 from __future__ import annotations
 
 import datetime as dt
+import getpass
 import json
+import re
+import shutil
+import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from lib.config import ConfigManager
-from lib.constants import SUDOERS_ALIAS_INDENT
+from lib.constants import SUDOERS_ALIAS_LINE_WIDTH
 from lib.exceptions import SSHConnectionError
 from lib.ssh_operations import _build_resolve_script, resolve_command_paths
 from lib.sudoers import (
     collect_sudo_grants,
-    format_alias_lines,
+    format_aliases,
     is_command_name,
     is_sudoers_path,
     render_sudoers,
@@ -320,50 +324,93 @@ class TestNaming:
 
     def test_alias_is_upper_case(self):
         """The alias name is upper case and keeps the sanitized target."""
-        assert sudoers_alias("web-1.prod") == "SSH_MCP_WEB-1_PROD"
+        assert sudoers_alias("web-1.prod") == "SSH_MCP_WEB_1_PROD"
+
+    def test_alias_drops_characters_sudo_rejects(self):
+        """sudo only accepts [A-Z][A-Z0-9_]* for an alias name."""
+        for target in ("eli-kiosk", "web-1.prod", "a b/c:d"):
+            alias = sudoers_alias(target)
+            assert re.fullmatch(r"[A-Z][A-Z0-9_]*", alias), alias
+        assert sudoers_alias("eli-kiosk") == "SSH_MCP_ELI_KIOSK"
 
 
 # ---------------------------------------------------------------------------
-# format_alias_lines
+# format_aliases
 # ---------------------------------------------------------------------------
 
 
-class TestFormatAliasLines:
-    """Tests for format_alias_lines()."""
+class TestFormatAliases:
+    """Tests for format_aliases()."""
 
     def test_short_list_fits_one_line(self):
-        """A short alias stays on a single line."""
-        lines = format_alias_lines(
+        """A short alias stays on a single line under the plain name."""
+        names, lines = format_aliases(
             "SSH_MCP_WEB", ["/usr/bin/ls *", "/usr/bin/cat *"]
         )
 
+        assert names == ["SSH_MCP_WEB"]
         assert lines == [
-            "SSH_MCP_WEB = /usr/bin/ls *, /usr/bin/cat *",
+            "Cmnd_Alias SSH_MCP_WEB = /usr/bin/ls *, /usr/bin/cat *"
         ]
 
-    def test_long_list_wraps_with_continuation(self):
-        """Long aliases wrap with a backslash and indented continuation."""
+    def test_long_list_splits_into_numbered_aliases(self):
+        """sudoers has no continuation, so long lists become numbered aliases."""
         entries = [f"/usr/bin/command{i} *" for i in range(6)]
 
-        lines = format_alias_lines("SSH_MCP_WEB", entries)
+        names, lines = format_aliases("SSH_MCP_WEB", entries)
+
+        assert len(names) > 1
+        assert names == [f"SSH_MCP_WEB_{i}" for i in range(1, len(names) + 1)]
+        assert len(lines) == len(names)
+        for name, line in zip(names, lines):
+            assert line.startswith(f"Cmnd_Alias {name} = ")
+
+    def test_no_line_contains_a_continuation(self):
+        """A backslash would be a syntax error — no line may carry one."""
+        entries = [f"/usr/bin/command{i} *" for i in range(40)]
+
+        _, lines = format_aliases("SSH_MCP_WEB", entries)
+
+        for line in lines:
+            assert "\\" not in line
+
+    def test_lines_stay_within_the_preferred_width(self):
+        """Every generated definition stays readable."""
+        entries = [f"/usr/bin/command{i} *" for i in range(20)]
+
+        _, lines = format_aliases("SSH_MCP_WEB", entries)
 
         assert len(lines) > 1
-        for line in lines[:-1]:
-            assert line.endswith(" \\")
-        for line in lines[1:]:
-            assert line.startswith(SUDOERS_ALIAS_INDENT)
-        # Re-assembling strips the continuations and the separator spaces.
-        joined = " ".join(
-            line[:-2].strip() if line.endswith(" \\") else line.strip()
-            for line in lines
-        )
-        for entry in entries:
-            assert entry in joined
+        for line in lines:
+            assert len(line) <= SUDOERS_ALIAS_LINE_WIDTH
 
-    def test_last_entry_has_no_trailing_comma(self):
+    def test_alias_names_match_the_sudo_lexer(self):
+        """Only [A-Z][A-Z0-9_]* is a legal alias name."""
+        entries = [f"/usr/bin/command{i} *" for i in range(20)]
+
+        names, _ = format_aliases("SSH_MCP_WEB", entries)
+
+        for name in names:
+            assert re.fullmatch(r"[A-Z][A-Z0-9_]*", name), name
+
+    def test_every_entry_appears_exactly_once(self):
+        """Splitting must not drop or duplicate a command."""
+        entries = [f"/usr/bin/command{i} *" for i in range(12)]
+
+        _, lines = format_aliases("SSH_MCP_WEB", entries)
+
+        rendered = ", ".join(line.split(" = ", 1)[1] for line in lines)
+        assert rendered.split(", ") == entries
+
+    def test_comma_only_between_entries(self):
         """Commas separate entries only."""
-        lines = format_alias_lines("ALIAS", ["/bin/a *", "/bin/b *"])
+        _, lines = format_aliases("ALIAS", ["/bin/a *", "/bin/b *"])
         assert not lines[-1].rstrip().endswith(",")
+        assert lines == ["Cmnd_Alias ALIAS = /bin/a *, /bin/b *"]
+
+    def test_empty_entries_produce_nothing(self):
+        """No entries means no definition and no alias to reference."""
+        assert format_aliases("ALIAS", []) == ([], [])
 
 
 # ---------------------------------------------------------------------------
@@ -404,7 +451,10 @@ class TestRenderSudoers:
             ]
         )
 
-        assert "SSH_MCP_WEB = /usr/bin/docker *, /usr/local/bin/ha *" in content
+        assert (
+            "Cmnd_Alias SSH_MCP_WEB = "
+            "/usr/bin/docker *, /usr/local/bin/ha *" in content
+        )
         assert "deploy ALL = (root) NOPASSWD: SSH_MCP_WEB" in content
 
     def test_install_instructions_are_in_the_file(self):
@@ -414,6 +464,32 @@ class TestRenderSudoers:
         assert "visudo -c -f mcp-ssh-web" in content
         assert "install -m 0440 -o root -g root mcp-ssh-web" in content
         assert "/etc/sudoers.d/mcp-ssh-web" in content
+
+    def test_long_list_is_split_and_fully_referenced(self):
+        """A long list becomes numbered aliases, all named in the user line."""
+        resolved = [
+            (f"cmd{i}", f"/usr/bin/command{i}") for i in range(20)
+        ]
+
+        content = self._render(resolved=resolved)
+
+        assert "\\" not in content
+        definition_names = [
+            line.split(" = ", 1)[0].removeprefix("Cmnd_Alias ")
+            for line in content.splitlines()
+            if line.startswith("Cmnd_Alias SSH_MCP_WEB_")
+        ]
+        assert len(definition_names) > 1
+        user_line = next(
+            line for line in content.splitlines() if line.startswith("deploy ALL")
+        )
+        assert user_line == (
+            "deploy ALL = (root) NOPASSWD: {aliases}".format(
+                aliases=", ".join(definition_names)
+            )
+        )
+        for index, (_, path) in enumerate(resolved):
+            assert f"{path} *" in content, index
 
     def test_unresolved_commands_are_commented(self):
         """A command that did not resolve is noted, not rendered."""
@@ -436,7 +512,7 @@ class TestRenderSudoers:
         content = self._render(resolved=[], unresolved=["docker"])
 
         assert "deploy ALL" not in content
-        assert "SSH_MCP_WEB =" not in content
+        assert "SSH_MCP_WEB" not in content
         assert "# No sudo command could be resolved on this host." in content
         assert "# not found on 10.0.0.5: docker" in content
 
@@ -446,6 +522,74 @@ class TestRenderSudoers:
 
         assert content.endswith("\n")
         assert not content.endswith("\n\n")
+
+
+# ---------------------------------------------------------------------------
+# Parser check — the real visudo, when it is installed
+# ---------------------------------------------------------------------------
+
+
+def _visudo_check(text: str) -> subprocess.CompletedProcess:
+    """Parse *text* with the system ``visudo``; skip when unavailable.
+
+    Args:
+        text: A sudoers document.
+
+    Returns:
+        The completed process, so callers can assert on the exit code.
+    """
+    exe = shutil.which("visudo")
+    if exe is None:
+        pytest.skip("visudo is not installed")
+    return subprocess.run(
+        [exe, "-c", "-f", "-"],
+        input=text,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+class TestParserAcceptsOutput:
+    """Feed the rendered document to a real sudoers parser.
+
+    sudoers has no line-continuation character and needs the ``Cmnd_Alias``
+    keyword, so hand-written expectations can be wrong in ways only a parser
+    catches.  These tests fail on a syntactically invalid document.
+    """
+
+    def _document(self, target: str, commands: list[str]) -> str:
+        return render_sudoers(
+            target=target,
+            username=getpass.getuser(),
+            host="10.0.0.5",
+            resolved=[(c, f"/usr/bin/{c}") for c in commands],
+            unresolved=[],
+            skipped=[],
+            generated_at=dt.datetime(2026, 11, 20, 12, 0, tzinfo=dt.timezone.utc),
+        )
+
+    def test_single_alias_document_parses(self):
+        """A short command list yields valid sudoers."""
+        result = _visudo_check(self._document("web", ["ls", "cat"]))
+
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_split_document_parses(self):
+        """Numbered aliases are valid sudoers, and the user line names them."""
+        commands = [f"cmd{i}" for i in range(20)]
+
+        result = _visudo_check(self._document("web", commands))
+
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_dotted_and_hyphenated_target_parses(self):
+        """A target name sudo cannot spell is sanitized into a valid alias."""
+        result = _visudo_check(
+            self._document("web-1.prod", ["ls", "cat"])
+        )
+
+        assert result.returncode == 0, result.stdout + result.stderr
 
 
 # ---------------------------------------------------------------------------

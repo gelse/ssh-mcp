@@ -119,6 +119,11 @@ without editing sudoers by hand.
   line. The Host field is always `ALL`: sudo compares it against the
   local machine name and never matches an address, and the file only
   applies on the machine it is installed on.
+- **Layout** — one `Cmnd_Alias` per line. sudoers has no line-continuation
+  character, so a list too long for one line becomes numbered aliases
+  (`SSH_MCP_<TARGET>_1`, `_2`, …) that the user line names in turn. Alias
+  names use only `[A-Z0-9_]`, because sudo's lexer accepts nothing else;
+  the file name keeps hyphens.
 - **Arguments** — every entry ends in `*` (`/usr/bin/docker *`), because
   sudoers matches the whole command line while the config matches only
   the base name. A grant for `docker` is therefore root-equivalent for
