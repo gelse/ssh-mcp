@@ -268,8 +268,8 @@ docker compose exec mcp-ssh python -c \
 # → pbkdf2:sha256:100000$<salt>$<hash>
 ```
 
-Or create the key in the Config API dashboard (API Key Rules tab), which hashes
-it server-side and keeps the plaintext out of the config file.
+Or create the key in the Config API dashboard (API Key Rules tab): the server
+generates it, shows the secret once, and stores only the hash.
 
 ### How does hot reload work?
 

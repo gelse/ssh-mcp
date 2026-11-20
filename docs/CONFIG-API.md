@@ -40,7 +40,7 @@ are at `/api/docs`. The dashboard provides:
 - Block pattern editor (add, edit, reorder, delete)
 - Allowed commands editor (default, API key, network rules)
 - Settings editor with validation
-- API key creation — the API hashes the key and the config stores only the hash
+- API key creation — the server generates the key, returns it once, and stores only its hash
 - Backup management (list, restore, delete)
 - Config validation (dry-run)
 
