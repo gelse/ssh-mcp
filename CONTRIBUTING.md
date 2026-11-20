@@ -74,7 +74,7 @@ files.
 
 ## Continuous Integration
 
-Three GitHub Actions workflows run on every push/PR:
+Three GitHub Actions workflows, each with its own trigger:
 
 - **Unit tests** on every push
   (`.github/workflows/test.yml`)

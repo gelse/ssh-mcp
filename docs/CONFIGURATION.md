@@ -30,6 +30,12 @@ volumes:
 Each key is a target identifier (max 128 chars, `[a-zA-Z0-9._-]`).
 Max 1000 targets per config.
 
+The identifier is the **target**. MCP tools take it as their `server_name`
+argument, rules list it under `targets`, and authorization results and logs
+report it as `target` — one identifier under two names. A tool call for
+`server_name: "web-1"` addresses the `web-1` key below; the value is never
+a hostname or alias.
+
 ```json
 {
   "ssh_targets": {
@@ -80,8 +86,9 @@ validated for ReDoS safety at load time.
 
 ## allowed_commands
 
-Three sub-sections: `default` (all clients), `api_keys` (per-key),
-and `networks` (per-CIDR). Each contains an array of rule objects.
+Three sub-sections, all three required: `default` (all clients), `api_keys`
+(per API key), and `networks` (per source CIDR). `api_keys` and `networks`
+may be empty lists; `default` may not.
 
 ```json
 {
@@ -89,23 +96,30 @@ and `networks` (per-CIDR). Each contains an array of rule objects.
     "default": [
       {
         "targets": ["*"],
-        "commands": ["hostname", "uptime", "free", "df"],
-        "sudo_allowed": ["docker", "systemctl"]
+        "commands": ["hostname", "uptime", "free", "df", "systemctl"],
+        "sudo_allowed": ["systemctl"]
       }
     ],
     "api_keys": [
       {
         "name": "deploy-key",
-        "targets": ["web-*"],
-        "commands": ["systemctl restart nginx", "deploy *"],
-        "sudo_allowed": ["*"]
+        "key_hash": "pbkdf2:sha256:100000$<salt>$<hash>",
+        "rules": [
+          {
+            "targets": ["web-1"],
+            "commands": ["systemctl", "journalctl"],
+            "sudo_allowed": ["systemctl"]
+          }
+        ]
       }
     ],
     "networks": [
       {
-        "cidr": "10.0.0.0/8",
-        "targets": ["*"],
-        "commands": ["uptime", "free"]
+        "name": "lan",
+        "range": "10.0.0.0/8",
+        "rules": [
+          { "targets": ["*"], "commands": ["uptime", "free"] }
+        ]
       }
     ]
   }
@@ -114,20 +128,33 @@ and `networks` (per-CIDR). Each contains an array of rule objects.
 
 ### Rule fields
 
+`default` is a list of rules; each `api_keys` and `networks` entry wraps its
+rules in a `rules` list.
+
 | Field | Description |
 |-------|-------------|
-| `targets` | Array of target names or `*` wildcard |
-| `commands` | Array of allowed command prefixes or patterns |
-| `sudo_allowed` | Array of commands allowed with `sudo` (`*` = all) |
+| `targets` | Target ids, or `*` for every target. Each id must exist in `ssh_targets`; prefixes such as `web-*` are not patterns and are rejected |
+| `commands` | Command names, or `*` for every command. Matched against the base name — the first token of the command with any path stripped — so `systemctl` allows `systemctl status ssh` |
+| `sudo_allowed` | Names from this rule's `commands` that may run with `sudo`, or `*` for all of them. A name absent from `commands` is rejected |
 
 When `sudo=True` is passed to `ssh_execute_command`, the command's
 base name must appear in `sudo_allowed` (or be `"*"`).
+
+### API key and network entry fields
+
+| Field | Entry | Description |
+|-------|-------|-------------|
+| `name` | both | Unique name, shown in authorization results (`api_key:<name>`, `network:<name>`) |
+| `key_hash` | `api_keys` | PBKDF2 (`pbkdf2:sha256:<iter>$<salt>$<hash>`) or legacy SHA-256 hash of the key; never the raw key |
+| `range` | `networks` | IPv4 or IPv6 CIDR; overlapping ranges are rejected at load time |
+| `rules` | both | Non-empty list of rules |
 
 ---
 
 ## settings
 
-All runtime settings with defaults from
+Runtime settings. `settings` must be present with `max_output_length` and
+`command_timeout_max`; every other key falls back to its default from
 [`lib/constants.py`](../lib/constants.py) and
 [`default-config.json`](../default-config.json).
 

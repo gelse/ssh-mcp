@@ -58,7 +58,8 @@ Create a minimal config in `config/ssh-mcp-config.json`:
   "ssh_targets": {
     "my-server": {
       "host": "10.0.1.10",
-      "username": "deploy"
+      "username": "deploy",
+      "private_key": "/app/ssh_key"
     }
   },
   "allowed_commands": {
@@ -67,10 +68,21 @@ Create a minimal config in `config/ssh-mcp-config.json`:
         "targets": ["*"],
         "commands": ["hostname", "uptime", "free", "df"]
       }
-    ]
+    ],
+    "api_keys": [],
+    "networks": []
+  },
+  "settings": {
+    "max_output_length": 50000,
+    "command_timeout_max": 120
   }
 }
 ```
+
+`allowed_commands` needs all three sub-sections (`default`, `api_keys`,
+`networks`; the latter two may be empty), each target needs a
+`private_key` or `password`, and `settings` needs `max_output_length`
+and `command_timeout_max`. Everything else has a default.
 
 Generate an API key hash and add it to your config or
 `secrets.json` (see [Configuration](docs/CONFIGURATION.md#secrets)).
@@ -90,14 +102,26 @@ docker compose up -d --build
 
 Six MCP tools are available over Streamable HTTP:
 
-| Tool | Description |
-|------|-------------|
-| `ssh_list_servers` | List configured SSH targets |
-| `ssh_list_allowed_commands` | Show allowed commands for a target |
-| `ssh_execute_command` | Execute a command on a remote server |
-| `ssh_check_connection` | Test SSH connectivity to a target |
-| `ssh_download_file` | Download a file via SFTP |
-| `ssh_upload_file` | Upload a file via SFTP |
+| Tool | Arguments | Description |
+|------|-----------|-------------|
+| `ssh_list_servers` | — | List configured SSH targets |
+| `ssh_list_allowed_commands` | `server_name` | Show allowed commands for a target |
+| `ssh_execute_command` | `server_name`, `command`, `timeout`, `sudo` | Execute a command on a remote server |
+| `ssh_check_connection` | `server_name`, `timeout` | Test SSH connectivity to a target |
+| `ssh_download_file` | `server_name`, `remote_path` | Download a file via SFTP |
+| `ssh_upload_file` | `server_name`, `remote_path`, `content`, `permissions` | Upload a file via SFTP |
+
+### `server_name` is the target
+
+Every tool that addresses a machine takes `server_name`, and its value is the
+**target**: a key in `ssh_targets`, the identifier rules list under `targets`,
+and the `target` field in authorization decisions and audit logs. The two
+names describe one thing.
+
+`"server_name": "web-1"` therefore addresses the `ssh_targets` entry `web-1`,
+and is authorized against every rule whose `targets` contains `web-1` or `*`.
+Passing a name that has no `ssh_targets` entry is denied by the first
+authorization layer — it is not an alias for a hostname.
 
 ### Tool Naming Convention
 
@@ -236,13 +260,16 @@ transport. Pass your API key via `X-API-Key` or
 
 ### How do I generate an API key hash?
 
+Hashing is only needed when you write the config file by hand:
+
 ```bash
 docker compose exec mcp-ssh python -c \
   "from lib.crypto import hash_api_key; print(hash_api_key('your-key'))"
 # → pbkdf2:sha256:100000$<salt>$<hash>
 ```
 
-Or use the hash utility in the Config API dashboard.
+Or create the key in the Config API dashboard (API Key Rules tab), which hashes
+it server-side and keeps the plaintext out of the config file.
 
 ### How does hot reload work?
 
@@ -260,7 +287,7 @@ See [Security Model](docs/SECURITY.md) for the full chain.
 ### How does rate limiting work?
 
 Per-IP sliding window, default 60 requests per 60 seconds.
-Exceeding the limit returns HTTP 503. Configure via
+Exceeding the limit returns HTTP 429 with a `Retry-After` header. Configure via
 `settings.rate_limit` in the config file.
 
 ### Where do logs go?

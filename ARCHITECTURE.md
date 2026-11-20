@@ -568,11 +568,17 @@ graph TB
 
 ## Appendix: Tool Summary
 
-| Tool | Read-only | Description |
-|------|-----------|-------------|
-| `ssh_list_servers` | Yes | List configured SSH targets |
-| `ssh_list_allowed_commands` | Yes | List commands allowed for caller + target |
-| `ssh_check_connection` | Yes | Verify SSH connectivity to a target |
-| `ssh_execute_command` | No | Execute a command on a remote server |
-| `ssh_download_file` | Yes | SFTP download from remote to local |
-| `ssh_upload_file` | No | SFTP upload from local to remote |
+Each tool that addresses a machine takes `server_name`, whose value is the
+**target**: a key in `ssh_targets`, the identifier rules match under
+`targets`, and the `target` field in authorization results and logs. Handlers
+pass it through `sanitize_target_name()` into
+[`AuthorizationManager.check_command()`](lib/auth.py:209) as `target`.
+
+| Tool | Arguments | Read-only | Description |
+|------|-----------|-----------|-------------|
+| `ssh_list_servers` | — | Yes | List configured SSH targets |
+| `ssh_list_allowed_commands` | `server_name` | Yes | List commands allowed for caller + target |
+| `ssh_check_connection` | `server_name`, `timeout` | Yes | Verify SSH connectivity to a target |
+| `ssh_execute_command` | `server_name`, `command`, `timeout`, `sudo` | No | Execute a command on a remote server |
+| `ssh_download_file` | `server_name`, `remote_path` | Yes | SFTP download from remote to local |
+| `ssh_upload_file` | `server_name`, `remote_path`, `content`, `permissions` | No | SFTP upload from local to remote |
