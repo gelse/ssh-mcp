@@ -1597,8 +1597,29 @@ function openCommandsModal(cell, entry, entryIdx, ctx) {
 
   const thead = document.createElement('thead');
   const headRow = document.createElement('tr');
+
+  // Command column header doubles as the sort control: a click cycles
+  // ascending → descending → ascending. Only the display order changes here;
+  // saves always write the alphabetical order.
+  const commandTh = document.createElement('th');
+  commandTh.className = 'text-left font-medium text-gray-600 pb-2 pr-2';
+  commandTh.setAttribute('aria-sort', 'none');
+  const sortBtn = document.createElement('button');
+  sortBtn.type = 'button';
+  sortBtn.id = 'm-cmd-sort';
+  sortBtn.className = 'inline-flex items-center gap-1 font-medium text-gray-600 hover:text-gray-900';
+  sortBtn.title = 'Sort by command';
+  const sortLabel = document.createElement('span');
+  sortLabel.textContent = 'Command';
+  const sortArrow = document.createElement('span');
+  sortArrow.className = 'text-xs leading-none';
+  sortArrow.textContent = '\u2195';
+  sortBtn.appendChild(sortLabel);
+  sortBtn.appendChild(sortArrow);
+  commandTh.appendChild(sortBtn);
+  headRow.appendChild(commandTh);
+
   [
-    { text: 'Command', className: 'text-left font-medium text-gray-600 pb-2 pr-2' },
     { text: 'Sudo', className: 'text-center font-medium text-gray-600 pb-2 px-2 w-16' },
     { text: '', className: 'w-8' },
   ].forEach((spec) => {
@@ -1751,6 +1772,36 @@ function openCommandsModal(cell, entry, entryIdx, ctx) {
     next.input.focus();
   }
 
+  // Current display sort direction: null until the header is first clicked.
+  let sortDirection = null;
+
+  /**
+   * Reorder the visible rows by command text, keeping each row's sudo flag
+   * attached to its command. The trailing "add command" row always stays last
+   * and is never sorted; this only affects the display, saves always write the
+   * alphabetical order.
+   *
+   * @param {'asc'|'desc'} direction - sort order to apply
+   * @returns {void}
+   */
+  function applySort(direction) {
+    const trailing = rows[rows.length - 1];
+    const sorted = rows.slice(0, -1).sort((a, b) => {
+      const cmp = a.input.value.trim().localeCompare(b.input.value.trim());
+      return direction === 'desc' ? -cmp : cmp;
+    });
+    sorted.forEach((row) => tbody.insertBefore(row.tr, trailing.tr));
+    rows.length = 0;
+    rows.push(...sorted, trailing);
+    sortDirection = direction;
+    sortArrow.textContent = direction === 'asc' ? '\u2191' : '\u2193';
+    commandTh.setAttribute('aria-sort', direction === 'asc' ? 'ascending' : 'descending');
+  }
+
+  sortBtn.addEventListener('click', () => {
+    applySort(sortDirection === 'asc' ? 'desc' : 'asc');
+  });
+
   /**
    * Read the table into command and sudo-flag lists. Blank rows are dropped;
    * order and duplicates are preserved.
@@ -1773,7 +1824,15 @@ function openCommandsModal(cell, entry, entryIdx, ctx) {
   async function doSave() {
     if (busy) return;
     clearError();
-    const { commands, flags } = readRows();
+    const typed = readRows();
+
+    // Saves always write the alphabetical order, so the stored list is
+    // normalised no matter how the table is currently displayed.
+    const ordered = typed.commands
+      .map((command, i) => ({ command, sudo: typed.flags[i] }))
+      .sort((a, b) => a.command.localeCompare(b.command));
+    const commands = ordered.map((item) => item.command);
+    const flags = ordered.map((item) => item.sudo);
 
     // Nothing left to store: offer to delete the target configuration.
     if (commands.length === 0) {
