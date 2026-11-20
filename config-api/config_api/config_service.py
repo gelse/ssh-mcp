@@ -46,6 +46,18 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def _has_value(value: object) -> bool:
+    """Return whether *value* counts as a configured secret.
+
+    Args:
+        value: The raw config value for a secret field.
+
+    Returns:
+        ``True`` for a non-blank string, ``False`` for anything else.
+    """
+    return isinstance(value, str) and value.strip() != ""
+
+
 class ConfigService:
     """Read, validate, and atomically write the SSH MCP config file.
 
@@ -206,7 +218,8 @@ class ConfigService:
             name: The SSH target identifier.
 
         Returns:
-            The target config dict (password, private_key stripped).
+            The target config dict with ``password`` and ``private_key``
+            stripped, plus ``has_password`` / ``has_private_key``.
 
         Raises:
             KeyError: If the target does not exist.
@@ -216,13 +229,8 @@ class ConfigService:
         targets = config.get("ssh_targets", {})
         if name not in targets:
             raise KeyError(f"SSH target '{name}' not found in config")
-        target = targets[name]
-        # Strip secrets from a single target dict
-        clean = copy.deepcopy(target)
-        if isinstance(clean, dict):
-            for field in self._SECRET_FIELDS:
-                clean.pop(field, None)
-        return clean
+        stripped = self._strip_secrets({"ssh_targets": {name: targets[name]}})
+        return stripped["ssh_targets"][name]
 
     @property
     def _use_direct_ssh(self) -> bool:
@@ -610,9 +618,12 @@ class ConfigService:
 
         When editing an existing target, empty or missing ``password`` /
         ``private_key`` fields in *target_data* are treated as "keep
-        unchanged" — the existing secret values are preserved.  On
-        creation (new target), at least one credential is still required
-        by the config-schema validation in ``lib/config.py``.
+        unchanged" — the existing secret values are preserved.  An explicit
+        JSON ``null`` for one of them means "delete the stored value", so a
+        credential can be removed without recreating the target.  On
+        creation (new target), and after a removal, at least one credential
+        is still required by the config-schema validation in
+        ``lib/config.py``.
 
         Args:
             name: The SSH target identifier.
@@ -634,10 +645,13 @@ class ConfigService:
 
         if name in targets:
             # --- editing an existing target ---
-            # Preserve existing secrets when the caller sends empty
-            # or omitted password / private_key fields.
+            # An explicit null deletes the stored secret; empty or omitted
+            # fields keep it.
             existing = targets[name]
             for field in self._SECRET_FIELDS:
+                if field in target_data and target_data[field] is None:
+                    del target_data[field]
+                    continue
                 new_value = target_data.get(field)
                 if not new_value or (isinstance(new_value, str) and not new_value.strip()):
                     # Keep the existing secret if present
@@ -646,12 +660,10 @@ class ConfigService:
 
         targets[name] = target_data
         written = self.write_config(current)
-        target = written["ssh_targets"][name]
-        clean = copy.deepcopy(target)
-        if isinstance(clean, dict):
-            for field in self._SECRET_FIELDS:
-                clean.pop(field, None)
-        return clean
+        stripped = self._strip_secrets(
+            {"ssh_targets": {name: written["ssh_targets"][name]}}
+        )
+        return stripped["ssh_targets"][name]
 
     def delete_ssh_target(self, name: str) -> None:
         """Delete a single SSH target.
@@ -893,6 +905,10 @@ class ConfigService:
         - 'private_key' from each SSH target
         - 'key_hash' from API key entries in allowed_commands
 
+        Each SSH target instead reports ``has_password`` and
+        ``has_private_key``, so the dashboard can offer to remove a stored
+        credential without the value ever leaving the server.
+
         Args:
             config: The config dict to strip secrets from.
 
@@ -906,6 +922,12 @@ class ConfigService:
         if isinstance(targets, dict):
             for target_def in targets.values():
                 if isinstance(target_def, dict):
+                    target_def["has_password"] = _has_value(
+                        target_def.get("password")
+                    )
+                    target_def["has_private_key"] = _has_value(
+                        target_def.get("private_key")
+                    )
                     for field in self._SECRET_FIELDS:
                         target_def.pop(field, None)
 

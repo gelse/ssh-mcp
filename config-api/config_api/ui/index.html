@@ -125,6 +125,25 @@ function el(tag, className) {
   return e;
 }
 
+function makeRemoveCheckbox(container, id, labelText, field) {
+  // A destructive option sits below the field it clears, and disables that
+  // field while it is checked so the two cannot disagree.
+  const group = el('label', 'flex items-center gap-2 text-sm text-red-700');
+  const box = document.createElement('input');
+  box.type = 'checkbox';
+  box.id = id;
+  const text = el('span');
+  text.textContent = labelText;
+  group.appendChild(box);
+  group.appendChild(text);
+  container.appendChild(group);
+  box.addEventListener('change', () => {
+    field.disabled = box.checked;
+    if (box.checked) field.value = '';
+  });
+  return box;
+}
+
 function makeFormGroup(labelText, opts) {
   const group = el('div');
   const label = el('label', 'block text-sm font-medium text-gray-700 mb-1');
@@ -564,17 +583,29 @@ async function renderTargets() {
         checkCmdInput.type = 'text';
         checkCmdInput.id = 'm-checkcommand';
         checkCmdInput.placeholder = 'echo ping';
-        div.appendChild(makeFormGroup('Name', { id: 'm-name' }));
-        div.children[0].querySelector('input').replaceWith(nameInput);
+        const nameGroup = makeFormGroup('Name', { id: 'm-name' });
+        nameGroup.querySelector('input').replaceWith(nameInput);
+        div.appendChild(nameGroup);
         div.appendChild(makeFormGroup('Host', { id: 'm-host' }));
-        div.appendChild(makeFormGroup('Port', { id: 'm-port', type: 'number' }));
-        div.children[2].querySelector('input').replaceWith(portInput);
+        const portGroup = makeFormGroup('Port', { id: 'm-port', type: 'number' });
+        portGroup.querySelector('input').replaceWith(portInput);
+        div.appendChild(portGroup);
         div.appendChild(makeFormGroup('Username', { id: 'm-username' }));
-        div.appendChild(makeFormGroup('Password', { id: 'm-password', type: 'password', placeholder: 'Leave empty to keep unchanged' }));
-        div.appendChild(makeFormGroup('Private Key', { id: 'm-private-key', type: 'textarea', rows: 3, placeholder: 'Leave empty to keep unchanged' }));
-        div.children[5].querySelector('textarea').replaceWith(privateKeyTA);
-        div.appendChild(makeFormGroup('Check Command', { id: 'm-checkcommand', placeholder: 'echo ping' }));
-        div.children[6].querySelector('input').replaceWith(checkCmdInput);
+        const passwordGroup = makeFormGroup('Password', { id: 'm-password', type: 'password', placeholder: 'Leave empty to keep unchanged' });
+        div.appendChild(passwordGroup);
+        const passwordInput = passwordGroup.querySelector('input');
+        const privateKeyGroup = makeFormGroup('Private Key', { id: 'm-private-key', type: 'textarea', rows: 3, placeholder: 'Leave empty to keep unchanged' });
+        privateKeyGroup.querySelector('textarea').replaceWith(privateKeyTA);
+        div.appendChild(privateKeyGroup);
+        const removePasswordBox = target.has_password
+          ? makeRemoveCheckbox(div, 'm-remove-password', 'Remove the stored password', passwordInput)
+          : null;
+        const removeKeyBox = target.has_private_key
+          ? makeRemoveCheckbox(div, 'm-remove-private-key', 'Remove the stored private key', privateKeyTA)
+          : null;
+        const checkGroup = makeFormGroup('Check Command', { id: 'm-checkcommand', placeholder: 'echo ping' });
+        checkGroup.querySelector('input').replaceWith(checkCmdInput);
+        div.appendChild(checkGroup);
         showModal(
           'Edit Target',
           () => div,
@@ -588,8 +619,18 @@ async function renderTargets() {
           if (!host) throw new Error('Host is required');
           if (!username) throw new Error('Username is required');
           const payload = { host, port, username };
-          if (password) payload.password = password;
-          if (privateKey) payload.private_key = privateKey;
+          // An explicit null deletes the stored credential; an empty field
+          // keeps whatever is already saved on the server.
+          if (removePasswordBox && body.querySelector('#m-remove-password').checked) {
+            payload.password = null;
+          } else if (password) {
+            payload.password = password;
+          }
+          if (removeKeyBox && body.querySelector('#m-remove-private-key').checked) {
+            payload.private_key = null;
+          } else if (privateKey) {
+            payload.private_key = privateKey;
+          }
           if (checkcommand) payload.checkcommand = checkcommand;
           const r = await api('PUT', `/config/ssh_targets/${encodeURIComponent(name)}`, payload);
           if (!r.ok) {

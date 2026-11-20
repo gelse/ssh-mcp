@@ -1361,6 +1361,78 @@ class TestPutSshTarget:
         raw = service.read_config()
         assert raw["ssh_targets"]["test-server"]["password"] == "secret123"
 
+    def test_null_password_removes_the_stored_secret(
+        self, service: "ConfigService"
+    ) -> None:
+        """An explicit null deletes the stored password."""
+        # A key keeps the target valid once the password is gone.
+        config = service.read_config()
+        config["ssh_targets"]["test-server"]["private_key"] = "/app/ssh_key"
+        service.write_config(config)
+
+        result = service.put_ssh_target(
+            "test-server",
+            {"host": "10.0.0.1", "port": 22, "username": "admin", "password": None},
+        )
+
+        assert result["has_password"] is False
+        raw = service.read_config()
+        assert "password" not in raw["ssh_targets"]["test-server"]
+        assert raw["ssh_targets"]["test-server"]["private_key"] == "/app/ssh_key"
+
+    def test_null_private_key_removes_the_stored_key(
+        self, service: "ConfigService"
+    ) -> None:
+        """An explicit null deletes the stored private key."""
+        result = service.put_ssh_target(
+            "test-server",
+            {"host": "10.0.0.1", "port": 22, "username": "admin",
+             "private_key": None},
+        )
+
+        assert result["has_private_key"] is False
+        raw = service.read_config()
+        assert "private_key" not in raw["ssh_targets"]["test-server"]
+        assert raw["ssh_targets"]["test-server"]["password"] == "secret123"
+
+    def test_removing_the_only_credential_is_rejected(
+        self, service: "ConfigService"
+    ) -> None:
+        """A target must keep at least one credential."""
+        with pytest.raises(ConfigValidationError, match="private_key"):
+            service.put_ssh_target(
+                "test-server",
+                {"host": "10.0.0.1", "port": 22, "username": "admin",
+                 "password": None},
+            )
+
+        raw = service.read_config()
+        assert raw["ssh_targets"]["test-server"]["password"] == "secret123"
+
+    def test_removing_an_absent_secret_is_a_no_op(
+        self, service: "ConfigService"
+    ) -> None:
+        """Null on a target that never had the field does not fail."""
+        result = service.put_ssh_target(
+            "test-server",
+            {"host": "10.0.0.1", "port": 22, "username": "admin",
+             "private_key": None},
+        )
+
+        assert result["has_private_key"] is False
+        raw = service.read_config()
+        assert raw["ssh_targets"]["test-server"]["password"] == "secret123"
+
+    def test_has_flags_reported_on_read(
+        self, service: "ConfigService"
+    ) -> None:
+        """Reads report which credentials exist without exposing them."""
+        target = service.get_ssh_target("test-server")
+
+        assert target["has_password"] is True
+        assert target["has_private_key"] is False
+        assert "password" not in target
+
     def test_replaces_password_when_new_value_provided(
         self, service: "ConfigService"
     ) -> None:

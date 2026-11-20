@@ -105,6 +105,23 @@ Valid sections: `ssh_targets`, `block_patterns`,
 
 `{name}` is a target id — the same value MCP tools take as `server_name`.
 
+Credentials are never returned: a target read carries `has_password` and
+`has_private_key` instead, so the dashboard can show what is stored without
+seeing it.
+
+`PUT` is read-modify-write for secrets. A missing or empty `password` /
+`private_key` keeps the stored value, an explicit `null` deletes it, and a
+new value replaces it:
+
+```json
+{"host": "10.42.43.13", "port": 22, "username": "werner", "password": null}
+```
+
+Deleting the last credential is rejected with 400 — the config needs at
+least one of `password` or `private_key` per target. In the dashboard, the
+Edit dialog offers a *Remove the stored password* checkbox (and the same
+for the key) whenever the server reports one is stored.
+
 #### Sudoers generation
 
 `GET /api/config/ssh_targets/{name}/sudoers` builds a
