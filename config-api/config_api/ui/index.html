@@ -1406,10 +1406,17 @@ function renderApiKeyRules(container, apiKeys, defaultRules) {
 /** Wildcard marker for sudo_allowed meaning "every command in the rule". */
 const SUDO_ALLOWED_WILDCARD = '*';
 
+/** Wildcard marker in a rule's targets list: the rule applies to every target. */
+const TARGETS_WILDCARD = '*';
+
 /**
- * Collect the commands a network rule inherits from the default rules: every
- * default rule whose targets are the same set as `targets` contributes all of
- * its commands.
+ * Collect the commands a network rule inherits from the default rules.
+ *
+ * A default rule applies to the rule when its targets are the same set as
+ * `targets`, or when it names the wildcard `*` — such a rule applies to every
+ * target, so it matches any rule. Matching runs one way only: a network rule
+ * that serves every target (`targets` is `['*']`) still only inherits from
+ * wildcard default rules, never from every default rule in the config.
  *
  * @param {string[]} targets - the network rule's targets
  * @param {Object[]} defaultRules - `allowed_commands.default`
@@ -1420,8 +1427,13 @@ function defaultCommandsFor(targets, defaultRules) {
   const inherited = new Set();
   (Array.isArray(defaultRules) ? defaultRules : []).forEach((rule) => {
     const ruleTargets = Array.isArray(rule.targets) ? rule.targets : [];
-    if (ruleTargets.length !== wanted.size) return;
-    if (!ruleTargets.every((target) => wanted.has(target))) return;
+    const wildcard = ruleTargets.includes(TARGETS_WILDCARD);
+    if (!wildcard) {
+      // An all-targets rule has no matching default rule of its own.
+      if (wanted.has(TARGETS_WILDCARD)) return;
+      if (ruleTargets.length !== wanted.size) return;
+      if (!ruleTargets.every((target) => wanted.has(target))) return;
+    }
     (Array.isArray(rule.commands) ? rule.commands : []).forEach((command) => {
       inherited.add(command);
     });
