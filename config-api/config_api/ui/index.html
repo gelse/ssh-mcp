@@ -25,9 +25,9 @@
     /* Rule-group tables: one divider above each rule group, whole-group hover */
     .rule-group-start { border-top: 1px solid #e5e7eb; }
     .rule-group-hover { background-color: #f9fafb; }
-    /* Editable Network Rules cells (Targets, Range, Commands): pointer cursor
-       plus a dashed underline hint on hover/focus; suppressed while the inline
-       range editor is open */
+    /* Editable Network Rules cells (Name, Range, Targets, Commands): pointer
+       cursor plus a dashed underline hint on hover/focus; suppressed while an
+       inline editor is open */
     .commands-cell,
     .editable-cell { cursor: pointer; }
     .commands-cell:not(.is-editing):hover,
@@ -2513,36 +2513,48 @@ function openTargetsModal(cell, entry, entryIdx, ctx) {
 }
 
 /**
- * Make one Network Rules Range cell inline-editable.
+ * Rules every new network starts with: `ls` on all targets, so the network is
+ * valid the moment it is created and can be widened in the table afterwards.
  *
- * Clicking the cell turns the range into a text field. Enter or Ctrl/Cmd+Enter
- * validates the CIDR and saves; a rejected or invalid value keeps the field
- * editable with the wrong text and an inline message; Escape (and blur) cancel
- * back to the stored range. Only this network's `range` is ever written.
+ * @returns {Object[]} a fresh single-rule list
+ */
+function newNetworkRules() {
+  return [{ targets: ['*'], commands: ['ls'] }];
+}
+
+/**
+ * Make a Network Rules table cell inline-editable.
  *
- * @param {HTMLTableCellElement} cell - the Range cell
- * @param {Object} network - the network this cell renders
- * @param {number} netIdx - index of that network in `networks`
- * @param {Object} ctx - rendering context captured by the caller
+ * Clicking the cell turns its text into a field. Enter or Ctrl/Cmd+Enter
+ * validates the value and saves it; an invalid or rejected value keeps the
+ * field editable with the wrong text and an inline message; Escape and blur
+ * cancel back to the stored value. Only one inline editor is open at a time.
+ *
+ * @param {HTMLTableCellElement} cell - the cell to make editable
+ * @param {Object} spec - editor behaviour
+ * @param {string} spec.field - accessible name of the input
+ * @param {string} spec.ariaLabel - accessible name of the cell
+ * @param {Function} spec.read - () => stored text
+ * @param {Function} spec.validate - (text) => error message, or null when valid
+ * @param {Function} spec.commit - async (text) => error message on failure,
+ *   null on success; applies the change to the underlying model and rolls it
+ *   back itself when saving fails
+ * @param {string} spec.successToast - toast shown after a successful save
+ * @param {boolean} [spec.mono] - render the field in a monospace font
  * @returns {void}
  */
-function attachRangeEditor(cell, network, netIdx, ctx) {
-  if (!network || typeof network !== 'object') return;
-
-  const stored = () => (typeof network.range === 'string' ? network.range : '');
-
+function attachInlineEditor(cell, spec) {
   cell.classList.add('editable-cell');
   cell.tabIndex = 0;
   cell.title = 'Click to edit';
-  cell.setAttribute('aria-label', `Edit CIDR range for ${network.name || 'network'}`);
+  cell.setAttribute('aria-label', spec.ariaLabel);
 
   let editing = false;
 
   function open() {
     if (editing) return;
     // Only one inline editor may be open at a time.
-    const other = document.querySelector('td.is-editing');
-    if (other) return;
+    if (document.querySelector('td.is-editing')) return;
 
     editing = true;
     cell.classList.add('is-editing');
@@ -2550,9 +2562,10 @@ function attachRangeEditor(cell, network, netIdx, ctx) {
 
     const input = document.createElement('input');
     input.type = 'text';
-    input.value = stored();
-    input.className = 'w-full px-2 py-1 border border-gray-300 rounded text-sm font-mono';
-    input.setAttribute('aria-label', 'CIDR range');
+    input.value = spec.read();
+    input.className = 'w-full px-2 py-1 border border-gray-300 rounded text-sm'
+      + (spec.mono ? ' font-mono' : '');
+    input.setAttribute('aria-label', spec.field);
     const errorP = document.createElement('p');
     errorP.className = 'text-red-600 text-xs mt-1 hidden';
     cell.appendChild(input);
@@ -2583,45 +2596,28 @@ function attachRangeEditor(cell, network, netIdx, ctx) {
       if (handled) return;
       const value = input.value.trim();
 
-      if (value === stored()) {
+      if (value === spec.read()) {
         handled = true;
-        close(stored());
+        close(spec.read());
         return;
       }
-      if (!isValidCidr(value)) {
-        showError('Not a valid CIDR');
+      const invalid = spec.validate(value);
+      if (invalid) {
+        showError(invalid);
         return;
       }
 
       handled = true;
       busy = true;
-      const previous = network.range;
-      // Optimistic in-memory commit keeps any queued payload current.
-      network.range = value;
-
-      let res;
-      try {
-        res = await enqueueCommandsPut(() =>
-          ctx.networks.map((networkEntry, i) =>
-            i === netIdx ? { ...networkEntry } : networkEntry
-          )
-        );
-      } catch (e) {
-        network.range = previous;
+      const failure = await spec.commit(value);
+      if (failure) {
         handled = false;
         busy = false;
-        showError('Failed to save');
-        return;
-      }
-      if (!res.ok) {
-        network.range = previous;
-        handled = false;
-        busy = false;
-        showError(await responseErrorMessage(res, 'Failed to save'));
+        showError(failure);
         return;
       }
       close(value);
-      showToast('Range updated');
+      showToast(spec.successToast);
     }
 
     input.addEventListener('keydown', (e) => {
@@ -2630,7 +2626,7 @@ function attachRangeEditor(cell, network, netIdx, ctx) {
         e.preventDefault();
         e.stopPropagation();
         handled = true;
-        close(stored());
+        close(spec.read());
         return;
       }
       if (e.key === 'Enter') {
@@ -2640,11 +2636,11 @@ function attachRangeEditor(cell, network, netIdx, ctx) {
       }
     });
 
-    // Losing focus cancels: the stored range comes back, no request is sent.
+    // Losing focus cancels: the stored value comes back, no request is sent.
     input.addEventListener('blur', () => {
       if (handled || busy) return;
       handled = true;
-      close(stored());
+      close(spec.read());
     });
   }
 
@@ -2657,6 +2653,89 @@ function attachRangeEditor(cell, network, netIdx, ctx) {
       e.preventDefault();
       open();
     }
+  });
+}
+
+/**
+ * Persist a field of one network by re-sending the whole networks array.
+ *
+ * @param {Object} network - the network object to mutate
+ * @param {string} key - `name` or `range`
+ * @param {string} value - the new value
+ * @param {number} netIdx - index of that network in `networks`
+ * @param {Object} ctx - rendering context captured by the caller
+ * @param {Object[]} ctx.networks - full in-memory networks array
+ * @returns {Promise<string|null>} error message on failure, null on success
+ */
+async function saveNetworkField(network, key, value, netIdx, ctx) {
+  const previous = network[key];
+  // Optimistic in-memory commit keeps any queued payload current.
+  network[key] = value;
+
+  let res;
+  try {
+    res = await enqueueCommandsPut(() =>
+      ctx.networks.map((entry, i) => (i === netIdx ? { ...entry } : entry))
+    );
+  } catch (e) {
+    network[key] = previous;
+    return 'Failed to save';
+  }
+  if (!res.ok) {
+    network[key] = previous;
+    return responseErrorMessage(res, 'Failed to save');
+  }
+  return null;
+}
+
+/**
+ * Make one Network Rules Range cell inline-editable.
+ *
+ * Enter or Ctrl/Cmd+Enter validates the CIDR and saves; a rejected or invalid
+ * value keeps the field editable with the wrong text and an inline message;
+ * Escape (and blur) cancel back to the stored range. Only this network's
+ * `range` is ever written.
+ *
+ * @param {HTMLTableCellElement} cell - the Range cell
+ * @param {Object} network - the network this cell renders
+ * @param {number} netIdx - index of that network in `networks`
+ * @param {Object} ctx - rendering context captured by the caller
+ * @returns {void}
+ */
+function attachRangeEditor(cell, network, netIdx, ctx) {
+  if (!network || typeof network !== 'object') return;
+  attachInlineEditor(cell, {
+    field: 'CIDR range',
+    ariaLabel: `Edit CIDR range for ${network.name || 'network'}`,
+    mono: true,
+    read: () => (typeof network.range === 'string' ? network.range : ''),
+    validate: (text) => (isValidCidr(text) ? null : 'Not a valid CIDR'),
+    successToast: 'Range updated',
+    commit: (value) => saveNetworkField(network, 'range', value, netIdx, ctx),
+  });
+}
+
+/**
+ * Make one Network Rules Name cell inline-editable.
+ *
+ * A network name may be changed in place; the same keys as the Range editor
+ * apply (Enter/Ctrl+Enter save, Escape and blur cancel).
+ *
+ * @param {HTMLTableCellElement} cell - the Name cell
+ * @param {Object} network - the network this cell renders
+ * @param {number} netIdx - index of that network in `networks`
+ * @param {Object} ctx - rendering context captured by the caller
+ * @returns {void}
+ */
+function attachNameEditor(cell, network, netIdx, ctx) {
+  if (!network || typeof network !== 'object') return;
+  attachInlineEditor(cell, {
+    field: 'Network name',
+    ariaLabel: `Edit name for ${network.name || 'network'}`,
+    read: () => (typeof network.name === 'string' ? network.name : ''),
+    validate: (text) => (text ? null : 'Name is required'),
+    successToast: 'Name updated',
+    commit: (value) => saveNetworkField(network, 'name', value, netIdx, ctx),
   });
 }
 
@@ -2706,6 +2785,7 @@ function renderNetworkRules(container, networks, sshTargets) {
     const nameCell = document.createElement('td');
     nameCell.className = 'px-4 py-3 font-medium text-sm';
     nameCell.textContent = net.name || `Network ${idx}`;
+    attachNameEditor(nameCell, net, idx, { networks });
 
     const rangeCell = document.createElement('td');
     rangeCell.className = 'px-4 py-3 text-sm font-mono';
@@ -2714,60 +2794,10 @@ function renderNetworkRules(container, networks, sshTargets) {
 
     const actionsCell = document.createElement('td');
     actionsCell.className = 'px-4 py-3';
-    const editBtn = document.createElement('button');
-    editBtn.className = 'text-blue-600 hover:text-blue-800 text-sm mr-3';
-    editBtn.textContent = 'Edit';
     const deleteBtn = document.createElement('button');
     deleteBtn.className = 'text-red-600 hover:text-red-800 text-sm';
     deleteBtn.textContent = 'Delete';
-    actionsCell.appendChild(editBtn);
     actionsCell.appendChild(deleteBtn);
-
-    editBtn.addEventListener('click', () => {
-      showModal('Edit Network Rule', () => {
-        const div = el('div', 'space-y-4');
-        div.appendChild(makeFormGroup('Name', { id: 'm-net-name' }));
-        div.appendChild(makeFormGroup('CIDR Range', { id: 'm-net-range', placeholder: 'e.g. 10.0.0.0/8', class: 'w-full px-3 py-2 border rounded text-sm font-mono' }));
-        div.appendChild(makeFormGroup('Rules (JSON array)', { id: 'm-net-rules', type: 'textarea', rows: 6, class: 'w-full px-3 py-2 border rounded text-sm font-mono' }));
-        const helpP = el('p', 'text-xs text-gray-500 mt-1');
-        helpP.textContent = 'Format: [{"targets": ["..."], "commands": ["..."]}]';
-        div.children[2].appendChild(helpP);
-        const errP = el('p', 'text-red-600 text-xs mt-1 hidden');
-        errP.id = 'm-net-rules-error';
-        div.children[2].appendChild(errP);
-        return div;
-      }, async (body) => {
-        const errEl = body.querySelector('#m-net-rules-error');
-        const name = body.querySelector('#m-net-name').value.trim();
-        const range = body.querySelector('#m-net-range').value.trim();
-        let newRules;
-        try {
-          newRules = JSON.parse(body.querySelector('#m-net-rules').value);
-        } catch (e) {
-          errEl.textContent = 'Invalid JSON: ' + e.message;
-          errEl.classList.remove('hidden');
-          throw new Error('Invalid JSON');
-        }
-        if (!name) throw new Error('Name is required');
-        if (!range) throw new Error('Range is required');
-        if (!Array.isArray(newRules)) throw new Error('Rules must be a JSON array');
-        const updatedNetworks = [...networks];
-        updatedNetworks[idx] = { name, range, rules: newRules };
-        const r = await api('PUT', '/config/allowed_commands', { networks: updatedNetworks });
-        if (!r.ok) {
-          const err = await r.json();
-          throw new Error(err.message || 'Failed to save');
-        }
-        showToast('Network rule updated');
-        renderRules();
-      },
-        (body) => {
-          body.querySelector('#m-net-name').value = net.name || '';
-          body.querySelector('#m-net-range').value = net.range || '';
-          body.querySelector('#m-net-rules').value = JSON.stringify(rules, null, 2);
-        }
-      );
-    });
 
     deleteBtn.addEventListener('click', async () => {
       const ok = await confirm(`Delete network rule "${net.name || `Network ${idx}`}"?`);
@@ -2807,30 +2837,21 @@ function renderNetworkRules(container, networks, sshTargets) {
       const div = el('div', 'space-y-4');
       div.appendChild(makeFormGroup('Name', { id: 'm-net-name', placeholder: 'e.g. office-network' }));
       div.appendChild(makeFormGroup('CIDR Range', { id: 'm-net-range', placeholder: 'e.g. 10.0.0.0/8', class: 'w-full px-3 py-2 border rounded text-sm font-mono' }));
-      div.appendChild(makeFormGroup('Rules (JSON array)', { id: 'm-net-rules', type: 'textarea', rows: 6, class: 'w-full px-3 py-2 border rounded text-sm font-mono', placeholder: '[{"targets": ["server1"], "commands": ["ls"]}]', value: '[]' }));
-      const helpP = el('p', 'text-xs text-gray-500 mt-1');
-      helpP.textContent = 'Format: [{"targets": ["..."], "commands": ["..."]}]';
-      div.children[2].appendChild(helpP);
-      const errP = el('p', 'text-red-600 text-xs mt-1 hidden');
-      errP.id = 'm-net-rules-error';
-      div.children[2].appendChild(errP);
+      const helpP = el('p', 'text-xs text-gray-500');
+      helpP.textContent = 'Starts with one rule allowing "ls" on all targets — '
+        + 'edit targets and commands in the table afterwards.';
+      div.appendChild(helpP);
       return div;
     }, async (body) => {
-      const errEl = body.querySelector('#m-net-rules-error');
       const name = body.querySelector('#m-net-name').value.trim();
       const range = body.querySelector('#m-net-range').value.trim();
-      let newRules;
-      try {
-        newRules = JSON.parse(body.querySelector('#m-net-rules').value);
-      } catch (e) {
-        errEl.textContent = 'Invalid JSON: ' + e.message;
-        errEl.classList.remove('hidden');
-        throw new Error('Invalid JSON');
-      }
       if (!name) throw new Error('Name is required');
       if (!range) throw new Error('Range is required');
-      if (!Array.isArray(newRules)) throw new Error('Rules must be a JSON array');
-      const updatedNetworks = [...networks, { name, range, rules: newRules }];
+      if (!isValidCidr(range)) throw new Error('Not a valid CIDR');
+      const updatedNetworks = [
+        ...networks,
+        { name, range, rules: newNetworkRules() },
+      ];
       const r = await api('PUT', '/config/allowed_commands', { networks: updatedNetworks });
       if (!r.ok) {
         const err = await r.json();
