@@ -2523,12 +2523,20 @@ function newNetworkRules() {
 }
 
 /**
+ * Closes whichever inline editor is currently open, if any. Editors replace
+ * each other so a field left open by a failed blur save never blocks the table.
+ */
+let activeInlineEditor = null;
+
+/**
  * Make a Network Rules table cell inline-editable.
  *
- * Clicking the cell turns its text into a field. Enter or Ctrl/Cmd+Enter
- * validates the value and saves it; an invalid or rejected value keeps the
- * field editable with the wrong text and an inline message; Escape and blur
- * cancel back to the stored value. Only one inline editor is open at a time.
+ * Clicking the cell turns its text into a field. Enter, Ctrl/Cmd+Enter and
+ * losing focus all validate the value and save it; an invalid or rejected
+ * value keeps the field editable with the wrong text and an inline message
+ * (an error toast when the field was already abandoned); Escape cancels back
+ * to the stored value. Only one inline editor is open at a time: opening
+ * another one closes the previous editor to its stored value.
  *
  * @param {HTMLTableCellElement} cell - the cell to make editable
  * @param {Object} spec - editor behaviour
@@ -2553,8 +2561,8 @@ function attachInlineEditor(cell, spec) {
 
   function open() {
     if (editing) return;
-    // Only one inline editor may be open at a time.
-    if (document.querySelector('td.is-editing')) return;
+    // Only one inline editor may be open at a time: the previous one gives way.
+    if (activeInlineEditor) activeInlineEditor();
 
     editing = true;
     cell.classList.add('is-editing');
@@ -2581,17 +2589,34 @@ function attachInlineEditor(cell, spec) {
       editing = false;
       cell.classList.remove('is-editing');
       cell.textContent = text;
+      if (activeInlineEditor === closer) activeInlineEditor = null;
     }
 
-    /** Show the inline error and keep the field editable. */
+    /** Abandon the editor (another cell was clicked): stored value comes back. */
+    const closer = () => {
+      if (handled || busy) return;
+      handled = true;
+      close(spec.read());
+    };
+
+    activeInlineEditor = closer;
+
+    /**
+     * Report a failed save: inline while the field is open, as an error toast
+     * once another editor has taken over.
+     */
     function showError(message) {
+      if (!editing) {
+        showToast(message, 'error');
+        return;
+      }
       errorP.textContent = message;
       errorP.classList.remove('hidden');
       input.classList.add('border-red-500');
       input.classList.remove('border-gray-300');
     }
 
-    /** Validate, then persist the value (Enter / Ctrl+Enter). */
+    /** Validate, then persist the value (Enter, Ctrl+Enter, or blur). */
     async function save() {
       if (handled) return;
       const value = input.value.trim();
@@ -2636,11 +2661,11 @@ function attachInlineEditor(cell, spec) {
       }
     });
 
-    // Losing focus cancels: the stored value comes back, no request is sent.
+    // Losing focus saves, exactly like Enter: a rejected value keeps the field
+    // open with the wrong text and the inline message.
     input.addEventListener('blur', () => {
       if (handled || busy) return;
-      handled = true;
-      close(spec.read());
+      save();
     });
   }
 
