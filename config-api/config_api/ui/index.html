@@ -1458,28 +1458,47 @@ function renderCommandsCell(cell, commands, sudoAllowed, inherited) {
   const sudoAll = flags.includes(SUDO_ALLOWED_WILDCARD);
   const sudoSet = new Set(flags);
   const fromDefault = inherited instanceof Set ? inherited : null;
+  // Commands only the default rules grant are allowed here too, so the cell
+  // lists them as well: grey italic, after the rule's own commands.
+  const extra = fromDefault
+    ? [...fromDefault]
+      .filter((command) => !list.includes(command))
+      .sort((a, b) => a.localeCompare(b))
+    : [];
+  const parts = [];
 
-  cell.textContent = '';
-  if (list.length === 0) {
-    cell.textContent = '(none)';
-    return;
-  }
-  list.forEach((command, i) => {
-    if (i > 0) cell.appendChild(document.createTextNode(', '));
+  list.forEach((command) => {
     const bold = sudoAll || sudoSet.has(command);
     if (fromDefault && fromDefault.has(command)) {
       // Also granted by the default rule for these targets: italic and grey.
+      parts.push({ command, bold, italic: true });
+    } else {
+      parts.push({ command, bold, italic: false });
+    }
+  });
+  extra.forEach((command) => {
+    parts.push({ command, bold: false, italic: true });
+  });
+
+  cell.textContent = '';
+  if (parts.length === 0) {
+    cell.textContent = '(none)';
+    return;
+  }
+  parts.forEach((part, i) => {
+    if (i > 0) cell.appendChild(document.createTextNode(', '));
+    if (part.italic) {
       const span = document.createElement('span');
-      span.className = `italic text-gray-400${bold ? ' font-bold' : ''}`;
-      span.textContent = command;
+      span.className = `italic text-gray-400${part.bold ? ' font-bold' : ''}`;
+      span.textContent = part.command;
       cell.appendChild(span);
-    } else if (bold) {
+    } else if (part.bold) {
       const strong = document.createElement('strong');
       strong.className = 'font-bold';
-      strong.textContent = command;
+      strong.textContent = part.command;
       cell.appendChild(strong);
     } else {
-      cell.appendChild(document.createTextNode(command));
+      cell.appendChild(document.createTextNode(part.command));
     }
   });
 }
