@@ -313,9 +313,10 @@ The dashboard can turn those grants into a `/etc/sudoers.d` drop-in
 [`lib/sudoers.py`](../lib/sudoers.py)).  This is an operator action behind
 the Config API's authentication — it never runs during a tool call.
 
-- **Root-equivalent grants** — every entry ends in `*` (`/usr/bin/docker *`)
-  because sudoers matches the whole command line while the rule matches the
-  base name only.  A grant for `docker`, `systemctl` or `ha` is therefore
+- **Root-equivalent grants** — every entry names a bare absolute path with
+  no argument pattern (`/usr/bin/docker`), which permits any arguments.
+  sudoers matches the whole command line while the rule matches the base
+  name only, so a grant for `docker`, `systemctl` or `ha` is
   root-equivalent for that binary; the dialog says so.
 - **No unrestricted rules** — a rule with `commands: ["*"]` and
   `sudo_allowed: ["*"]` is skipped and reported, so the generated file never

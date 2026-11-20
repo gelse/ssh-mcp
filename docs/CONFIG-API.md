@@ -116,15 +116,18 @@ without editing sudoers by hand.
   commands named in its own `sudo_allowed`, because all three layers log
   in as the target's single `username`.
 - **Layout** — one grant line, no aliases:
-  `username ALL = (root) NOPASSWD: /usr/bin/a *, /usr/bin/b *, …`. The
+  `username ALL = (root) NOPASSWD: /usr/bin/a, /usr/bin/b, …`. The
   Host field is always `ALL`: sudo compares it against the local machine
   name and never matches an address, and the file only applies on the
   machine it is installed on. sudoers has no line-continuation character,
   so the line stays one line however many commands it holds.
-- **Arguments** — every entry ends in `*` (`/usr/bin/docker *`), because
-  sudoers matches the whole command line while the config matches only
-  the base name. A grant for `docker` is therefore root-equivalent for
-  that binary, which is what the rule already permits.
+- **Arguments** — each entry is a bare absolute path, with no argument
+  pattern. A command specification without a pattern permits any
+  arguments, which matches what the rule means (it names the base command
+  only) — so a grant for `docker` is root-equivalent for that binary,
+  which the rule already allows. A trailing `*` would mean the same to
+  classic sudo but is not implemented by sudo-rs before 0.2.9 (Ubuntu
+  25.10), where it makes the entry match nothing at all.
 - **Paths** — resolved live on the target over SSH (`command -v`, with a
   `PATH` scan fallback for shell builtins), so they match what the server
   executes. The target must be reachable.

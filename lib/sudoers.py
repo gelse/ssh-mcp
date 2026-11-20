@@ -187,12 +187,15 @@ def render_sudoers(
 ) -> str:
     """Render the sudoers drop-in document.
 
-    Every command specification ends in ``*``: sudoers matches the whole
-    command line, while the config matches only the command's base name, so a
-    grant without the wildcard would never match what the server actually
-    runs.  sudoers has no line-continuation character, so the grant is a
-    single line however many commands it holds.  The user specification is
-    emitted only when at least one path resolved.
+    Each command specification is a bare absolute path, with no argument
+    pattern.  A spec without a pattern permits every argument, which is what
+    the config means by granting a command name.  A trailing ``*`` would read
+    the same to classic sudo but is fatal to sudo-rs before 0.2.9, which does
+    not implement the argument wildcard and then never matches the line — so
+    the pattern is omitted rather than written out.  sudoers has no
+    line-continuation character, so the grant is a single line however many
+    commands it holds.  The user specification is emitted only when at least
+    one path resolved.
 
     Args:
         target: The target identifier.
@@ -217,9 +220,9 @@ def render_sudoers(
         f"# Generated: {stamp}",
         "#",
         "# Every entry mirrors a rule in the mcp-ssh config that allows the",
-        "# command with sudo=True. Arguments are not restricted: the config",
-        "# matches on the command name only, so any invocation of that binary",
-        "# is covered.",
+        "# command with sudo=True. A command spec without an argument pattern",
+        "# permits any arguments, so every invocation of that binary is",
+        "# covered — including the ones the server runs.",
         "#",
         "# Install on this host:",
         f"#   visudo -c -f {filename}",
@@ -239,7 +242,7 @@ def render_sudoers(
         lines.append(f"# not found on {host}: {joined}")
 
     if resolved:
-        entries = ", ".join(f"{path} *" for _, path in resolved)
+        entries = ", ".join(path for _, path in resolved)
         lines.append("")
         lines.append(f"{username} ALL = (root) NOPASSWD: {entries}")
     else:

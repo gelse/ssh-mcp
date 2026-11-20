@@ -2365,7 +2365,7 @@ class TestGenerateSudoers:
         ]
         assert doc["unresolved"] == ["ha"]
         assert (
-            "admin ALL = (root) NOPASSWD: /usr/bin/docker *" in doc["content"]
+            "admin ALL = (root) NOPASSWD: /usr/bin/docker\n" in doc["content"]
         )
         assert "# not found on 10.0.0.1: ha" in doc["content"]
         fake_ops.resolve_command_paths.assert_called_once()
@@ -2409,7 +2409,7 @@ class TestGenerateSudoers:
 
         assert doc["unresolved"] == ["docker"]
         assert any("cannot be written" in n for n in doc["notes"])
-        assert "ha *" in doc["content"]
+        assert "/usr/local/bin/ha" in doc["content"]
 
     def test_skipped_rules_are_reported(self, tmp_path: Path) -> None:
         """An unrestricted rule is skipped and surfaced in the document."""

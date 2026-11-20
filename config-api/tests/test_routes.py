@@ -2251,7 +2251,7 @@ class TestGetSudoers:
             "username": "admin",
             "host": "10.0.0.1",
             "filename": "mcp-ssh-test-server",
-            "content": "admin ALL = (root) NOPASSWD: /usr/bin/ls *\n",
+            "content": "admin ALL = (root) NOPASSWD: /usr/bin/ls\n",
             "resolved": [{"command": "ls", "path": "/usr/bin/ls"}],
             "unresolved": [],
             "skipped": [],

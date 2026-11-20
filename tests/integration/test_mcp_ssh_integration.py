@@ -2101,8 +2101,9 @@ class TestConfigApiSudoers:
             if line.startswith("testuser ALL")
         ]
         assert len(grant_lines) == 1
+        assert grant_lines[0].endswith(body["resolved"][0]["path"])
         assert (
-            f"NOPASSWD: {body['resolved'][0]['path']} *" in grant_lines[0]
+            f"NOPASSWD: {body['resolved'][0]['path']}" in grant_lines[0]
         )
         assert "Cmnd_Alias" not in body["content"]
         assert (

@@ -352,7 +352,7 @@ class TestRenderSudoers:
         assert "# Generated: 2026-11-20 12:00:00Z" in content
 
     def test_single_grant_line(self):
-        """Every path lands on one user line, each with its wildcard."""
+        """Every path lands on one user line, each a bare absolute path."""
         content = self._render(
             resolved=[
                 ("docker", "/usr/bin/docker"),
@@ -362,9 +362,10 @@ class TestRenderSudoers:
 
         assert (
             "deploy ALL = (root) NOPASSWD: "
-            "/usr/bin/docker *, /usr/local/bin/ha *" in content
+            "/usr/bin/docker, /usr/local/bin/ha\n" in content
         )
         assert "Cmnd_Alias" not in content
+        assert " *" not in content
 
     def test_install_instructions_are_in_the_file(self):
         """The operator has the exact install commands in the file."""
@@ -385,9 +386,10 @@ class TestRenderSudoers:
         ]
         assert len(grant_lines) == 1
         assert "\\" not in content
-        assert grant_lines[0].count(" *, ") == len(resolved) - 1
+        assert grant_lines[0].count(", ") == len(resolved) - 1
+        assert grant_lines[0].endswith(resolved[-1][1])
         for index, (_, path) in enumerate(resolved):
-            assert f"{path} *" in grant_lines[0], index
+            assert path in grant_lines[0], index
 
     def test_unresolved_commands_are_commented(self):
         """A command that did not resolve is noted, not rendered."""
@@ -397,7 +399,7 @@ class TestRenderSudoers:
         )
 
         assert "# not found on 10.0.0.5: ha" in content
-        assert "ha *" not in content
+        assert "/usr/local/bin/ha" not in content
 
     def test_skipped_rules_are_commented(self):
         """Skipped unrestricted rules are recorded in the file."""
