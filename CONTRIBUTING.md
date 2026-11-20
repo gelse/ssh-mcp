@@ -16,8 +16,15 @@ python3.13 -m venv .venv
 .venv/bin/python -m pip install --require-hashes -r requirements-dev.txt
 ```
 
-The `config-api/` subdirectory has its own virtualenv and tests.
-Run them with `make config-test`.
+The `config-api/` subdirectory has its own tests. `make config-test` is a
+silent no-op (it points at a non-existent venv and swallows the error), so
+run them directly:
+
+```bash
+cd config-api && ../.venv/bin/python -m pytest tests/
+```
+
+The async route tests also need `pytest-asyncio`, which is not pinned.
 
 ## Running Tests
 
@@ -25,8 +32,8 @@ Run them with `make config-test`.
 # Unit tests (full suite)
 make test
 
-# Config API tests
-make config-test
+# Config API tests (CI does not run these)
+cd config-api && ../.venv/bin/python -m pytest tests/
 
 # Integration tests (requires Docker + docker Python SDK)
 make integrationtest

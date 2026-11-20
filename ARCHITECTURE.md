@@ -469,7 +469,7 @@ gone.
 
 ## 7. File Organization
 
-The [`lib/`](lib/) directory contains 25 focused modules. All magic values
+The [`lib/`](lib/) directory contains 31 focused modules plus `__init__.py`. All magic values
 live in [`lib/constants.py`](lib/constants.py); all exceptions derive from
 [`MCPSSHError`](lib/exceptions.py:17); public symbols are re-exported via
 [`lib/__init__.py`](lib/__init__.py).
@@ -485,6 +485,7 @@ live in [`lib/constants.py`](lib/constants.py); all exceptions derive from
 | [`lib/command_security.py`](lib/command_security.py) | Dangerous pattern detection, command segmentation, redirect stripping |
 | [`lib/sanitize.py`](lib/sanitize.py) | Input sanitization for commands, target names, log strings |
 | [`lib/sudo.py`](lib/sudo.py) | `SudoHandler` — validate, wrap sudo command, password injection |
+| [`lib/sudoers.py`](lib/sudoers.py) | Pure sudoers drop-in generator: grant union, filename, single-line renderer |
 | [`lib/redos_protection.py`](lib/redos_protection.py) | Safe regex compilation and ReDoS-resistant matching |
 | [`lib/crypto.py`](lib/crypto.py) | PBKDF2-HMAC-SHA256 API-key hashing and constant-time verify |
 | [`lib/ssh_client.py`](lib/ssh_client.py) | `SSHClientManager` — connect, retry, circuit-break, key loading |

@@ -114,7 +114,7 @@ seeing it.
 new value replaces it:
 
 ```json
-{"host": "10.42.43.13", "port": 22, "username": "werner", "password": null}
+{"host": "10.0.0.10", "port": 22, "username": "deploy", "password": null}
 ```
 
 Deleting the last credential is rejected with 400 — the config needs at
