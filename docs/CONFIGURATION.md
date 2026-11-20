@@ -303,11 +303,10 @@ To force a reload, touch the config file or restart the container.
 
 The config is validated against
 [`config.schema.json`](../config.schema.json) on every load and
-write. Use `make config-test` to run the config-api test suite
-which exercises validation paths.
+write. The config-api test suite exercises validation paths:
 
 ```bash
-make config-test
+cd config-api && ../.venv/bin/python -m pytest tests/
 ```
 
 Invalid configs are rejected with descriptive error messages

@@ -146,7 +146,8 @@ ssh-mcp is configured via JSON files with hot-reload
 | Area | Details |
 |------|---------|
 | SSH targets | Host, port, username, key, password |
-| Command policies | Block patterns, per-key/network allowlists |
+| Command policies | Block patterns, per-key/network allowlists, `sudo_allowed` |
+| Privileged commands | Per-rule `sudo_allowed`; generate `/etc/sudoers.d` drop-in via the dashboard |
 | Connection pool | Max connections, idle timeout, concurrency |
 | Rate limiting | Per-IP sliding window (default 60 req/min) |
 | Logging | JSONL with rotation, gzip, multiple targets |
@@ -194,9 +195,10 @@ Security model: [`docs/SECURITY.md`](docs/SECURITY.md)
   and upload only (no directory listing or recursive transfer)
 - **Not a firewall / network ACL** — authorization is
   command-level, not network-level
-- **Does not reduce SSH account privileges** — if a command is
-  allowed, the SSH user executes it with whatever privileges
-  that account has
+- **Does not grant privileges by itself** — a command runs as the
+  configured SSH user. Privileged execution needs `sudo_allowed`
+  on the rule *and* a matching `/etc/sudoers.d` entry on the
+  host (the dashboard generates one)
 
 ---
 
@@ -231,8 +233,16 @@ Full reference: [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md)
 
 ## Config API & Dashboard
 
-An optional web dashboard for managing configuration without
-editing JSON files. Enable with `CONFIG_API_ENABLED=true`.
+An optional web dashboard for managing configuration without editing
+JSON files. Enable with `CONFIG_API_ENABLED=true`; it then mounts at
+`/api` (dashboard at `/api/ui/`, OpenAPI docs at `/api/docs`). Auth is a
+Bearer token (`CONFIG_API_TOKEN`) or a session cookie from
+`POST /api/auth/login`. The dashboard covers SSH targets (add, edit,
+delete, connectivity test, sudoers generation), block patterns, allowed
+commands, settings, API keys, and backups. Secrets are never returned:
+targets report `has_password` / `has_private_key`, and a PUT keeps a
+missing or empty credential, deletes an explicit `null`, and replaces
+any value.
 
 Full reference: [`docs/CONFIG-API.md`](docs/CONFIG-API.md)
 
@@ -302,8 +312,8 @@ optional gzip rotation.
 # Check server health
 curl http://localhost:9080/health
 
-# Validate config
-make config-test
+# Validate config (config-api suite; CI does not run it)
+cd config-api && ../.venv/bin/python -m pytest tests/
 
 # Check logs
 docker compose logs mcp-ssh

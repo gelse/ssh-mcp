@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Sudoers drop-in generator: `GET /api/config/ssh_targets/{name}/sudoers`
+  turns the configured `sudo_allowed` grants into an `/etc/sudoers.d` file
+  with paths resolved on the host; response lists resolved, unresolved,
+  skipped and invalid commands.
+- Per-credential removal in the Config API: a target's `password` or
+  `private_key` can now be deleted with an explicit `null`; missing or
+  empty keeps the stored value, and deleting the last credential is refused.
+- Dashboard: a "Sudoers" button per SSH target plus per-field removal
+  checkboxes that clear the corresponding input while ticked.
+- Duplicate command names are refused when editing allowed-command rules.
+
+### Changed
+
+- Config API writes are now read-modify-write for secrets: missing or `""`
+  keeps the stored credential, explicit `null` deletes it, any value
+  replaces it.
+
+### Security
+
+- Sudoers generation validates every interpolated name and path against
+  `SUDOERS_*` patterns; `commands: ["*"]` with `sudo_allowed: ["*"]` is
+  skipped rather than rendered as `ALL`.
+- Bare absolute paths are emitted with no argument wildcard, which is
+  unsupported by sudo-rs before 0.2.9.
+
 ## [0.3.0] - 2026-09-14
 
 ### Added
