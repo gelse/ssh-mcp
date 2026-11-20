@@ -32,14 +32,15 @@ the `/api` prefix.
 
 ## Dashboard
 
-When enabled, open `http://localhost:9080/api` in your browser to
-access the web dashboard (Tailwind CSS SPA). The dashboard provides:
+When enabled, open `http://localhost:9080/api/ui/` in your browser to
+access the web dashboard (Tailwind CSS SPA). The API's own interactive docs
+are at `/api/docs`. The dashboard provides:
 
 - SSH target management (add, edit, delete, connectivity test)
 - Block pattern editor (add, edit, reorder, delete)
 - Allowed commands editor (default, API key, network rules)
 - Settings editor with validation
-- API key hash utility
+- API key creation — the API hashes the key and the config stores only the hash
 - Backup management (list, restore, delete)
 - Config validation (dry-run)
 
@@ -99,6 +100,8 @@ Valid sections: `ssh_targets`, `block_patterns`,
 | PUT | `/api/config/ssh_targets/{name}` | Create or replace target |
 | DELETE | `/api/config/ssh_targets/{name}` | Delete target |
 | POST | `/api/config/ssh_targets/{name}/check` | Test SSH connectivity |
+
+`{name}` is a target id — the same value MCP tools take as `server_name`.
 
 ### Block patterns (requires auth)
 

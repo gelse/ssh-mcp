@@ -19,7 +19,9 @@
 #                                       the Docker image listens on 8080,
 #                                       compose maps it to host port 9080)
 #   MCP_SSH_API_KEY  API key           (required; sent as X-API-Key header)
-#   MCP_SSH_SERVER   Target server id  (default: web-server)
+#   MCP_SSH_SERVER   Target id         (default: web-server; sent as the
+#                                       tool argument "server_name", which
+#                                       names an ssh_targets entry)
 #
 # Usage:
 #   export MCP_SSH_API_KEY="your-api-key"

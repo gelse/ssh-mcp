@@ -43,6 +43,10 @@ curl -sS -X POST http://localhost:9080/mcp \
 > send `initialize`, then `notifications/initialized`, and pass the
 > `Mcp-Session-Id` header on every request. `curl-examples.sh` and the
 > Python client do this for you.
+>
+> Every tool that addresses a machine takes `server_name`, and its value is a
+> target id from `ssh_targets` — the identifier rules list under `targets`.
+> `MCP_SSH_SERVER` in the examples is that id (default `web-server`).
 
 ## Connecting an MCP client
 
@@ -87,8 +91,9 @@ docker compose up -d
 
 ### Generating an API-key hash
 
-Config files never contain raw API keys — only hashes. Generate one with the
-Config API dashboard (hash utility) or directly:
+Config files never contain raw API keys — only hashes. The Config API
+dashboard's API Key Rules tab creates a key and stores its hash for you. To
+write the hash into a config file by hand:
 
 ```bash
 docker compose exec ssh-mcp python -c \

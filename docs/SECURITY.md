@@ -149,6 +149,10 @@ All rules are compiled once into an immutable, frozen `RulesSnapshot`
 atomically as a single reference assignment on reload. A reader therefore never
 observes a partially-updated rule set, even while the config is being hot-reloaded.
 
+The whole chain evaluates one **target** — the tool call's `server_name`
+argument, which must be a key in `ssh_targets`. Rules match it under `targets`,
+and `AuthResult.target` reports it.
+
 ### 1. Block Patterns (`block_patterns`)
 
 Regex patterns defined in `config.json` that unconditionally deny commands
@@ -332,7 +336,8 @@ authorization decision correct, not just after the fact.
 
 ### Target-name sanitization (`sanitize_target_name`)
 
-`server_name` must match `[a-zA-Z0-9._-]{1,128}`. Leading/trailing whitespace
+This is the tool-level `server_name` argument, which names the target: it must
+match `[a-zA-Z0-9._-]{1,128}`. Leading/trailing whitespace
 is trimmed, then the value is validated against the regex and the
 `MAX_TARGET_NAME_LENGTH` upper bound; invalid values raise `AuthorizationError`
 and are denied at the handler boundary.
@@ -559,10 +564,10 @@ security-relevant limits:
 
 | Setting | Default | Config Key | Behaviour |
 |---------|---------|------------|-----------|
-| Global concurrency cap | 20 | `settings.pool.max_concurrent_ssh_connections` | Enforced via `threading.Semaphore`; excess checkouts receive **HTTP 503** |
-| Per-target idle cap | 5 | `settings.pool.max_connections_per_target` | Returned connections beyond this limit are closed immediately |
-| Idle timeout | 300 seconds | `settings.pool.idle_timeout_seconds` | Stale connections are evicted by a background cleanup thread |
-| Cleanup interval | 60 seconds | `settings.pool.cleanup_interval_seconds` | Frequency of the idle-eviction sweep |
+| Global concurrency cap | 20 | `settings.max_concurrent_ssh_connections` | Enforced via `threading.Semaphore`; excess checkouts receive **HTTP 503** |
+| Per-target idle cap | 5 | `settings.pool_max_connections_per_target` | Returned connections beyond this limit are closed immediately |
+| Idle timeout | 300 seconds | `settings.pool_idle_timeout_seconds` | Stale connections are evicted by a background cleanup thread |
+| Cleanup interval | 60 seconds | `settings.pool_cleanup_interval_seconds` | Frequency of the idle-eviction sweep |
 
 **Config-change invalidation:** When the config is hot-reloaded, the pool
 receives a change notification and invalidates idle connections for any
