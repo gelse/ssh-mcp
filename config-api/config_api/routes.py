@@ -60,7 +60,7 @@ COOKIE_SECURE: bool = (
     else CONFIG_API_SESSION_COOKIE_SECURE
 )
 from lib.crypto import hash_api_key
-from lib.exceptions import ConfigValidationError
+from lib.exceptions import ConfigValidationError, MCPSSHError
 
 router = APIRouter()
 auth_router = APIRouter(prefix="/auth", tags=["auth"])
@@ -481,6 +481,69 @@ async def check_ssh_target(
     except Exception as e:
         return _error_response(
             500, "SSHCheckError", "SSH connection check failed", e,
+            log_level=logging.ERROR,
+        )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/config/ssh_targets/{name}/sudoers — generate a sudoers drop-in
+# ---------------------------------------------------------------------------
+
+
+@router.get("/config/ssh_targets/{name}/sudoers")
+async def get_sudoers(
+    name: str,
+    token: str = Depends(verify_token),
+    svc: ConfigService = Depends(get_config_service),
+) -> JSONResponse:
+    """Generate a sudoers drop-in from the target's configured sudo grants.
+
+    Unions the grants of the default, API-key and network rules that apply
+    to *name*, resolves the command paths on the target over SSH, and
+    renders ``/etc/sudoers.d`` content for that one host and that one user.
+
+    Returns the document text plus the lists of resolved, unresolved and
+    skipped entries and human-readable ``notes``.  ``content`` is empty
+    when nothing resolved, so the dashboard can explain instead of
+    offering an empty file.
+    """
+    logger.debug("get_sudoers entry: name=%s", name)
+    try:
+        document = svc.generate_sudoers(name)
+        logger.debug(
+            "get_sudoers exit: name=%s resolved=%d unresolved=%d",
+            name,
+            len(document.get("resolved") or []),
+            len(document.get("unresolved") or []),
+        )
+        return JSONResponse(content=document)
+    except KeyError:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content=ErrorResponse(
+                error_type="KeyError",
+                message=f"SSH target '{name}' not found",
+            ).model_dump(),
+        )
+    except FileNotFoundError:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content=ErrorResponse(
+                error_type="FileNotFoundError",
+                message="Config file not found",
+            ).model_dump(),
+        )
+    except MCPSSHError as e:
+        return _error_response(
+            status.HTTP_502_BAD_GATEWAY,
+            type(e).__name__,
+            f"Could not resolve command paths on '{name}'",
+            e,
+            log_level=logging.ERROR,
+        )
+    except Exception as e:
+        return _error_response(
+            500, "SudoersError", "Failed to generate sudoers file", e,
             log_level=logging.ERROR,
         )
 

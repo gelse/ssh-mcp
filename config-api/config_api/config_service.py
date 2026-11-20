@@ -24,10 +24,18 @@ from lib.constants import (
     DEFAULT_CONFIG_FILENAME,
     DEFAULT_SSH_KEY_FILENAME,
     RESTRICTED_FILE_MODE,
+    SUDOERS_RESOLVE_TIMEOUT_SECONDS,
     TARGET_NAME_PATTERN,
 )
 from lib.crypto import generate_api_key, hash_api_key
 from lib.exceptions import ConfigValidationError
+from lib.sudoers import (
+    collect_sudo_grants,
+    is_sudoers_path,
+    render_sudoers,
+    sudoers_alias,
+    sudoers_filename,
+)
 
 # Attempt to import ssh_operations for direct SSH calls (unified mode).
 # In standalone mode, this import will fail and MCPClient is used instead.
@@ -314,6 +322,126 @@ class ConfigService:
                 "exit_code": -1,
                 "checkcommand": checkcommand,
             }
+
+    def generate_sudoers(
+        self,
+        name: str,
+        timeout: int = SUDOERS_RESOLVE_TIMEOUT_SECONDS,
+    ) -> dict:
+        """Build a sudoers drop-in for one SSH target.
+
+        Unions the sudo grants of every rule layer that applies to *name*
+        (see :func:`lib.sudoers.collect_sudo_grants`) and resolves the
+        resulting command names to absolute paths on the target itself.
+
+        Path resolution needs a real connection, so it is only possible in
+        **unified mode**.  In **standalone mode** every command is reported
+        as unresolved and the returned ``notes`` explain why, rather than
+        emitting a file full of guessed paths.
+
+        Args:
+            name: The SSH target identifier.
+            timeout: Connection and command timeout in seconds.
+
+        Returns:
+            A :class:`lib.types.SudoersDocument` dict: ``target``,
+            ``username``, ``host``, ``filename``, ``alias``, ``content``
+            (empty when nothing resolved), ``resolved``, ``unresolved``,
+            ``skipped``, ``invalid`` and ``notes``.
+
+        Raises:
+            KeyError: If the target does not exist.
+            FileNotFoundError: If the config file does not exist.
+            MCPSSHError: If the target cannot be reached for path resolution.
+        """
+        target = self.get_ssh_target(name)
+        username = str(target.get("username") or "")
+        host = str(target.get("host") or "")
+        config = self.read_config()
+        allowed_commands = config.get("allowed_commands")
+        if not isinstance(allowed_commands, dict):
+            allowed_commands = {}
+
+        grants = collect_sudo_grants(allowed_commands, name)
+        commands = list(grants["commands"])
+        notes: list[str] = []
+
+        document = {
+            "target": name,
+            "username": username,
+            "host": host,
+            "filename": sudoers_filename(name),
+            "alias": sudoers_alias(name),
+            "content": "",
+            "resolved": [],
+            "unresolved": [],
+            "skipped": list(grants["skipped"]),
+            "invalid": list(grants["invalid"]),
+            "notes": notes,
+        }
+
+        if grants["invalid"]:
+            notes.append(
+                "Ignored values that are not command names: "
+                + ", ".join(grants["invalid"])
+            )
+
+        if not commands:
+            notes.append(
+                f"No rule allows any command with sudo on target '{name}'."
+            )
+            return document
+
+        paths: dict[str, str | None] = {}
+        if self._use_direct_ssh:
+            paths = _ssh_operations_module.resolve_command_paths(
+                ssh_client_manager=self._ssh_client_manager,
+                config_manager=self._ssh_config_manager,
+                target_name=name,
+                ssh_key_path=self._ssh_key_path,
+                commands=commands,
+                timeout=timeout,
+            )
+        else:
+            notes.append(
+                "Path resolution needs a direct SSH connection and is "
+                "unavailable in this deployment mode, so no command could "
+                "be resolved."
+            )
+
+        resolved: list[dict] = []
+        unresolved: list[str] = []
+        for command in commands:
+            path = paths.get(command)
+            if path and is_sudoers_path(path):
+                resolved.append({"command": command, "path": path})
+            else:
+                unresolved.append(command)
+                if path:
+                    notes.append(
+                        f"Path for '{command}' ({path}) cannot be written "
+                        "into a sudoers line."
+                    )
+
+        document["resolved"] = resolved
+        document["unresolved"] = unresolved
+
+        if resolved:
+            document["content"] = render_sudoers(
+                target=name,
+                username=username,
+                host=host,
+                resolved=[(entry["command"], entry["path"]) for entry in resolved],
+                unresolved=unresolved,
+                skipped=document["skipped"],
+            )
+        else:
+            notes.append(
+                "No command could be resolved on this host, so no file was "
+                "generated."
+            )
+
+        return document
 
     def get_block_patterns(self) -> list[str]:
         """Read the block_patterns list from the config.

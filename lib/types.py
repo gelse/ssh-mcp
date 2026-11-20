@@ -126,6 +126,74 @@ class CheckConnectionResult(TypedDict):
     """The command that was executed."""
 
 
+class SudoGrants(TypedDict):
+    """Commands a target may run with ``sudo``, collected from the config.
+
+    Returned by :func:`lib.sudoers.collect_sudo_grants`.
+    """
+
+    commands: list[str]
+    """Sorted, de-duplicated command names that may run with sudo."""
+
+    skipped: list[str]
+    """Labels of rules omitted because they grant sudo for every command."""
+
+    invalid: list[str]
+    """Configured values that are not plausible command names."""
+
+
+class SudoersCommand(TypedDict):
+    """One command of a generated sudoers file, with its resolved path."""
+
+    command: str
+    """The configured command name."""
+
+    path: str
+    """Absolute path on the target, or an empty string when unresolved."""
+
+
+class SudoersDocument(TypedDict):
+    """Return type of ``GET /api/config/ssh_targets/{name}/sudoers``."""
+
+    target: str
+    """The target identifier."""
+
+    username: str
+    """The target's OS user; the only user the file grants to."""
+
+    host: str
+    """The target's configured host (header and diagnostics)."""
+
+    filename: str
+    """Suggested drop-in file name, safe for ``/etc/sudoers.d``."""
+
+    alias: str
+    """The generated ``Cmnd_Alias`` name."""
+
+    content: str
+    """The file contents, or an empty string when nothing resolved."""
+
+    resolved: list[SudoersCommand]
+    """Commands with a usable path on the target."""
+
+    unresolved: list[str]
+    """Configured sudo commands that have no usable path."""
+
+    skipped: list[str]
+    """Labels of rules omitted for granting sudo on every command."""
+
+    invalid: list[str]
+    """Configured values that are not plausible command names."""
+
+    notes: list[str]
+    """Explanations for an empty or partial document.
+
+    Empty when the document is complete.  Otherwise each entry says why
+    something is missing — no grants configured, path resolution
+    unavailable, or a resolved path sudoers cannot take.
+    """
+
+
 class HealthCheckResult(TypedDict):
     """Return type for the health-check endpoint."""
 

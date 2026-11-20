@@ -36,7 +36,8 @@ When enabled, open `http://localhost:9080/api/ui/` in your browser to
 access the web dashboard (Tailwind CSS SPA). The API's own interactive docs
 are at `/api/docs`. The dashboard provides:
 
-- SSH target management (add, edit, delete, connectivity test)
+- SSH target management (add, edit, delete, connectivity test, sudoers
+  file generation)
 - Block pattern editor (add, edit, reorder, delete)
 - Allowed commands editor (default, API key, network rules)
 - Settings editor with validation
@@ -100,8 +101,45 @@ Valid sections: `ssh_targets`, `block_patterns`,
 | PUT | `/api/config/ssh_targets/{name}` | Create or replace target |
 | DELETE | `/api/config/ssh_targets/{name}` | Delete target |
 | POST | `/api/config/ssh_targets/{name}/check` | Test SSH connectivity |
+| GET | `/api/config/ssh_targets/{name}/sudoers` | Generate a sudoers drop-in from the target's sudo grants |
 
 `{name}` is a target id — the same value MCP tools take as `server_name`.
+
+#### Sudoers generation
+
+`GET /api/config/ssh_targets/{name}/sudoers` builds a
+`/etc/sudoers.d` drop-in for one target, so `sudo=True` works on that host
+without editing sudoers by hand.
+
+- **Scope** — the union of every rule layer that applies to the target:
+  `default`, API-key and network rules. Each rule contributes only the
+  commands named in its own `sudo_allowed`, because all three layers log
+  in as the target's single `username`.
+- **User and host** — one `username ALL = (root) NOPASSWD: <Cmnd_Alias>`
+  line. The Host field is always `ALL`: sudo compares it against the
+  local machine name and never matches an address, and the file only
+  applies on the machine it is installed on.
+- **Arguments** — every entry ends in `*` (`/usr/bin/docker *`), because
+  sudoers matches the whole command line while the config matches only
+  the base name. A grant for `docker` is therefore root-equivalent for
+  that binary, which is what the rule already permits.
+- **Paths** — resolved live on the target over SSH (`command -v`, with a
+  `PATH` scan fallback for shell builtins), so they match what the server
+  executes. The target must be reachable.
+- **Unresolved commands** — commented out in the file and listed in the
+  dialog. A rule with `commands: ["*"]` and `sudo_allowed: ["*"]` is
+  skipped and reported: the file never grants `ALL`.
+- **Empty result** — when no command resolves, `content` is empty and
+  `notes` explain why, so the dashboard can show the reason instead of an
+  unusable file.
+
+The response carries `target`, `username`, `host`, `filename`, `alias`,
+`content`, `resolved`, `unresolved`, `skipped`, `invalid` and `notes`.
+Path resolution needs direct SSH access: in a deployment where the config
+API reaches the MCP server over HTTP only, every command is reported as
+unresolved and no file is produced.
+
+Unknown target → 404; unreachable target → 502.
 
 ### API keys (requires auth)
 

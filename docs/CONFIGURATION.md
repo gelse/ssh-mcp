@@ -140,6 +140,12 @@ rules in a `rules` list.
 When `sudo=True` is passed to `ssh_execute_command`, the command's
 base name must appear in `sudo_allowed` (or be `"*"`).
 
+The host still needs matching `/etc/sudoers` entries for those commands.
+The dashboard's **Sudoers** button on each SSH target generates a drop-in
+from exactly these grants — the union of the default, API-key and network
+rules for that target — with paths resolved on the host itself. See
+[Config API & Dashboard](CONFIG-API.md#sudoers-generation).
+
 ### API key and network entry fields
 
 | Field | Entry | Description |

@@ -1997,6 +1997,112 @@ class TestConfigApiEnabled:
             assert "type" in body or "$schema" in body
 
 
+class TestConfigApiSudoers:
+    """Tests for ``GET /api/config/ssh_targets/{name}/sudoers``."""
+
+    def _get(self, url: str, headers: dict) -> tuple[int, dict]:
+        """GET *url* and return ``(status, parsed_body)``."""
+        req = urllib.request.Request(url)
+        for key, value in headers.items():
+            req.add_header(key, value)
+        try:
+            with urllib.request.urlopen(req, timeout=30.0) as resp:
+                return resp.status, json.loads(resp.read().decode())
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read().decode() or "{}")
+
+    def _put_allowed_commands(self, base_url: str, headers: dict, body: dict) -> None:
+        """Replace the allowed_commands section through the API."""
+        data = json.dumps(body).encode()
+        req = urllib.request.Request(
+            f"{base_url}/api/config/allowed_commands",
+            data=data,
+            method="PUT",
+            headers={**headers, "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=15.0) as resp:
+            assert resp.status == 200
+
+    def test_unknown_target_returns_404(
+        self, config_api_url: str, config_api_auth_headers: dict,
+    ):
+        """An unknown target is a 404, not a 500."""
+        status, body = self._get(
+            f"{config_api_url}/api/config/ssh_targets/no-such-host/sudoers",
+            config_api_auth_headers,
+        )
+
+        assert status == 404
+        assert body["error_type"] == "KeyError"
+
+    def test_unrestricted_rule_is_skipped(
+        self, config_api_url: str, config_api_auth_headers: dict,
+    ):
+        """The seeded config grants sudo on everything, so nothing is written."""
+        status, body = self._get(
+            f"{config_api_url}/api/config/ssh_targets/testbox/sudoers",
+            config_api_auth_headers,
+        )
+
+        assert status == 200
+        assert body["target"] == "testbox"
+        assert body["username"] == "testuser"
+        assert body["filename"] == "mcp-ssh-testbox"
+        assert body["content"] == ""
+        assert body["skipped"] == ["default: sudo for every command"]
+
+    def test_resolves_command_paths_on_the_target(
+        self, config_api_url: str, config_api_auth_headers: dict,
+    ):
+        """A restricted rule is resolved over a real SSH connection."""
+        original = json.loads(
+            urllib.request.urlopen(
+                urllib.request.Request(
+                    f"{config_api_url}/api/config/allowed_commands",
+                    headers=config_api_auth_headers,
+                ),
+                timeout=10.0,
+            ).read().decode()
+        )["data"]
+        try:
+            self._put_allowed_commands(
+                config_api_url,
+                config_api_auth_headers,
+                {
+                    "default": [
+                        {
+                            "targets": ["testbox"],
+                            "commands": ["ls", "definitely-not-installed"],
+                            "sudo_allowed": ["ls", "definitely-not-installed"],
+                        }
+                    ],
+                    "networks": [],
+                },
+            )
+
+            status, body = self._get(
+                f"{config_api_url}/api/config/ssh_targets/testbox/sudoers",
+                config_api_auth_headers,
+            )
+        finally:
+            self._put_allowed_commands(
+                config_api_url,
+                config_api_auth_headers,
+                {"default": original["default"], "networks": original["networks"]},
+            )
+
+        assert status == 200
+        assert [entry["command"] for entry in body["resolved"]] == ["ls"]
+        assert body["resolved"][0]["path"].endswith("/ls")
+        assert body["unresolved"] == ["definitely-not-installed"]
+        assert "testuser ALL = (root) NOPASSWD: SSH_MCP_TESTBOX" in body["content"]
+        assert f"{body['resolved'][0]['path']} *" in body["content"]
+        assert (
+            f"# not found on {body['host']}: definitely-not-installed"
+            in body["content"]
+        )
+
+
 class TestConfigApiDisabled:
     """Tests for the config API when CONFIG_API_ENABLED=false.
 

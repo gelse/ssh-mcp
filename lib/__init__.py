@@ -131,8 +131,17 @@ from lib.ssh_operations import (
     build_auth_target,
     check_ssh_connection,
     execute_ssh_command,
+    resolve_command_paths,
 )
 from lib.sudo import SudoHandler
+from lib.sudoers import (
+    collect_sudo_grants,
+    is_command_name,
+    is_sudoers_path,
+    render_sudoers,
+    sudoers_alias,
+    sudoers_filename,
+)
 from lib.sanitize import (
     sanitize_command,
     sanitize_log_string,
@@ -151,6 +160,9 @@ from lib.types import (
     ServerInfo,
     ServerListResult,
     SSHTarget,
+    SudoersCommand,
+    SudoersDocument,
+    SudoGrants,
 )
 
 __all__ = [
@@ -294,6 +306,14 @@ __all__ = [
     "build_auth_target",
     "check_ssh_connection",
     "execute_ssh_command",
+    "resolve_command_paths",
+    # Sudoers drop-in generation
+    "collect_sudo_grants",
+    "is_command_name",
+    "is_sudoers_path",
+    "render_sudoers",
+    "sudoers_alias",
+    "sudoers_filename",
     # Types
     "ServerInfo",
     "ServerListResult",
@@ -306,4 +326,7 @@ __all__ = [
     "FileUploadResult",
     "HealthCheckResult",
     "SSHTarget",
+    "SudoGrants",
+    "SudoersCommand",
+    "SudoersDocument",
 ]
