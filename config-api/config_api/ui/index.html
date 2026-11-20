@@ -25,12 +25,11 @@
     /* Rule-group tables: one divider above each rule group, whole-group hover */
     .rule-group-start { border-top: 1px solid #e5e7eb; }
     .rule-group-hover { background-color: #f9fafb; }
-    /* Inline-editable Commands cells (Network Rules): text cursor plus a dashed
-       underline hint on hover/focus; suppressed while the editor is open so the
-       affordance never fights the editing state or the group hover highlight */
-    .commands-cell { cursor: text; }
-    .commands-cell:not(.is-editing):hover,
-    .commands-cell:not(.is-editing):focus {
+    /* Editable Commands cells (Network Rules): text cursor plus a dashed
+       underline hint on hover/focus; the cell opens the commands modal */
+    .commands-cell { cursor: pointer; }
+    .commands-cell:hover,
+    .commands-cell:focus {
       text-decoration: underline dashed;
       text-underline-offset: 3px;
     }
@@ -1074,6 +1073,8 @@ function renderDefaultRules(container, rules) {
  *   empty, a single muted placeholder row is rendered instead
  * @param {number} spec.placeholderColspan - colspan of the placeholder cell
  *   covering the Targets/Commands columns
+ * @param {boolean} [spec.showSudo] - when true, sudo-allowed commands in a
+ *   Commands cell render bold (Network Rules); other tabs stay plain text
  * @param {Function} [spec.onCommandsCell] - optional hook invoked as
  *   (cell, entry, index) for every Commands cell so a caller can make it
  *   interactive; when absent the cell stays plain text (API Key Rules)
@@ -1113,7 +1114,11 @@ function appendRuleGroupRows(tbody, spec) {
 
       const cmdsCell = document.createElement('td');
       cmdsCell.className = 'px-4 py-3 text-sm font-mono';
-      cmdsCell.textContent = renderCommandsText(rule.commands);
+      renderCommandsCell(
+        cmdsCell,
+        rule.commands,
+        spec.showSudo ? rule.sudo_allowed : []
+      );
       if (typeof spec.onCommandsCell === 'function') spec.onCommandsCell(cmdsCell, entry, i);
       row.appendChild(cmdsCell);
 
@@ -1389,42 +1394,105 @@ function renderApiKeyRules(container, apiKeys, defaultRules) {
 }
 
 // ===========================================================================
-// Inline Commands Editor (Network Rules)
+// Commands Editor (Network Rules)
 // ===========================================================================
 
+/** Wildcard marker for sudo_allowed meaning "every command in the rule". */
+const SUDO_ALLOWED_WILDCARD = '*';
+
 /**
- * Render a stored command list as read-only cell text.
+ * Render the read-only Commands cell: comma-joined commands with the
+ * sudo-allowed ones in bold.
  *
- * @param {string[]} [commands] - stored command list
- * @returns {string} comma-joined commands, or '(none)' when the list is empty
+ * @param {HTMLTableCellElement} cell - the Commands cell to fill
+ * @param {string[]} commands - stored command list
+ * @param {string[]} sudoAllowed - stored sudo_allowed list ('*' = all)
+ * @returns {void}
  */
-function renderCommandsText(commands) {
-  return (Array.isArray(commands) ? commands : []).join(', ') || '(none)';
+function renderCommandsCell(cell, commands, sudoAllowed) {
+  const list = Array.isArray(commands) ? commands : [];
+  const flags = Array.isArray(sudoAllowed) ? sudoAllowed : [];
+  const sudoAll = flags.includes(SUDO_ALLOWED_WILDCARD);
+  const sudoSet = new Set(flags);
+
+  cell.textContent = '';
+  if (list.length === 0) {
+    cell.textContent = '(none)';
+    return;
+  }
+  list.forEach((command, i) => {
+    if (i > 0) cell.appendChild(document.createTextNode(', '));
+    if (sudoAll || sudoSet.has(command)) {
+      const strong = document.createElement('strong');
+      strong.className = 'font-bold';
+      strong.textContent = command;
+      cell.appendChild(strong);
+    } else {
+      cell.appendChild(document.createTextNode(command));
+    }
+  });
 }
 
 /**
- * Parse editor content into a command list: one command per line, each line
- * trimmed, empty lines dropped; original order and duplicates are preserved.
+ * Expand a stored sudo_allowed list into one flag per command.
  *
- * @param {string} text - raw textarea content
- * @returns {string[]} parsed commands
+ * @param {string[]} commands - stored command list
+ * @param {string[]} sudoAllowed - stored sudo_allowed list ('*' = all)
+ * @returns {boolean[]} per-command sudo flags, aligned with `commands`
  */
-function parseCommandsText(text) {
-  return String(text).split('\n').map((line) => line.trim()).filter((line) => line !== '');
+function sudoFlagsFor(commands, sudoAllowed) {
+  const list = Array.isArray(commands) ? commands : [];
+  const stored = Array.isArray(sudoAllowed) ? sudoAllowed : [];
+  if (stored.includes(SUDO_ALLOWED_WILDCARD)) return list.map(() => true);
+  const sudoSet = new Set(stored);
+  return list.map((command) => sudoSet.has(command));
 }
 
 /**
- * Compare two command lists element-wise.
+ * Serialize per-command sudo flags back to a sudo_allowed list: every command
+ * checked collapses to the '*' wildcard, otherwise the explicit list is
+ * written (an empty list when nothing is checked).
  *
- * @param {string[]} a - first command list
- * @param {string[]} b - second command list
- * @returns {boolean} true when both lists hold the same commands in the same
+ * @param {string[]} commands - command list being saved
+ * @param {boolean[]} flags - per-command sudo flags
+ * @returns {string[]} the sudo_allowed value to store
+ */
+function serializeSudoAllowed(commands, flags) {
+  const checked = commands.filter((_, i) => flags[i]);
+  if (commands.length > 0 && checked.length === commands.length) {
+    return [SUDO_ALLOWED_WILDCARD];
+  }
+  return checked;
+}
+
+/**
+ * Compare two lists element-wise.
+ *
+ * @param {Array} a - first list
+ * @param {Array} b - second list
+ * @returns {boolean} true when both lists hold the same values in the same
  *   order (non-arrays are treated as empty lists)
  */
-function sameCommands(a, b) {
+function sameList(a, b) {
   const left = Array.isArray(a) ? a : [];
   const right = Array.isArray(b) ? b : [];
   return left.length === right.length && left.every((value, i) => value === right[i]);
+}
+
+/**
+ * Read the server error message from a failed response.
+ *
+ * @param {Response} res - failed response
+ * @param {string} fallback - message to use when the body has none
+ * @returns {Promise<string>} the message to display
+ */
+async function responseErrorMessage(res, fallback) {
+  try {
+    const err = await res.json();
+    return err.message || fallback;
+  } catch (e) {
+    return fallback;
+  }
 }
 
 // Editor writes are applied strictly in the order the user made them: each
@@ -1450,223 +1518,419 @@ function enqueueCommandsPut(buildNetworks) {
 }
 
 /**
- * Make one Network Rules Commands cell inline-editable.
+ * Open the modal commands editor for one Network Rules target configuration.
  *
- * Clicking or focusing the cell replaces its content with a textarea holding
- * the entry's commands one per line. Blurring saves; Ctrl+Enter/Cmd+Enter
- * saves immediately; Escape aborts and restores the previous text without any
- * API call. Only the edited entry's `commands` value ever changes: the save
- * body replaces exactly that entry (spread copy) inside exactly that network,
- * leaving targets, sudo_allowed, name, range and every other network/entry
- * untouched. An empty list deletes the entry after the existing confirm
- * dialog; the last entry of a network is refused because the schema requires
- * at least one rule. All config-derived text is written via textContent /
- * textarea.value, never innerHTML.
+ * The modal shows a table with one row per command: the command text and a
+ * sudo checkbox. A trailing empty row adds new commands; Enter moves to the
+ * next row or appends a new one, Ctrl/Cmd+Enter saves, Escape cancels.
+ * Losing focus never saves or cancels. Only this entry's `commands` and
+ * `sudo_allowed` are ever written; every other value in the payload is
+ * preserved by spreading the untouched objects.
  *
- * @param {HTMLTableCellElement} cell - the Commands cell to make editable
- * @param {Object} entry - the rule entry this cell renders
- * @param {number} entryIdx - index of the entry within its network's rules
+ * @param {HTMLTableCellElement} cell - the Commands cell that opened the modal
+ * @param {Object} entry - the rule entry being edited
+ * @param {number} entryIdx - index of that entry inside its network's rules
  * @param {Object} ctx - rendering context captured by the caller
  * @param {Object[]} ctx.networks - full in-memory networks array
  * @param {number} ctx.netIdx - index of the entry's network in `networks`
  * @param {Object[]} ctx.rules - the network's rules array
+ * @returns {void}
  */
-function makeCommandsCellEditable(cell, entry, entryIdx, ctx) {
+function openCommandsModal(cell, entry, entryIdx, ctx) {
   if (!entry || typeof entry !== 'object') return;
 
-  const storedText = () => renderCommandsText(entry.commands);
-  const targetList = Array.isArray(entry.targets) ? entry.targets : [];
+  const container = document.getElementById('modal-container');
 
+  // Overlay: deliberately inert on click — losing focus must never save,
+  // cancel or close anything.
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay fixed inset-0 z-40 flex items-center justify-center';
+
+  const card = document.createElement('div');
+  card.className = 'bg-white rounded-lg shadow-xl w-full max-w-2xl mx-4 max-h-[90vh] flex flex-col';
+  overlay.appendChild(card);
+
+  // Header: title plus Save / Delete / Cancel on the right
+  const header = document.createElement('div');
+  header.className = 'flex items-center justify-between gap-4 px-6 py-4 border-b';
+
+  const h3 = document.createElement('h3');
+  h3.className = 'text-lg font-semibold truncate flex-1 min-w-0';
+  const targetList = Array.isArray(entry.targets) ? entry.targets : [];
+  h3.textContent = `Commands for ${targetList.join(', ') || '(none)'}`;
+
+  const actions = document.createElement('div');
+  actions.className = 'flex items-center gap-2 flex-shrink-0';
+
+  const saveBtn = document.createElement('button');
+  saveBtn.type = 'button';
+  saveBtn.id = 'm-cmd-save';
+  saveBtn.className = 'px-3 py-1.5 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm';
+  saveBtn.textContent = 'Save';
+
+  const deleteBtn = document.createElement('button');
+  deleteBtn.type = 'button';
+  deleteBtn.id = 'm-cmd-delete';
+  deleteBtn.className = 'px-3 py-1.5 bg-red-600 text-white rounded hover:bg-red-700 text-sm';
+  deleteBtn.textContent = 'Delete';
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.id = 'm-cmd-cancel';
+  cancelBtn.className = 'px-3 py-1.5 text-gray-700 bg-gray-200 rounded hover:bg-gray-300 text-sm';
+  cancelBtn.textContent = 'Cancel';
+
+  actions.appendChild(saveBtn);
+  actions.appendChild(deleteBtn);
+  actions.appendChild(cancelBtn);
+  header.appendChild(h3);
+  header.appendChild(actions);
+  card.appendChild(header);
+
+  // Body: command table
+  const body = document.createElement('div');
+  body.className = 'px-6 py-4 overflow-y-auto flex-1';
+
+  const table = document.createElement('table');
+  table.id = 'm-cmd-table';
+  table.className = 'min-w-full text-sm';
+
+  const thead = document.createElement('thead');
+  const headRow = document.createElement('tr');
+  [
+    { text: 'Command', className: 'text-left font-medium text-gray-600 pb-2 pr-2' },
+    { text: 'Sudo', className: 'text-center font-medium text-gray-600 pb-2 px-2 w-16' },
+    { text: '', className: 'w-8' },
+  ].forEach((spec) => {
+    const th = document.createElement('th');
+    th.className = spec.className;
+    th.textContent = spec.text;
+    headRow.appendChild(th);
+  });
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  table.appendChild(tbody);
+  body.appendChild(table);
+
+  const errorP = document.createElement('p');
+  errorP.id = 'm-cmd-error';
+  errorP.className = 'text-red-600 text-sm mt-3 hidden';
+  body.appendChild(errorP);
+  card.appendChild(body);
+
+  container.appendChild(overlay);
+
+  const rows = [];
+
+  /** Show an inline error inside the modal, keeping the user's edits. */
+  function showError(message) {
+    errorP.textContent = message;
+    errorP.classList.remove('hidden');
+  }
+
+  /** Clear the inline error area. */
+  function clearError() {
+    errorP.textContent = '';
+    errorP.classList.add('hidden');
+  }
+
+  // True while a PUT is in flight; guards every entry point against a second
+  // request for the same edit.
+  let busy = false;
+
+  /** Enable/disable the header buttons while a request is in flight. */
+  function setBusy(next) {
+    busy = next;
+    [saveBtn, deleteBtn, cancelBtn].forEach((btn) => { btn.disabled = next; });
+    saveBtn.classList.toggle('opacity-50', next);
+    deleteBtn.classList.toggle('opacity-50', next);
+    cancelBtn.classList.toggle('opacity-50', next);
+  }
+
+  /** Close the modal without saving anything. */
+  function close() {
+    overlay.remove();
+  }
+
+  /** Turn the trailing row into a normal row (it gained content). */
+  function promoteTrailing(row) {
+    row.trailing = false;
+    row.removeBtn.disabled = false;
+    row.removeBtn.parentElement.classList.remove('invisible');
+  }
+
+  /**
+   * Append one row to the table.
+   *
+   * @param {string} command - initial command text
+   * @param {boolean} sudo - initial sudo flag
+   * @param {boolean} trailing - true for the empty "add command" row, which
+   *   cannot be removed and whose remove button is hidden
+   * @returns {Object} the row record
+   */
+  function addRow(command, sudo, trailing) {
+    const tr = document.createElement('tr');
+
+    const cmdTd = document.createElement('td');
+    cmdTd.className = 'py-1 pr-2';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.value = command || '';
+    input.className = 'w-full px-2 py-1 border border-gray-300 rounded text-sm font-mono';
+    input.setAttribute('aria-label', 'Command');
+    cmdTd.appendChild(input);
+
+    const sudoTd = document.createElement('td');
+    sudoTd.className = 'py-1 px-2 text-center';
+    const sudoBox = document.createElement('input');
+    sudoBox.type = 'checkbox';
+    sudoBox.checked = !!sudo;
+    sudoBox.className = 'h-4 w-4';
+    sudoBox.setAttribute('aria-label', 'Allow sudo');
+    sudoTd.appendChild(sudoBox);
+
+    const removeTd = document.createElement('td');
+    removeTd.className = 'py-1 text-right';
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.textContent = '\u00d7';
+    removeBtn.title = 'Remove command';
+    removeBtn.setAttribute('aria-label', 'Remove command');
+    removeBtn.className = 'text-gray-400 hover:text-red-600 text-lg leading-none px-1';
+    removeTd.appendChild(removeBtn);
+
+    tr.appendChild(cmdTd);
+    tr.appendChild(sudoTd);
+    tr.appendChild(removeTd);
+    tbody.appendChild(tr);
+
+    const row = { tr, input, sudo: sudoBox, removeBtn, trailing: !!trailing };
+    if (trailing) {
+      removeTd.classList.add('invisible');
+      removeBtn.disabled = true;
+    }
+    rows.push(row);
+
+    removeBtn.addEventListener('click', () => {
+      if (row.trailing) return;
+      const i = rows.indexOf(row);
+      if (i >= 0) rows.splice(i, 1);
+      tr.remove();
+    });
+
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        moveToNextRow(row);
+      }
+    });
+
+    return row;
+  }
+
+  /**
+   * Enter-key navigation: focus the next command field, or append a fresh
+   * empty row when already on the bottom row. An empty bottom row is a no-op
+   * so repeated Enter presses cannot stack blank rows.
+   *
+   * @param {Object} row - the row whose input received Enter
+   * @returns {void}
+   */
+  function moveToNextRow(row) {
+    const i = rows.indexOf(row);
+    if (i < 0) return;
+    if (i < rows.length - 1) {
+      rows[i + 1].input.focus();
+      return;
+    }
+    if (!row.input.value.trim()) return;
+    promoteTrailing(row);
+    const next = addRow('', false, true);
+    next.input.focus();
+  }
+
+  /**
+   * Read the table into command and sudo-flag lists. Blank rows are dropped;
+   * order and duplicates are preserved.
+   *
+   * @returns {{commands: string[], flags: boolean[]}} the parsed table
+   */
+  function readRows() {
+    const commands = [];
+    const flags = [];
+    rows.forEach((row) => {
+      const value = row.input.value.trim();
+      if (!value) return;
+      commands.push(value);
+      flags.push(row.sudo.checked);
+    });
+    return { commands, flags };
+  }
+
+  /** Save the table (header Save button, Ctrl/Cmd+Enter). */
+  async function doSave() {
+    if (busy) return;
+    clearError();
+    const { commands, flags } = readRows();
+
+    // Nothing left to store: offer to delete the target configuration.
+    if (commands.length === 0) {
+      const ok = await confirm('Are you sure you want to delete this target configuration?');
+      if (!ok) return;
+      await doDelete(true);
+      return;
+    }
+
+    if (commands.includes(SUDO_ALLOWED_WILDCARD) && commands.length > 1) {
+      showError("'*' must be the only command");
+      return;
+    }
+
+    const storedCommands = Array.isArray(entry.commands) ? entry.commands : [];
+    const storedFlags = sudoFlagsFor(storedCommands, entry.sudo_allowed);
+    if (sameList(commands, storedCommands) && sameList(flags, storedFlags)) {
+      close();
+      return;
+    }
+
+    const sudoAllowed = serializeSudoAllowed(commands, flags);
+    const previousCommands = entry.commands;
+    const previousSudo = entry.sudo_allowed;
+    // Optimistic in-memory commit keeps any queued payload current.
+    entry.commands = commands;
+    entry.sudo_allowed = sudoAllowed;
+    setBusy(true);
+
+    let res;
+    try {
+      res = await enqueueCommandsPut(() =>
+        ctx.networks.map((network, i) =>
+          i === ctx.netIdx
+            ? { ...network, rules: ctx.rules.map((rule) => ({ ...rule })) }
+            : network
+        )
+      );
+    } catch (e) {
+      entry.commands = previousCommands;
+      entry.sudo_allowed = previousSudo;
+      setBusy(false);
+      showError('Failed to save');
+      return;
+    }
+    if (!res.ok) {
+      entry.commands = previousCommands;
+      entry.sudo_allowed = previousSudo;
+      setBusy(false);
+      showError(await responseErrorMessage(res, 'Failed to save'));
+      return;
+    }
+
+    close();
+    showToast('Commands updated');
+    renderCommandsCell(cell, commands, sudoAllowed);
+  }
+
+  /**
+   * Delete this target configuration (header Delete button, empty save).
+   *
+   * @param {boolean} alreadyConfirmed - true when the caller already asked
+   * @returns {Promise<void>} resolves once the modal closed or the request
+   *   failed (the failure is shown inline and the modal stays open)
+   */
+  async function doDelete(alreadyConfirmed) {
+    if (busy) return;
+    clearError();
+    if (!alreadyConfirmed) {
+      const ok = await confirm('Are you sure you want to delete this target configuration?');
+      if (!ok) return;
+    }
+    if (ctx.rules.length <= 1) {
+      showError(
+        'A network rule needs at least one target configuration — delete the rule instead'
+      );
+      return;
+    }
+    setBusy(true);
+
+    let res;
+    try {
+      res = await enqueueCommandsPut(() =>
+        ctx.networks.map((network, i) =>
+          i === ctx.netIdx
+            ? { ...network, rules: ctx.rules.filter((_, j) => j !== entryIdx) }
+            : network
+        )
+      );
+    } catch (e) {
+      setBusy(false);
+      showError('Failed to save');
+      return;
+    }
+    if (!res.ok) {
+      setBusy(false);
+      showError(await responseErrorMessage(res, 'Failed to save'));
+      return;
+    }
+
+    close();
+    showToast('Target deleted');
+    renderRules();
+  }
+
+  saveBtn.addEventListener('click', () => { doSave(); });
+  deleteBtn.addEventListener('click', () => { doDelete(false); });
+  cancelBtn.addEventListener('click', close);
+
+  overlay.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      if (busy) return;
+      e.preventDefault();
+      e.stopPropagation();
+      close();
+      return;
+    }
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      doSave();
+    }
+  });
+
+  // Seed the table: one row per stored command, then the trailing blank row.
+  const commands = Array.isArray(entry.commands) ? entry.commands : [];
+  const flags = sudoFlagsFor(commands, entry.sudo_allowed);
+  commands.forEach((command, i) => addRow(command, flags[i], false));
+  const trailingRow = addRow('', false, true);
+  (rows.length > 1 ? rows[0].input : trailingRow.input).focus();
+}
+
+/**
+ * Make one Network Rules Commands cell open the modal editor.
+ *
+ * @param {HTMLTableCellElement} cell - the Commands cell
+ * @param {Object} entry - the rule entry this cell renders
+ * @param {number} entryIdx - index of the entry within its network's rules
+ * @param {Object} ctx - rendering context captured by the caller
+ * @returns {void}
+ */
+function attachCommandsEditor(cell, entry, entryIdx, ctx) {
+  if (!entry || typeof entry !== 'object') return;
+
+  const targets = (Array.isArray(entry.targets) ? entry.targets : []).join(', ') || '(none)';
   cell.classList.add('commands-cell');
   cell.tabIndex = 0;
   cell.title = 'Click to edit';
-  cell.setAttribute('aria-label', `Edit commands for ${targetList.join(', ') || '(none)'}`);
+  cell.setAttribute('aria-label', `Edit commands for ${targets}`);
 
-  // Skip the reopen that refocusing the cell right after Escape would trigger.
-  let suppressNextOpen = false;
-  // While a PUT is in flight the cell holds the optimistic text and reopening
-  // would edit state a later failure is about to roll back, so the cell stays
-  // read-only until the request settles.
-  let saveInFlight = false;
-
-  function openEditor() {
-    if (suppressNextOpen) {
-      suppressNextOpen = false;
-      return;
+  const open = () => openCommandsModal(cell, entry, entryIdx, ctx);
+  cell.addEventListener('click', open);
+  cell.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      open();
     }
-    if (saveInFlight) return;
-    if (cell.querySelector('textarea')) return;
-
-    const commands = Array.isArray(entry.commands) ? entry.commands : [];
-    const textarea = document.createElement('textarea');
-    textarea.value = commands.join('\n');
-    textarea.rows = Math.max(commands.length, 3);
-    textarea.className = 'w-full px-2 py-1 border border-gray-300 rounded text-sm font-mono';
-    textarea.setAttribute('aria-label', 'Commands, one per line');
-
-    // Idempotency guard: whichever of blur / Ctrl+Enter / Escape gets there
-    // first handles the edit exactly once; later triggers become no-ops.
-    let handled = false;
-
-    /** Close the editor and show `text` as the cell's read-only content. */
-    function close(text) {
-      textarea.remove();
-      cell.classList.remove('is-editing');
-      cell.textContent = text;
-    }
-
-    /** Abort the edit: restore the stored text, never call the API. */
-    function abort() {
-      if (handled) return;
-      handled = true;
-      close(storedText());
-      // Refocus the cell for keyboard users without letting its focus handler
-      // reopen the editor. focus() dispatches synchronously (consumed above);
-      // clear the flag afterwards so a skipped event cannot swallow the next
-      // legitimate focus-open.
-      suppressNextOpen = true;
-      cell.focus();
-      suppressNextOpen = false;
-    }
-
-    /** Read the server error message, falling back to `Fallback`. */
-    async function errorMessage(res, fallback) {
-      try {
-        const err = await res.json();
-        return err.message || fallback;
-      } catch (e) {
-        return fallback;
-      }
-    }
-
-    /**
-     * Parse, validate and persist the edit (blur / Ctrl+Enter entry point).
-     * Runs the edit exactly once: the guard makes later blur/Escape/Ctrl+Enter
-     * triggers no-ops, and `saveInFlight` keeps the cell read-only until the
-     * PUT settles.
-     */
-    async function commit() {
-      if (handled) return;
-      handled = true;
-      saveInFlight = true;
-      try {
-        await persist();
-      } finally {
-        saveInFlight = false;
-      }
-    }
-
-    /** Validate the parsed list and persist it (at most once per edit). */
-    async function persist() {
-      const parsed = parseCommandsText(textarea.value);
-
-      // No-op: identical list — close silently, no PUT, no toast.
-      if (sameCommands(parsed, entry.commands)) {
-        close(storedText());
-        return;
-      }
-
-      // The literal '*' wildcard is valid only as the sole command.
-      if (parsed.includes('*') && parsed.length > 1) {
-        close(storedText());
-        showToast("'*' must be the only command", 'error');
-        return;
-      }
-
-      // Empty list: this entry (targets and commands) would be deleted.
-      if (parsed.length === 0) {
-        close(storedText());
-        if (ctx.rules.length <= 1) {
-          showToast(
-            'A network rule needs at least one target configuration — delete the rule instead',
-            'error'
-          );
-          return;
-        }
-        const ok = await confirm('Do you want to delete the target?');
-        if (!ok) return;
-        let res;
-        try {
-          res = await enqueueCommandsPut(() =>
-            ctx.networks.map((network, i) =>
-              i === ctx.netIdx
-                ? { ...network, rules: ctx.rules.filter((_, j) => j !== entryIdx) }
-                : network
-            )
-          );
-        } catch (e) {
-          showToast('Failed to save', 'error');
-          return;
-        }
-        if (!res.ok) {
-          showToast(await errorMessage(res, 'Failed to save'), 'error');
-          return;
-        }
-        showToast('Target deleted');
-        renderRules();
-        return;
-      }
-
-      // Regular save: optimistic in-memory commit + read-only view, both
-      // reverted if the server refuses. Committing before the await keeps
-      // every later payload built from current state, so concurrent edits
-      // (or the Edit modal opened mid-save) never see stale commands.
-      const previous = entry.commands;
-      entry.commands = parsed;
-      close(parsed.join(', '));
-      let res;
-      try {
-        res = await enqueueCommandsPut(() =>
-          ctx.networks.map((network, i) =>
-            i === ctx.netIdx
-              ? {
-                  ...network,
-                  rules: ctx.rules.map((rule, j) =>
-                    j === entryIdx ? { ...rule, commands: parsed } : rule
-                  ),
-                }
-              : network
-          )
-        );
-      } catch (e) {
-        entry.commands = previous;
-        close(storedText());
-        showToast('Failed to save', 'error');
-        return;
-      }
-      if (!res.ok) {
-        entry.commands = previous;
-        close(storedText());
-        showToast(await errorMessage(res, 'Failed to save'), 'error');
-        return;
-      }
-      showToast('Commands updated');
-    }
-
-    textarea.addEventListener('blur', () => {
-      commit();
-    });
-    textarea.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        e.stopPropagation();
-        abort();
-        return;
-      }
-      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-        e.preventDefault();
-        commit();
-      }
-    });
-
-    cell.classList.add('is-editing');
-    cell.textContent = '';
-    cell.appendChild(textarea);
-    textarea.focus();
-  }
-
-  cell.addEventListener('click', openEditor);
-  cell.addEventListener('focus', openEditor);
+  });
 }
 
 function renderNetworkRules(container, networks) {
@@ -1796,8 +2060,9 @@ function renderNetworkRules(container, networks) {
       trailing: [actionsCell],
       entries: rules,
       placeholderColspan: 2,
+      showSudo: true,
       onCommandsCell: (cmdsCell, entry, entryIdx) =>
-        makeCommandsCellEditable(cmdsCell, entry, entryIdx, { networks, netIdx: idx, rules }),
+        attachCommandsEditor(cmdsCell, entry, entryIdx, { networks, netIdx: idx, rules }),
     });
   });
 
