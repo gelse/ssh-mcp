@@ -100,6 +100,24 @@ Valid sections: `ssh_targets`, `block_patterns`,
 | DELETE | `/api/config/ssh_targets/{name}` | Delete target |
 | POST | `/api/config/ssh_targets/{name}/check` | Test SSH connectivity |
 
+### API keys (requires auth)
+
+API keys are written one entry at a time. The key hash never leaves the
+server, so a section PUT that round-trips the whole `api_keys` array
+cannot work and is rejected.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/config/api_keys` | Create a key from `{"name", "target"}`; the secret is generated server-side and returned once, with `ls` allowed on the target |
+| PUT | `/api/config/api_keys/{name}` | Replace that key's rules with `{"rules": [...]}` |
+| DELETE | `/api/config/api_keys/{name}` | Delete the key |
+
+The name identifies the entry and cannot be changed, `key_hash` is never
+returned, and every write goes through full config validation. A
+`PUT /api/config/allowed_commands` body containing `api_keys` is
+rejected with 400; write `default` and `networks` there, and keys through
+the endpoints above.
+
 ### Block patterns (requires auth)
 
 | Method | Path | Description |

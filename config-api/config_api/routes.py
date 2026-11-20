@@ -486,6 +486,202 @@ async def check_ssh_target(
 
 
 # ---------------------------------------------------------------------------
+# API key rules — per-key CRUD (the hash never leaves the server)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/config/api_keys")
+async def create_api_key(
+    request: Request,
+    token: str = Depends(verify_token),
+    svc: ConfigService = Depends(get_config_service),
+) -> JSONResponse:
+    """Create an API key and return its generated secret exactly once.
+
+    The body carries ``{"name": ..., "target": ...}``; the key itself is
+    generated here, hashed for storage, and returned in the response so the
+    operator can copy it. The first rule allows ``ls`` on *target*.
+    """
+    logger.debug("create_api_key entry")
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content=ErrorResponse(
+                error_type="JSONDecodeError",
+                message="Request body must be valid JSON",
+            ).model_dump(),
+        )
+
+    if not isinstance(body, dict):
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content=ErrorResponse(
+                error_type="ValidationError",
+                message="Request body must be a JSON object",
+            ).model_dump(),
+        )
+
+    name = body.get("name")
+    target = body.get("target")
+    if not isinstance(name, str) or not isinstance(target, str):
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content=ErrorResponse(
+                error_type="ValidationError",
+                message="'name' and 'target' must be strings",
+            ).model_dump(),
+        )
+
+    try:
+        created = svc.create_api_key(name, target)
+        logger.debug("create_api_key exit: name=%s, success", created["name"])
+        return JSONResponse(
+            status_code=status.HTTP_201_CREATED,
+            content=created,
+            headers={"Cache-Control": "no-store"},
+        )
+    except ValueError as e:
+        # These messages are ours (blank name, duplicate, …) and safe to show.
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content=ErrorResponse(
+                error_type="ValueError",
+                message=str(e),
+            ).model_dump(),
+        )
+    except ConfigValidationError as e:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content=ErrorResponse(
+                error_type="ConfigValidationError",
+                message=str(e),
+                field=getattr(e, "field", None),
+            ).model_dump(),
+        )
+    except FileNotFoundError:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content=ErrorResponse(
+                error_type="FileNotFoundError",
+                message="Config file not found",
+            ).model_dump(),
+        )
+
+
+@router.put("/config/api_keys/{name}")
+async def put_api_key_rules(
+    name: str,
+    request: Request,
+    token: str = Depends(verify_token),
+    svc: ConfigService = Depends(get_config_service),
+) -> JSONResponse:
+    """Replace the rule list of one API key by name.
+
+    The name is the key's identity and cannot change; ``key_hash`` is never
+    accepted or returned.
+    """
+    logger.debug("put_api_key_rules entry: name=%s", name)
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content=ErrorResponse(
+                error_type="JSONDecodeError",
+                message="Request body must be valid JSON",
+            ).model_dump(),
+        )
+
+    if not isinstance(body, dict) or "rules" not in body:
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content=ErrorResponse(
+                error_type="ValidationError",
+                message="Request body must be an object with a 'rules' key",
+            ).model_dump(),
+        )
+
+    try:
+        updated = svc.put_api_key_rules(name, body["rules"])
+        logger.debug("put_api_key_rules exit: name=%s, success", name)
+        return JSONResponse(content=updated)
+    except KeyError:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content=ErrorResponse(
+                error_type="KeyError",
+                message=f"API key '{name}' not found",
+            ).model_dump(),
+        )
+    except ValueError as e:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content=ErrorResponse(
+                error_type="ValueError",
+                message=str(e),
+            ).model_dump(),
+        )
+    except ConfigValidationError as e:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content=ErrorResponse(
+                error_type="ConfigValidationError",
+                message=str(e),
+                field=getattr(e, "field", None),
+            ).model_dump(),
+        )
+    except FileNotFoundError:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content=ErrorResponse(
+                error_type="FileNotFoundError",
+                message="Config file not found",
+            ).model_dump(),
+        )
+
+
+@router.delete("/config/api_keys/{name}")
+async def delete_api_key(
+    name: str,
+    token: str = Depends(verify_token),
+    svc: ConfigService = Depends(get_config_service),
+) -> JSONResponse:
+    """Delete one API key by name."""
+    logger.debug("delete_api_key entry: name=%s", name)
+    try:
+        svc.delete_api_key(name)
+        logger.debug("delete_api_key exit: name=%s, success", name)
+        return JSONResponse(content={"message": f"API key '{name}' deleted"})
+    except KeyError:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content=ErrorResponse(
+                error_type="KeyError",
+                message=f"API key '{name}' not found",
+            ).model_dump(),
+        )
+    except ConfigValidationError as e:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content=ErrorResponse(
+                error_type="ConfigValidationError",
+                message=str(e),
+                field=getattr(e, "field", None),
+            ).model_dump(),
+        )
+    except FileNotFoundError:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content=ErrorResponse(
+                error_type="FileNotFoundError",
+                message="Config file not found",
+            ).model_dump(),
+        )
+
+
+# ---------------------------------------------------------------------------
 # POST /api/config/block_patterns — append a block pattern
 # ---------------------------------------------------------------------------
 

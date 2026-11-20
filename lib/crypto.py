@@ -11,6 +11,7 @@ import hashlib
 import secrets
 
 from lib.constants import (
+    API_KEY_SECRET_BYTES,
     PBKDF2_ALGO,
     PBKDF2_HASH_FUNC,
     PBKDF2_ITERATIONS,
@@ -41,6 +42,18 @@ def hash_api_key(key: str) -> str:
         PBKDF2_ITERATIONS,
     )
     return f"{_PBKDF2_PREFIX}{salt.hex()}${hash_bytes.hex()}"
+
+
+def generate_api_key() -> str:
+    """Generate a new random API key.
+
+    The secret never leaves the process in hashed form: callers return it to
+    the operator once and store only :func:`hash_api_key` output.
+
+    Returns:
+        A 43-character URL-safe random string suitable as a bearer token.
+    """
+    return secrets.token_urlsafe(API_KEY_SECRET_BYTES)
 
 
 def verify_api_key(key: str, stored_hash: str) -> bool:
