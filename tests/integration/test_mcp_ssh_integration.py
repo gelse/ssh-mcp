@@ -2095,8 +2095,16 @@ class TestConfigApiSudoers:
         assert [entry["command"] for entry in body["resolved"]] == ["ls"]
         assert body["resolved"][0]["path"].endswith("/ls")
         assert body["unresolved"] == ["definitely-not-installed"]
-        assert "testuser ALL = (root) NOPASSWD: SSH_MCP_TESTBOX" in body["content"]
-        assert f"{body['resolved'][0]['path']} *" in body["content"]
+        grant_lines = [
+            line
+            for line in body["content"].splitlines()
+            if line.startswith("testuser ALL")
+        ]
+        assert len(grant_lines) == 1
+        assert (
+            f"NOPASSWD: {body['resolved'][0]['path']} *" in grant_lines[0]
+        )
+        assert "Cmnd_Alias" not in body["content"]
         assert (
             f"# not found on {body['host']}: definitely-not-installed"
             in body["content"]

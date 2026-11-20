@@ -494,22 +494,11 @@ identifiers may.
 """
 
 SUDOERS_FILENAME_UNSAFE_PATTERN: str = r"[^A-Za-z0-9_-]"
-"""Characters replaced in the generated file name and ``Cmnd_Alias`` name."""
+"""Characters replaced in the generated file name.
 
-SUDOERS_ALIAS_UNSAFE_PATTERN: str = r"[^A-Za-z0-9_]"
-"""Characters replaced in the generated ``Cmnd_Alias`` name.
-
-Stricter than the file name: sudo's lexer only accepts
-``[A-Z][A-Z0-9_]*`` for an alias, so a hyphen — legal in a file name — is a
-syntax error there.
+Only the file name is sanitized: the document itself holds a single user
+specification naming absolute paths, with no alias names to spell.
 """
-
-SUDOERS_ALIAS_PREFIX: str = "SSH_MCP_"
-"""Prefix of the generated ``Cmnd_Alias`` name; the sanitized target follows."""
-
-SUDOERS_ALIAS_KEYWORD: str = "Cmnd_Alias"
-"""Keyword that introduces an alias definition — a bare ``NAME = …`` line
-is not a definition, sudo reads it as a user specification."""
 
 SUDOERS_COMMAND_NAME_PATTERN: str = r"[A-Za-z0-9][A-Za-z0-9._+-]*"
 """Full-match pattern for a command name taken from the config.
@@ -525,16 +514,6 @@ SUDOERS_PATH_PATTERN: str = r"/[A-Za-z0-9._+/-]*"
 sudoers cannot quote a command path, so a path containing whitespace or
 other characters outside this set is reported as unresolved.
 """
-
-SUDOERS_ALIAS_LINE_WIDTH: int = 76
-"""Preferred maximum width of one rendered ``Cmnd_Alias`` line.
-
-sudoers has no line-continuation character, so a command list that does not
-fit is split into numbered aliases rather than wrapped.
-"""
-
-SUDOERS_ALIAS_SUFFIX_RESERVE: int = 4
-"""Room kept free for a ``_NN`` suffix when sizing an alias line."""
 
 SUDOERS_RESOLVE_TIMEOUT_SECONDS: int = 15
 """Timeout for the single SSH call that resolves command paths."""

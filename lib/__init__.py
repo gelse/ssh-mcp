@@ -139,7 +139,6 @@ from lib.sudoers import (
     is_command_name,
     is_sudoers_path,
     render_sudoers,
-    sudoers_alias,
     sudoers_filename,
 )
 from lib.sanitize import (
@@ -312,7 +311,6 @@ __all__ = [
     "is_command_name",
     "is_sudoers_path",
     "render_sudoers",
-    "sudoers_alias",
     "sudoers_filename",
     # Types
     "ServerInfo",

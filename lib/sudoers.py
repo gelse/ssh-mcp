@@ -20,11 +20,6 @@ import re
 from collections.abc import Iterable
 
 from lib.constants import (
-    SUDOERS_ALIAS_KEYWORD,
-    SUDOERS_ALIAS_LINE_WIDTH,
-    SUDOERS_ALIAS_PREFIX,
-    SUDOERS_ALIAS_SUFFIX_RESERVE,
-    SUDOERS_ALIAS_UNSAFE_PATTERN,
     SUDOERS_COMMAND_NAME_PATTERN,
     SUDOERS_DROPIN_DIR,
     SUDOERS_FILENAME_PREFIX,
@@ -37,7 +32,6 @@ from lib.types import SudoGrants
 _COMMAND_NAME_RE = re.compile(SUDOERS_COMMAND_NAME_PATTERN)
 _PATH_RE = re.compile(SUDOERS_PATH_PATTERN)
 _UNSAFE_RE = re.compile(SUDOERS_FILENAME_UNSAFE_PATTERN)
-_ALIAS_UNSAFE_RE = re.compile(SUDOERS_ALIAS_UNSAFE_PATTERN)
 
 #: Layers of ``allowed_commands`` that carry rules, in the order the
 #: authorization chain consults them.
@@ -168,11 +162,6 @@ def _sanitized_target(target: str) -> str:
     return _UNSAFE_RE.sub("_", target)
 
 
-def _sanitized_alias_target(target: str) -> str:
-    """Return *target* reduced to characters an alias name may contain."""
-    return _ALIAS_UNSAFE_RE.sub("_", target)
-
-
 def sudoers_filename(target: str) -> str:
     """Return the suggested drop-in file name for *target*.
 
@@ -184,72 +173,6 @@ def sudoers_filename(target: str) -> str:
         replaced by ``_``, so sudo does not skip the installed file.
     """
     return f"{SUDOERS_FILENAME_PREFIX}{_sanitized_target(target)}"
-
-
-def sudoers_alias(target: str) -> str:
-    """Return the ``Cmnd_Alias`` name generated for *target*.
-
-    Args:
-        target: The target identifier.
-
-    Returns:
-        :data:`~lib.constants.SUDOERS_ALIAS_PREFIX` plus the sanitized target
-        in upper case.  sudo's lexer only accepts ``[A-Z][A-Z0-9_]*`` for an
-        alias, so hyphens — legal in a file name — become underscores here.
-    """
-    return f"{SUDOERS_ALIAS_PREFIX}{_sanitized_alias_target(target).upper()}"
-
-
-def _alias_line(name: str, entries: list[str]) -> str:
-    """Render one ``Cmnd_Alias`` definition.
-
-    Args:
-        name: The alias name.
-        entries: Command specifications, each already ending in ``*``.
-
-    Returns:
-        ``Cmnd_Alias NAME = entry, entry`` without a trailing newline.
-    """
-    return f"{SUDOERS_ALIAS_KEYWORD} {name} = {', '.join(entries)}"
-
-
-def format_aliases(alias: str, entries: list[str]) -> tuple[list[str], list[str]]:
-    """Render the ``Cmnd_Alias`` definitions for *entries*.
-
-    sudoers has no line-continuation character: a definition must be one
-    physical line, introduced by the ``Cmnd_Alias`` keyword.  A command list
-    that would make the line too long is split into numbered aliases
-    (``SSH_MCP_X_1``, ``SSH_MCP_X_2`` …), and the user specification names
-    every one of them.  A list that fits keeps the plain alias name.
-
-    Args:
-        alias: The base alias name.
-        entries: The command specifications, each already ending in ``*``.
-
-    Returns:
-        ``(names, lines)`` — the alias names to reference in the user
-        specification, and the definition lines without trailing newline.
-    """
-    if not entries:
-        return [], []
-
-    budget = SUDOERS_ALIAS_LINE_WIDTH - SUDOERS_ALIAS_SUFFIX_RESERVE
-    chunks: list[list[str]] = []
-    current: list[str] = []
-    for entry in entries:
-        if current and len(_alias_line(alias, current + [entry])) > budget:
-            chunks.append(current)
-            current = [entry]
-        else:
-            current.append(entry)
-    chunks.append(current)
-
-    if len(chunks) == 1:
-        return [alias], [_alias_line(alias, chunks[0])]
-
-    names = [f"{alias}_{index}" for index in range(1, len(chunks) + 1)]
-    lines = [_alias_line(name, chunk) for name, chunk in zip(names, chunks)]
-    return names, lines
 
 
 def render_sudoers(
@@ -267,10 +190,9 @@ def render_sudoers(
     Every command specification ends in ``*``: sudoers matches the whole
     command line, while the config matches only the command's base name, so a
     grant without the wildcard would never match what the server actually
-    runs.  sudoers has no line-continuation character, so a long command list
-    becomes several numbered aliases rather than a wrapped definition.  The
-    user specification is emitted only when at least one path resolved — a
-    ``Cmnd_Alias`` without entries is not valid sudoers.
+    runs.  sudoers has no line-continuation character, so the grant is a
+    single line however many commands it holds.  The user specification is
+    emitted only when at least one path resolved.
 
     Args:
         target: The target identifier.
@@ -287,7 +209,6 @@ def render_sudoers(
     stamp = (generated_at or _dt.datetime.now(_dt.timezone.utc)).strftime(
         "%Y-%m-%d %H:%M:%SZ"
     )
-    alias = sudoers_alias(target)
     filename = sudoers_filename(target)
 
     lines = [
@@ -318,11 +239,9 @@ def render_sudoers(
         lines.append(f"# not found on {host}: {joined}")
 
     if resolved:
-        entries = [f"{path} *" for _, path in resolved]
-        names, alias_lines = format_aliases(alias, entries)
+        entries = ", ".join(f"{path} *" for _, path in resolved)
         lines.append("")
-        lines.extend(alias_lines)
-        lines.append(f"{username} ALL = (root) NOPASSWD: {', '.join(names)}")
+        lines.append(f"{username} ALL = (root) NOPASSWD: {entries}")
     else:
         lines.append("")
         lines.append("# No sudo command could be resolved on this host.")

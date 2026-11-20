@@ -115,15 +115,12 @@ without editing sudoers by hand.
   `default`, API-key and network rules. Each rule contributes only the
   commands named in its own `sudo_allowed`, because all three layers log
   in as the target's single `username`.
-- **User and host** — one `username ALL = (root) NOPASSWD: <Cmnd_Alias>`
-  line. The Host field is always `ALL`: sudo compares it against the
-  local machine name and never matches an address, and the file only
-  applies on the machine it is installed on.
-- **Layout** — one `Cmnd_Alias` per line. sudoers has no line-continuation
-  character, so a list too long for one line becomes numbered aliases
-  (`SSH_MCP_<TARGET>_1`, `_2`, …) that the user line names in turn. Alias
-  names use only `[A-Z0-9_]`, because sudo's lexer accepts nothing else;
-  the file name keeps hyphens.
+- **Layout** — one grant line, no aliases:
+  `username ALL = (root) NOPASSWD: /usr/bin/a *, /usr/bin/b *, …`. The
+  Host field is always `ALL`: sudo compares it against the local machine
+  name and never matches an address, and the file only applies on the
+  machine it is installed on. sudoers has no line-continuation character,
+  so the line stays one line however many commands it holds.
 - **Arguments** — every entry ends in `*` (`/usr/bin/docker *`), because
   sudoers matches the whole command line while the config matches only
   the base name. A grant for `docker` is therefore root-equivalent for
@@ -138,7 +135,7 @@ without editing sudoers by hand.
   `notes` explain why, so the dashboard can show the reason instead of an
   unusable file.
 
-The response carries `target`, `username`, `host`, `filename`, `alias`,
+The response carries `target`, `username`, `host`, `filename`,
 `content`, `resolved`, `unresolved`, `skipped`, `invalid` and `notes`.
 Path resolution needs direct SSH access: in a deployment where the config
 API reaches the MCP server over HTTP only, every command is reported as

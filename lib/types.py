@@ -167,9 +167,6 @@ class SudoersDocument(TypedDict):
     filename: str
     """Suggested drop-in file name, safe for ``/etc/sudoers.d``."""
 
-    alias: str
-    """The generated ``Cmnd_Alias`` name."""
-
     content: str
     """The file contents, or an empty string when nothing resolved."""
 

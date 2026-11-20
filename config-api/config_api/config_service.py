@@ -33,7 +33,6 @@ from lib.sudoers import (
     collect_sudo_grants,
     is_sudoers_path,
     render_sudoers,
-    sudoers_alias,
     sudoers_filename,
 )
 
@@ -345,9 +344,9 @@ class ConfigService:
 
         Returns:
             A :class:`lib.types.SudoersDocument` dict: ``target``,
-            ``username``, ``host``, ``filename``, ``alias``, ``content``
-            (empty when nothing resolved), ``resolved``, ``unresolved``,
-            ``skipped``, ``invalid`` and ``notes``.
+            ``username``, ``host``, ``filename``, ``content`` (empty when
+            nothing resolved), ``resolved``, ``unresolved``, ``skipped``,
+            ``invalid`` and ``notes``.
 
         Raises:
             KeyError: If the target does not exist.
@@ -371,7 +370,6 @@ class ConfigService:
             "username": username,
             "host": host,
             "filename": sudoers_filename(name),
-            "alias": sudoers_alias(name),
             "content": "",
             "resolved": [],
             "unresolved": [],
