@@ -27,6 +27,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from lib.constants import DEFAULT_CONFIG_FILENAME, RESTRICTED_FILE_MODE
+from lib.crypto import verify_api_key
 from lib.exceptions import ConfigValidationError
 
 
@@ -685,9 +686,17 @@ class TestWriteSection:
             },
         ]
         result = service.write_section("allowed_commands", {"networks": new_networks})
-        assert result["allowed_commands"]["networks"] == new_networks
+        assert result["allowed_commands"]["networks"] == [
+            {
+                "name": "internal",
+                "range": "10.0.0.0/8",
+                "rules": [
+                    {"targets": ["*"], "commands": ["echo"], "sudo_allowed": []},
+                ],
+            },
+        ]
         assert result["allowed_commands"]["default"] == [
-            {"targets": ["*"], "commands": ["echo", "whoami"]},
+            {"targets": ["*"], "commands": ["echo", "whoami"], "sudo_allowed": []},
         ]
 
     def test_allowed_commands_partial_default_preserves_networks(
@@ -698,43 +707,38 @@ class TestWriteSection:
             {"targets": ["*"], "commands": ["ls", "cat"]},
         ]
         result = service.write_section("allowed_commands", {"default": new_default})
-        assert result["allowed_commands"]["default"] == new_default
+        assert result["allowed_commands"]["default"] == [
+            {"targets": ["*"], "commands": ["ls", "cat"], "sudo_allowed": []},
+        ]
         assert result["allowed_commands"]["networks"] == []
 
-    def test_allowed_commands_partial_api_keys_preserves_default(
+    def test_allowed_commands_rejects_api_keys(
         self, service: "ConfigService",
     ) -> None:
-        """Writing only 'api_keys' to allowed_commands preserves 'default' rules."""
-        new_api_keys = [
-            {
-                "name": "ci-runner",
-                "key_hash": "pbkdf2:sha256:100000$abc123$abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
-                "rules": [{"targets": ["*"], "commands": ["echo"]}],
-            },
-        ]
-        result = service.write_section("allowed_commands", {"api_keys": new_api_keys})
-        assert len(result["allowed_commands"]["api_keys"]) == 1
-        assert result["allowed_commands"]["api_keys"][0]["name"] == "ci-runner"
-        assert result["allowed_commands"]["api_keys"][0]["rules"] == [
-            {"targets": ["*"], "commands": ["echo"]},
-        ]
-        assert result["allowed_commands"]["default"] == [
-            {"targets": ["*"], "commands": ["echo", "whoami"]},
-        ]
+        """API keys cannot be written through the section endpoint."""
+        new_api_keys = [{"name": "ci-runner", "rules": []}]
+        with pytest.raises(ConfigValidationError, match="cannot be written"):
+            service.write_section("allowed_commands", {"api_keys": new_api_keys})
 
-    def test_allowed_commands_full_replacement_still_works(
+    def test_allowed_commands_replaces_both_writable_sub_keys(
         self, service: "ConfigService",
     ) -> None:
-        """Writing a complete allowed_commands dict replaces all sub-keys."""
-        full_allowed = {
-            "default": [{"targets": ["*"], "commands": ["date"]}],
-            "api_keys": [],
-            "networks": [],
-        }
-        result = service.write_section("allowed_commands", full_allowed)
-        assert result["allowed_commands"]["default"] == full_allowed["default"]
-        assert result["allowed_commands"]["api_keys"] == full_allowed["api_keys"]
-        assert result["allowed_commands"]["networks"] == full_allowed["networks"]
+        """default and networks are replaced together; api_keys are untouched."""
+        service.create_api_key("ci-runner", "*")
+        result = service.write_section(
+            "allowed_commands",
+            {
+                "default": [{"targets": ["*"], "commands": ["date"]}],
+                "networks": [],
+            },
+        )
+        assert result["allowed_commands"]["default"] == [
+            {"targets": ["*"], "commands": ["date"], "sudo_allowed": []},
+        ]
+        assert result["allowed_commands"]["networks"] == []
+        assert [entry["name"] for entry in result["allowed_commands"]["api_keys"]] == [
+            "ci-runner",
+        ]
 
     def test_ssh_targets_still_full_replace(
         self, service: "ConfigService",
@@ -751,6 +755,141 @@ class TestWriteSection:
         result = service.write_section("ssh_targets", new_targets)
         assert "brand-new-server" in result["ssh_targets"]
         assert "test-server" not in result["ssh_targets"]
+
+
+# ---------------------------------------------------------------------------
+# API key operations
+# ---------------------------------------------------------------------------
+
+
+class TestApiKeyOperations:
+    """Tests for create_api_key / put_api_key_rules / delete_api_key."""
+
+    def test_create_returns_generated_secret_once(
+        self, service: "ConfigService",
+    ) -> None:
+        """create_api_key seeds ls on '*' and returns the plaintext secret."""
+        created = service.create_api_key("ci-runner", "*")
+
+        assert created["name"] == "ci-runner"
+        assert isinstance(created["key"], str)
+        assert len(created["key"]) == 43
+        assert created["rules"] == [{"targets": ["*"], "commands": ["ls"]}]
+
+    def test_create_stores_only_the_hash(
+        self, service: "ConfigService",
+    ) -> None:
+        """The plaintext key never reaches the config file."""
+        created = service.create_api_key("ci-runner", "*")
+        on_disk = json.loads(service.config_path.read_text(encoding="utf-8"))
+        entry = on_disk["allowed_commands"]["api_keys"][0]
+
+        assert created["key"] not in service.config_path.read_text(encoding="utf-8")
+        assert entry["key_hash"].startswith("pbkdf2:sha256:")
+        assert verify_api_key(created["key"], entry["key_hash"])
+
+    def test_create_seeds_the_chosen_target(
+        self, service: "ConfigService",
+    ) -> None:
+        """The first rule targets the requested SSH target."""
+        created = service.create_api_key("ci-runner", "test-server")
+        assert created["rules"] == [{"targets": ["test-server"], "commands": ["ls"]}]
+
+    def test_create_rejects_duplicate_name(
+        self, service: "ConfigService",
+    ) -> None:
+        """Names are unique across the api_keys list."""
+        service.create_api_key("ci-runner", "*")
+        with pytest.raises(ValueError, match="already exists"):
+            service.create_api_key("ci-runner", "*")
+
+    def test_create_rejects_empty_input(
+        self, service: "ConfigService",
+    ) -> None:
+        """Blank name or target is rejected before anything is written."""
+        with pytest.raises(ValueError, match="name is required"):
+            service.create_api_key("   ", "*")
+        with pytest.raises(ValueError, match="Target is required"):
+            service.create_api_key("ci-runner", "  ")
+
+    def test_create_rejects_unknown_target(
+        self, service: "ConfigService",
+    ) -> None:
+        """The seeded rule still goes through config validation."""
+        with pytest.raises(ConfigValidationError):
+            service.create_api_key("ci-runner", "nope")
+
+    def test_put_rules_replaces_the_list(
+        self, service: "ConfigService",
+    ) -> None:
+        """put_api_key_rules swaps the rules and keeps the hash."""
+        service.create_api_key("ci-runner", "*")
+        before = json.loads(service.config_path.read_text(encoding="utf-8"))
+        hash_before = before["allowed_commands"]["api_keys"][0]["key_hash"]
+
+        new_rules = [
+            {"targets": ["test-server"], "commands": ["uptime"], "sudo_allowed": ["uptime"]},
+        ]
+        updated = service.put_api_key_rules("ci-runner", new_rules)
+
+        assert updated == {"name": "ci-runner", "rules": new_rules}
+        after = json.loads(service.config_path.read_text(encoding="utf-8"))
+        entry = after["allowed_commands"]["api_keys"][0]
+        assert entry["key_hash"] == hash_before
+        assert entry["rules"] == new_rules
+
+    def test_put_rules_unknown_key_raises(
+        self, service: "ConfigService",
+    ) -> None:
+        """An unknown name is a KeyError, not a silent no-op."""
+        with pytest.raises(KeyError):
+            service.put_api_key_rules("missing", [])
+
+    def test_put_rules_requires_a_list(
+        self, service: "ConfigService",
+    ) -> None:
+        """A non-list is rejected up front."""
+        service.create_api_key("ci-runner", "*")
+        with pytest.raises(ValueError, match="must be a list"):
+            service.put_api_key_rules("ci-runner", {"targets": []})
+
+    def test_put_rules_rejects_empty_list(
+        self, service: "ConfigService",
+    ) -> None:
+        """An API key needs at least one rule."""
+        service.create_api_key("ci-runner", "*")
+        with pytest.raises(ConfigValidationError):
+            service.put_api_key_rules("ci-runner", [])
+
+    def test_delete_removes_only_that_key(
+        self, service: "ConfigService",
+    ) -> None:
+        """Deleting one key leaves the others untouched."""
+        service.create_api_key("first", "*")
+        service.create_api_key("second", "*")
+
+        service.delete_api_key("first")
+
+        on_disk = json.loads(service.config_path.read_text(encoding="utf-8"))
+        names = [entry["name"] for entry in on_disk["allowed_commands"]["api_keys"]]
+        assert names == ["second"]
+
+    def test_delete_unknown_key_raises(
+        self, service: "ConfigService",
+    ) -> None:
+        """Deleting a missing key is a KeyError."""
+        with pytest.raises(KeyError):
+            service.delete_api_key("missing")
+
+    def test_delete_last_key_leaves_an_empty_list(
+        self, service: "ConfigService",
+    ) -> None:
+        """Removing every key is valid: an empty api_keys list is allowed."""
+        service.create_api_key("only", "*")
+        service.delete_api_key("only")
+
+        on_disk = json.loads(service.config_path.read_text(encoding="utf-8"))
+        assert on_disk["allowed_commands"]["api_keys"] == []
 
 
 # ---------------------------------------------------------------------------

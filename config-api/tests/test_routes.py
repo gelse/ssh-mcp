@@ -454,8 +454,266 @@ class TestPutConfigSection:
             "/config/allowed_commands", headers=auth_headers,
         )
         data = get_resp2.json()["data"]
-        assert data["default"] == original_default
-        assert data["networks"] == new_networks
+        # Validation normalises rules with an explicit sudo_allowed list, so
+        # compare the fields the client actually controls.
+        assert [
+            {"targets": r["targets"], "commands": r["commands"]}
+            for r in data["default"]
+        ] == [
+            {"targets": r["targets"], "commands": r["commands"]}
+            for r in original_default
+        ]
+        assert data["networks"] == [
+            {
+                "name": "internal",
+                "range": "10.0.0.0/8",
+                "rules": [
+                    {"targets": ["*"], "commands": ["echo"], "sudo_allowed": []},
+                ],
+            },
+        ]
+
+    def test_put_config_section_rejects_api_keys(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """API keys must go through the per-key endpoints, not the section PUT."""
+        response = client.put(
+            "/config/allowed_commands",
+            json={"api_keys": []},
+            headers=auth_headers,
+        )
+        assert response.status_code == 400
+        body = response.json()
+        assert body["error_type"] == "ConfigValidationError"
+        assert body["field"] == "allowed_commands.api_keys"
+
+
+# ---------------------------------------------------------------------------
+# API key endpoints
+# ---------------------------------------------------------------------------
+
+
+class TestCreateApiKey:
+    """Tests for POST /config/api_keys."""
+
+    def test_creates_key_and_returns_it_once(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """201 with the generated secret and the seeded rule."""
+        response = client.post(
+            "/config/api_keys",
+            json={"name": "ci-runner", "target": "*"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 201
+        body = response.json()
+        assert body["name"] == "ci-runner"
+        assert len(body["key"]) == 43
+        assert body["rules"] == [{"targets": ["*"], "commands": ["ls"]}]
+        assert response.headers["cache-control"] == "no-store"
+
+    def test_key_is_never_read_back(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """The stored hash is neither returned by GET nor equal to the secret."""
+        created = client.post(
+            "/config/api_keys",
+            json={"name": "ci-runner", "target": "*"},
+            headers=auth_headers,
+        ).json()
+
+        config = client.get("/config", headers=auth_headers).json()
+        entry = config["allowed_commands"]["api_keys"][0]
+
+        assert entry["name"] == "ci-runner"
+        assert "key_hash" not in entry
+        assert created["key"] not in json.dumps(config)
+
+    def test_seeds_the_requested_target(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """A named target ends up in the seeded rule."""
+        response = client.post(
+            "/config/api_keys",
+            json={"name": "ci-runner", "target": "test-server"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 201
+        assert response.json()["rules"] == [
+            {"targets": ["test-server"], "commands": ["ls"]},
+        ]
+
+    def test_duplicate_name_is_rejected(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """400 when the name is taken."""
+        payload = {"name": "ci-runner", "target": "*"}
+        client.post("/config/api_keys", json=payload, headers=auth_headers)
+        response = client.post("/config/api_keys", json=payload, headers=auth_headers)
+        assert response.status_code == 400
+        assert "already exists" in response.json()["message"]
+
+    def test_blank_target_is_rejected(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """400 when the target is empty."""
+        response = client.post(
+            "/config/api_keys",
+            json={"name": "ci-runner", "target": "  "},
+            headers=auth_headers,
+        )
+        assert response.status_code == 400
+
+    def test_unknown_target_is_rejected(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """400 when the seeded rule references an unknown target."""
+        response = client.post(
+            "/config/api_keys",
+            json={"name": "ci-runner", "target": "nope"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 400
+        assert response.json()["field"] == "api_keys[0].rules[0].targets"
+
+    def test_non_string_fields_are_rejected(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """422 when name or target is not a string."""
+        response = client.post(
+            "/config/api_keys",
+            json={"name": 5, "target": "*"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 422
+
+    def test_invalid_json_is_rejected(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """422 when the body is not JSON."""
+        response = client.post(
+            "/config/api_keys",
+            content=b"{not json",
+            headers={**auth_headers, "Content-Type": "application/json"},
+        )
+        assert response.status_code == 422
+
+    def test_requires_auth(self, client: TestClient) -> None:
+        """401 without a token."""
+        response = client.post(
+            "/config/api_keys", json={"name": "ci-runner", "target": "*"},
+        )
+        assert response.status_code == 401
+
+
+class TestPutApiKeyRules:
+    """Tests for PUT /config/api_keys/{name}."""
+
+    def _create(self, client: TestClient, headers: dict[str, str]) -> str:
+        """Create a key and return its generated secret."""
+        return client.post(
+            "/config/api_keys",
+            json={"name": "ci-runner", "target": "*"},
+            headers=headers,
+        ).json()["key"]
+
+    def test_replaces_the_rule_list(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """The new rules are stored and the key keeps working."""
+        secret = self._create(client, auth_headers)
+        rules = [
+            {"targets": ["test-server"], "commands": ["uptime"], "sudo_allowed": ["uptime"]},
+        ]
+        response = client.put(
+            "/config/api_keys/ci-runner",
+            json={"rules": rules},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        assert response.json() == {"name": "ci-runner", "rules": rules}
+
+        config = client.get("/config", headers=auth_headers).json()
+        assert config["allowed_commands"]["api_keys"][0]["rules"] == rules
+
+        from lib.crypto import verify_api_key
+
+        on_disk = (client.app.state.config_service.config_path).read_text(
+            encoding="utf-8",
+        )
+        stored = json.loads(on_disk)["allowed_commands"]["api_keys"][0]["key_hash"]
+        assert verify_api_key(secret, stored)
+
+    def test_unknown_key_returns_404(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """Updating a name that does not exist is a 404."""
+        response = client.put(
+            "/config/api_keys/missing",
+            json={"rules": [{"targets": ["*"], "commands": ["ls"]}]},
+            headers=auth_headers,
+        )
+        assert response.status_code == 404
+
+    def test_empty_rule_list_is_rejected(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """An API key needs at least one rule."""
+        self._create(client, auth_headers)
+        response = client.put(
+            "/config/api_keys/ci-runner",
+            json={"rules": []},
+            headers=auth_headers,
+        )
+        assert response.status_code == 400
+
+    def test_missing_rules_key_is_rejected(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """422 when the body has no rules key."""
+        response = client.put(
+            "/config/api_keys/ci-runner",
+            json={"targets": ["*"]},
+            headers=auth_headers,
+        )
+        assert response.status_code == 422
+
+    def test_requires_auth(self, client: TestClient) -> None:
+        """401 without a token."""
+        response = client.put("/config/api_keys/ci-runner", json={"rules": []})
+        assert response.status_code == 401
+
+
+class TestDeleteApiKey:
+    """Tests for DELETE /config/api_keys/{name}."""
+
+    def test_deletes_the_key(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """200 and the entry disappears from the config."""
+        client.post(
+            "/config/api_keys",
+            json={"name": "ci-runner", "target": "*"},
+            headers=auth_headers,
+        )
+        response = client.delete("/config/api_keys/ci-runner", headers=auth_headers)
+        assert response.status_code == 200
+        assert "deleted" in response.json()["message"]
+
+        config = client.get("/config", headers=auth_headers).json()
+        assert config["allowed_commands"]["api_keys"] == []
+
+    def test_unknown_key_returns_404(
+        self, client: TestClient, auth_headers: dict[str, str],
+    ) -> None:
+        """Deleting a name that does not exist is a 404."""
+        response = client.delete("/config/api_keys/missing", headers=auth_headers)
+        assert response.status_code == 404
+
+    def test_requires_auth(self, client: TestClient) -> None:
+        """401 without a token."""
+        response = client.delete("/config/api_keys/ci-runner")
+        assert response.status_code == 401
 
 
 # ---------------------------------------------------------------------------
