@@ -908,7 +908,12 @@ async function renderRules() {
     } else if (_rulesActiveTab === 'api_keys') {
       renderApiKeyRules(content, apiKeys, defaultRules);
     } else {
-      renderNetworkRules(content, networks, Object.keys(config.ssh_targets || {}));
+      renderNetworkRules(
+        content,
+        networks,
+        Object.keys(config.ssh_targets || {}),
+        defaultRules
+      );
     }
 
   } catch (err) {
@@ -1072,6 +1077,9 @@ function renderDefaultRules(container, rules, sshTargets) {
  * @param {Function} [spec.onTargetsCell] - optional hook invoked as
  *   (cell, entry, index) for every Targets cell, used by Network Rules and
  *   Default Rules to open the targets modal
+ * @param {Function} [spec.inheritedCommands] - optional hook invoked as
+ *   (entry) returning the commands the default rules also grant to it; those
+ *   render italic and grey (Network Rules only)
  */
 function appendRuleGroupRows(tbody, spec) {
   const leading = spec.leading || [];
@@ -1112,7 +1120,10 @@ function appendRuleGroupRows(tbody, spec) {
       renderCommandsCell(
         cmdsCell,
         rule.commands,
-        spec.showSudo ? rule.sudo_allowed : []
+        spec.showSudo ? rule.sudo_allowed : [],
+        typeof spec.inheritedCommands === 'function'
+          ? spec.inheritedCommands(entry)
+          : null
       );
       if (typeof spec.onCommandsCell === 'function') spec.onCommandsCell(cmdsCell, entry, i);
       row.appendChild(cmdsCell);
@@ -1396,19 +1407,45 @@ function renderApiKeyRules(container, apiKeys, defaultRules) {
 const SUDO_ALLOWED_WILDCARD = '*';
 
 /**
+ * Collect the commands a network rule inherits from the default rules: every
+ * default rule whose targets are the same set as `targets` contributes all of
+ * its commands.
+ *
+ * @param {string[]} targets - the network rule's targets
+ * @param {Object[]} defaultRules - `allowed_commands.default`
+ * @returns {Set<string>} commands granted by matching default rules
+ */
+function defaultCommandsFor(targets, defaultRules) {
+  const wanted = new Set(Array.isArray(targets) ? targets : []);
+  const inherited = new Set();
+  (Array.isArray(defaultRules) ? defaultRules : []).forEach((rule) => {
+    const ruleTargets = Array.isArray(rule.targets) ? rule.targets : [];
+    if (ruleTargets.length !== wanted.size) return;
+    if (!ruleTargets.every((target) => wanted.has(target))) return;
+    (Array.isArray(rule.commands) ? rule.commands : []).forEach((command) => {
+      inherited.add(command);
+    });
+  });
+  return inherited;
+}
+
+/**
  * Render the read-only Commands cell: comma-joined commands with the
- * sudo-allowed ones in bold.
+ * sudo-allowed ones in bold and the ones the default rules also grant in
+ * italic grey.
  *
  * @param {HTMLTableCellElement} cell - the Commands cell to fill
  * @param {string[]} commands - stored command list
  * @param {string[]} sudoAllowed - stored sudo_allowed list ('*' = all)
+ * @param {Set<string>} [inherited] - commands the default rules also grant
  * @returns {void}
  */
-function renderCommandsCell(cell, commands, sudoAllowed) {
+function renderCommandsCell(cell, commands, sudoAllowed, inherited) {
   const list = Array.isArray(commands) ? commands : [];
   const flags = Array.isArray(sudoAllowed) ? sudoAllowed : [];
   const sudoAll = flags.includes(SUDO_ALLOWED_WILDCARD);
   const sudoSet = new Set(flags);
+  const fromDefault = inherited instanceof Set ? inherited : null;
 
   cell.textContent = '';
   if (list.length === 0) {
@@ -1417,7 +1454,14 @@ function renderCommandsCell(cell, commands, sudoAllowed) {
   }
   list.forEach((command, i) => {
     if (i > 0) cell.appendChild(document.createTextNode(', '));
-    if (sudoAll || sudoSet.has(command)) {
+    const bold = sudoAll || sudoSet.has(command);
+    if (fromDefault && fromDefault.has(command)) {
+      // Also granted by the default rule for these targets: italic and grey.
+      const span = document.createElement('span');
+      span.className = `italic text-gray-400${bold ? ' font-bold' : ''}`;
+      span.textContent = command;
+      cell.appendChild(span);
+    } else if (bold) {
       const strong = document.createElement('strong');
       strong.className = 'font-bold';
       strong.textContent = command;
@@ -1522,6 +1566,11 @@ function enqueueCommandsPut(buildBody) {
  * Losing focus never saves or cancels. Only this entry's `commands` and
  * `sudo_allowed` are ever written; every other value in the payload is
  * preserved by spreading the untouched objects.
+ *
+ * Commands that a default rule with the same targets also grants are shown
+ * but not written back: those already in the rule render as fixed text with an
+ * info marker, the remaining ones as grey italic rows that are added to the
+ * rule by clicking them.
  *
  * @param {HTMLTableCellElement} cell - the Commands cell that opened the modal
  * @param {Object} entry - the rule entry being edited
@@ -1685,70 +1734,163 @@ function openCommandsModal(cell, entry, entryIdx, ctx) {
   /**
    * Append one row to the table.
    *
-   * @param {string} command - initial command text
-   * @param {boolean} sudo - initial sudo flag
-   * @param {boolean} trailing - true for the empty "add command" row, which
+   * A row is one of three kinds:
+   * - `own`: part of the rule — editable text, sudo checkbox, remove button.
+   * - `shared`: part of the rule *and* granted by the matching default rule —
+   *   fixed text with an info marker (the rule's own sudo flag still applies)
+   *   and a remove button that drops it back to `inherited`.
+   * - `inherited`: only the default rule grants it — grey italic text with no
+   *   sudo flag and no remove button; clicking it adds it to the rule.
+   *
+   * @param {Object} spec - row specification
+   * @param {string} spec.command - command text
+   * @param {boolean} [spec.sudo] - initial sudo flag (`own` rows)
+   * @param {'own'|'shared'|'inherited'} [spec.kind] - row kind, default `own`
+   * @param {boolean} [spec.trailing] - the empty "add command" row, which
    *   cannot be removed and whose remove button is hidden
+   * @param {HTMLTableRowElement} [spec.beforeTr] - insert before this row
+   *   instead of appending
    * @returns {Object} the row record
    */
-  function addRow(command, sudo, trailing) {
+  function addRow(spec, beforeTr) {
+    const kind = spec.kind || 'own';
+    const command = spec.command || '';
     const tr = document.createElement('tr');
+    const row = {
+      tr,
+      kind,
+      command,
+      input: null,
+      sudo: null,
+      removeBtn: null,
+      trailing: !!spec.trailing,
+    };
 
     const cmdTd = document.createElement('td');
     cmdTd.className = 'py-1 pr-2';
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.value = command || '';
-    input.className = 'w-full px-2 py-1 border border-gray-300 rounded text-sm font-mono';
-    input.setAttribute('aria-label', 'Command');
-    cmdTd.appendChild(input);
+
+    if (kind === 'own') {
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.value = command;
+      input.className = 'w-full px-2 py-1 border border-gray-300 rounded text-sm font-mono';
+      input.setAttribute('aria-label', 'Command');
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey) {
+          e.preventDefault();
+          moveToNextRow(row);
+        }
+      });
+      row.input = input;
+      cmdTd.appendChild(input);
+    } else if (kind === 'shared') {
+      const wrap = el('div', 'flex items-center gap-2');
+      const text = el('span', 'font-mono text-sm');
+      text.textContent = command;
+      const info = el(
+        'span',
+        'inline-flex items-center justify-center w-4 h-4 rounded-full bg-gray-200 '
+          + 'text-gray-500 text-[10px] font-bold cursor-help select-none'
+      );
+      info.textContent = 'i';
+      info.title = 'Also allowed by the default rule';
+      info.setAttribute('aria-label', 'Also allowed by the default rule');
+      wrap.appendChild(text);
+      wrap.appendChild(info);
+      cmdTd.appendChild(wrap);
+    } else {
+      const text = el('span', 'italic text-gray-400 text-sm cursor-pointer hover:text-gray-600');
+      text.textContent = command;
+      text.title = 'Allowed by the default rule — click to add it to this rule';
+      text.addEventListener('click', () => {
+        replaceRow(row, { command, sudo: false, kind: 'own' });
+      });
+      cmdTd.appendChild(text);
+    }
 
     const sudoTd = document.createElement('td');
     sudoTd.className = 'py-1 px-2 text-center';
-    const sudoBox = document.createElement('input');
-    sudoBox.type = 'checkbox';
-    sudoBox.checked = !!sudo;
-    sudoBox.className = 'h-4 w-4';
-    sudoBox.setAttribute('aria-label', 'Allow sudo');
-    sudoTd.appendChild(sudoBox);
+    if (kind !== 'inherited') {
+      const sudoBox = document.createElement('input');
+      sudoBox.type = 'checkbox';
+      sudoBox.checked = !!spec.sudo;
+      sudoBox.className = 'h-4 w-4';
+      sudoBox.setAttribute('aria-label', 'Allow sudo');
+      row.sudo = sudoBox;
+      sudoTd.appendChild(sudoBox);
+    }
 
     const removeTd = document.createElement('td');
     removeTd.className = 'py-1 text-right';
-    const removeBtn = document.createElement('button');
-    removeBtn.type = 'button';
-    removeBtn.textContent = '\u00d7';
-    removeBtn.title = 'Remove command';
-    removeBtn.setAttribute('aria-label', 'Remove command');
-    removeBtn.className = 'text-gray-400 hover:text-red-600 text-lg leading-none px-1';
-    removeTd.appendChild(removeBtn);
+    if (kind !== 'inherited') {
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.textContent = '\u00d7';
+      removeBtn.title = 'Remove command';
+      removeBtn.setAttribute('aria-label', 'Remove command');
+      removeBtn.className = 'text-gray-400 hover:text-red-600 text-lg leading-none px-1';
+      removeBtn.addEventListener('click', () => {
+        if (row.trailing) return;
+        if (kind === 'shared') {
+          // The default rule still grants it: fall back to the inherited row.
+          replaceRow(row, { command, kind: 'inherited' });
+          return;
+        }
+        const i = rows.indexOf(row);
+        if (i >= 0) rows.splice(i, 1);
+        tr.remove();
+      });
+      row.removeBtn = removeBtn;
+      removeTd.appendChild(removeBtn);
+    }
 
     tr.appendChild(cmdTd);
     tr.appendChild(sudoTd);
     tr.appendChild(removeTd);
-    tbody.appendChild(tr);
 
-    const row = { tr, input, sudo: sudoBox, removeBtn, trailing: !!trailing };
-    if (trailing) {
+    if (spec.trailing) {
       removeTd.classList.add('invisible');
-      removeBtn.disabled = true;
+      row.removeBtn.disabled = true;
     }
-    rows.push(row);
 
-    removeBtn.addEventListener('click', () => {
-      if (row.trailing) return;
-      const i = rows.indexOf(row);
-      if (i >= 0) rows.splice(i, 1);
-      tr.remove();
-    });
-
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey) {
-        e.preventDefault();
-        moveToNextRow(row);
-      }
-    });
+    const at = beforeTr ? rows.findIndex((entry) => entry.tr === beforeTr) : -1;
+    if (at >= 0) {
+      tbody.insertBefore(tr, beforeTr);
+      rows.splice(at, 0, row);
+    } else {
+      tbody.appendChild(tr);
+      rows.push(row);
+    }
 
     return row;
+  }
+
+  /**
+   * Replace a row with one of another kind, keeping its position in the table.
+   *
+   * @param {Object} row - the row to replace
+   * @param {Object} spec - the replacement row, as accepted by addRow
+   * @returns {Object|null} the new row record, or null when the row is gone
+   */
+  function replaceRow(row, spec) {
+    const at = rows.indexOf(row);
+    if (at < 0) return null;
+    const next = addRow({ ...spec, trailing: false }, row.tr);
+    row.tr.remove();
+    const gone = rows.indexOf(row);
+    if (gone >= 0) rows.splice(gone, 1);
+    if (spec.kind === 'own' && next.input) next.input.focus();
+    return next;
+  }
+
+  /**
+   * The command a row currently represents.
+   *
+   * @param {Object} row - row record
+   * @returns {string} trimmed command text
+   */
+  function rowText(row) {
+    return (row.input ? row.input.value : row.command).trim();
   }
 
   /**
@@ -1762,13 +1904,15 @@ function openCommandsModal(cell, entry, entryIdx, ctx) {
   function moveToNextRow(row) {
     const i = rows.indexOf(row);
     if (i < 0) return;
-    if (i < rows.length - 1) {
-      rows[i + 1].input.focus();
+    // Skip rows without a field (the greyed-out inherited commands).
+    const nextField = rows.slice(i + 1).find((entry) => entry.input);
+    if (nextField) {
+      nextField.input.focus();
       return;
     }
-    if (!row.input.value.trim()) return;
+    if (!rowText(row)) return;
     promoteTrailing(row);
-    const next = addRow('', false, true);
+    const next = addRow({ command: '', trailing: true });
     next.input.focus();
   }
 
@@ -1787,7 +1931,7 @@ function openCommandsModal(cell, entry, entryIdx, ctx) {
   function applySort(direction) {
     const trailing = rows[rows.length - 1];
     const sorted = rows.slice(0, -1).sort((a, b) => {
-      const cmp = a.input.value.trim().localeCompare(b.input.value.trim());
+      const cmp = rowText(a).localeCompare(rowText(b));
       return direction === 'desc' ? -cmp : cmp;
     });
     sorted.forEach((row) => tbody.insertBefore(row.tr, trailing.tr));
@@ -1812,7 +1956,9 @@ function openCommandsModal(cell, entry, entryIdx, ctx) {
     const commands = [];
     const flags = [];
     rows.forEach((row) => {
-      const value = row.input.value.trim();
+      // Inherited rows are not part of the rule until they are clicked.
+      if (!row.sudo) return;
+      const value = rowText(row);
       if (!value) return;
       commands.push(value);
       flags.push(row.sudo.checked);
@@ -1946,12 +2092,25 @@ function openCommandsModal(cell, entry, entryIdx, ctx) {
     }
   });
 
-  // Seed the table: one row per stored command, then the trailing blank row.
+  // Seed the table: one row per stored command (marked when the default rules
+  // grant it too), one greyed row per command only the default rules grant,
+  // then the trailing blank row. With inherited commands the whole list is
+  // shown alphabetically, otherwise the stored order is kept.
   const commands = Array.isArray(entry.commands) ? entry.commands : [];
   const flags = sudoFlagsFor(commands, entry.sudo_allowed);
-  commands.forEach((command, i) => addRow(command, flags[i], false));
-  const trailingRow = addRow('', false, true);
-  (rows.length > 1 ? rows[0].input : trailingRow.input).focus();
+  const inherited = defaultCommandsFor(entry.targets, ctx.defaultRules);
+  commands.forEach((command, i) => addRow({
+    command,
+    sudo: flags[i],
+    kind: inherited.has(command) ? 'shared' : 'own',
+  }));
+  const inheritedOnly = [...inherited]
+    .filter((command) => !commands.includes(command))
+    .sort((a, b) => a.localeCompare(b));
+  inheritedOnly.forEach((command) => addRow({ command, kind: 'inherited' }));
+  const trailingRow = addRow({ command: '', trailing: true });
+  if (inheritedOnly.length > 0) applySort('asc');
+  (rows.find((row) => row.input) || trailingRow).input.focus();
 }
 
 /**
@@ -2505,13 +2664,16 @@ function seededRule() {
  * @param {Object[]} networks - all networks, mutated in place by the editors
  * @param {number} netIdx - index of the edited network in `networks`
  * @param {string[]} sshTargets - configured SSH target ids
+ * @param {Object[]} defaultRules - `allowed_commands.default`, used to show
+ *   which commands the default rules already grant to the same targets
  * @returns {Object} context shared by the targets, commands and inline editors
  */
-function networkRulesContext(networks, netIdx, sshTargets) {
+function networkRulesContext(networks, netIdx, sshTargets, defaultRules) {
   const network = networks[netIdx] || {};
   return {
     rules: network.rules || [],
     sshTargets,
+    defaultRules,
     label: network.name || `Network ${netIdx}`,
     emptyMessage:
       'A network rule needs at least one target configuration — delete the rule instead',
@@ -2768,7 +2930,7 @@ function attachNameEditor(cell, network, netIdx, ctx) {
   });
 }
 
-function renderNetworkRules(container, networks, sshTargets) {
+function renderNetworkRules(container, networks, sshTargets, defaultRules) {
   // Header
   const header = document.createElement('div');
   header.className = 'flex items-center justify-between mb-4';
@@ -2842,13 +3004,14 @@ function renderNetworkRules(container, networks, sshTargets) {
       renderRules();
     });
 
-    const rulesCtx = networkRulesContext(networks, idx, sshTargets);
+    const rulesCtx = networkRulesContext(networks, idx, sshTargets, defaultRules);
     appendRuleGroupRows(tbody, {
       leading: [nameCell, rangeCell],
       trailing: [actionsCell],
       entries: rules,
       placeholderColspan: 2,
       showSudo: true,
+      inheritedCommands: (entry) => defaultCommandsFor(entry.targets, defaultRules),
       onCommandsCell: (cmdsCell, entry, entryIdx) =>
         attachCommandsEditor(cmdsCell, entry, entryIdx, rulesCtx),
       onTargetsCell: (targetsCell, entry, entryIdx) =>
